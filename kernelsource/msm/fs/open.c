@@ -927,7 +927,9 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
      * HPZ: Print out all open operation targets to a file start with "/data"
      */
     char basename[5] = "/data";
-    if(memcmp(filename, basename, 5) == 0)
+	int length = strlen(filename);
+    if((memcmp(filename, basename, 5) == 0) && \
+				(filename[length-4] == '.' || filename[length-5] == '.'))
         printk("[HPZ]\t%s is opened.----------------HPZ\n", filename);
 
 	if (!IS_ERR(tmp)) {

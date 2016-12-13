@@ -1409,8 +1409,13 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
 	retval = vm_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	if (file)
+	if (file){
+		/* 
+		 * HPZ: Everything should be fine, but I don't understand this shit code
+		 */
+		printk("[HPZ]\tPageoff of file %s.-----------\n", file->f_path.dentry->d_name.name);
 		fput(file);
+	}
 out:
 	return retval;
 }
