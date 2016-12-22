@@ -1286,6 +1286,14 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 	inode = file ? file_inode(file) : NULL;
 
 	if (file) {
+            /* 
+		 * HPZ: Test in do_mmap_pageoff
+		 */
+           int length = strlen(file->f_path.dentry->d_name.name);
+           if (file->f_path.dentry->d_name.name[length-4] == '.' || \
+                    file->f_path.dentry->d_name.name[length-5]=='.'){
+                printk("[HPZ]\tDo Pageoff of file %s.-----------\n", file->f_path.dentry->d_name.name);
+           }
 		switch (flags & MAP_TYPE) {
 		case MAP_SHARED:
 			if ((prot&PROT_WRITE) && !(file->f_mode&FMODE_WRITE))
@@ -1413,8 +1421,12 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 		/* 
 		 * HPZ: Everything should be fine, but I don't understand this shit code
 		 */
-		printk("[HPZ]\tPageoff of file %s.-----------\n", file->f_path.dentry->d_name.name);
-		fput(file);
+           int length = strlen(file->f_path.dentry->d_name.name);
+           if (file->f_path.dentry->d_name.name[length-4] == '.' || \
+                    file->f_path.dentry->d_name.name[length-5]=='.'){
+                printk("[HPZ]\tPageoff of file %s.-----------\n", file->f_path.dentry->d_name.name);
+           }
+    	    fput(file);	
 	}
 out:
 	return retval;
@@ -1433,7 +1445,7 @@ struct mmap_arg_struct {
 SYSCALL_DEFINE1(old_mmap, struct mmap_arg_struct __user *, arg)
 {
 	struct mmap_arg_struct a;
-
+       printk("[HPZ]\t Old_MMAP is running.\n");
 	if (copy_from_user(&a, arg, sizeof(a)))
 		return -EFAULT;
 	if (a.offset & ~PAGE_MASK)
