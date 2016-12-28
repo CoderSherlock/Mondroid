@@ -1537,6 +1537,14 @@ out:
 }
 EXPORT_SYMBOL(generic_file_aio_read);
 
+/**************************
+* HPZ: Small trigger function    *
+***************************/
+unsigned long markers[100] = {0};
+void check_and_print(){
+    
+}
+
 #ifdef CONFIG_MMU
 /**
  * page_cache_read - adds requested page to the page cache if not already there

@@ -499,14 +499,16 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
                 if (length >= 5){
                         if (f.file->f_path.dentry->d_name.name[length-4] == '.' || \
                             f.file->f_path.dentry->d_name.name[length-5]=='.'){
-                            printk("[HPZ]\tREAD: %s\n", f.file->f_path.dentry->d_name.name);  // HPZ: Print the read name
+                            printk("[HPZ]\tREAD: %s/%s\n", \
+                                f.file->f_path.dentry->parent->d_name.name,\
+                                f.file->f_path.dentry->d_name.name);  // HPZ: Print the read name
                         }
-               }
-                {
+              }
+              {
 		loff_t pos = file_pos_read(f.file);
 		ret = vfs_read(f.file, buf, count, &pos);
 		file_pos_write(f.file, pos);
-                }
+              }
 		fdput(f);
 	}
 	return ret;
