@@ -1441,8 +1441,12 @@ EXPORT_SYMBOL(generic_segment_checks);
 /*********************************
 * HPZ: Small trigger function    *
 **********************************/
-unsigned long markers[100] = {0};
+
+unsigned long mem_pg_list[1000] = {0};
+int mem_pg_p = 0;
+
 static int check_and_print(void){
+	mem_pg_list[0] = 1L;
     return 1;
 }
 

@@ -917,6 +917,9 @@ struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
 }
 EXPORT_SYMBOL(file_open_root);
 
+int fd_list_p = 0;
+int fd_list[100] = {0};
+
 long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 {
 	struct open_flags op;
@@ -926,12 +929,18 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
     /*
      * HPZ: Print out all open operation targets to a file start with "/data"
      */
-    char basename[5] = "/data";
+#define OPEN_DEBUG
+#ifdef OPEN_DEBUG
+    char basename[13] = "/data/media/0";
 	int length = strlen(filename);
-    if((memcmp(filename, basename, 5) == 0) && \
-				(filename[length-4] == '.' || filename[length-5] == '.'))
-        printk("[HPZ]\t%s is opened.----------------HPZ\n", filename);
-
+	int record = 0;
+	mem_pg_list[100]=1L;
+    if((memcmp(filename, basename, 13) == 0) && \
+			(filename[length-4] == '.' || filename[length-5] == '.')){
+		record = 1;
+		printk("[HPZ]\t%s is opened.----------------HPZ\n", filename);
+	}
+#endif
 	if (!IS_ERR(tmp)) {
 		fd = get_unused_fd_flags(flags);
 		if (fd >= 0) {
@@ -946,6 +955,16 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 		}
 		putname(tmp);
 	}
+#ifdef OPEN_DEBUG	
+	if(record){
+		if(fd_list_p != FDMAX){
+			fd_list[fd_list_p] = fd;
+			fd_list_p ++;
+		}else{
+			printk("FD is full");
+		}
+	}
+#endif	
 	return fd;
 }
 
