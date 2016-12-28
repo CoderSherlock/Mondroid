@@ -495,20 +495,24 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
-                int length = strlen(f.file->f_path.dentry->d_name.name);
+		
+#ifdef READ_DEBUG
+#define h_dentry f.file->f_path.dentry
+                int length = strlen(h_dentry->d_name.name);
                 if (length >= 5){
-                        if (f.file->f_path.dentry->d_name.name[length-4] == '.' || \
-                            f.file->f_path.dentry->d_name.name[length-5]=='.'){
+                        if (h_dentry->d_name.name[length-4] == '.' || \
+                            h_dentry->d_name.name[length-5]=='.'){
                             printk("[HPZ]\tREAD: %s/%s\n", \
-                                f.file->f_path.dentry->parent->d_name.name,\
-                                f.file->f_path.dentry->d_name.name);  // HPZ: Print the read name
+                                h_dentry->d_parent->d_name.name,\
+                                h_dentry->d_name.name);  // HPZ: Print the read name
                         }
-              }
-              {
+				}
+#endif
+        {
 		loff_t pos = file_pos_read(f.file);
 		ret = vfs_read(f.file, buf, count, &pos);
 		file_pos_write(f.file, pos);
-              }
+        }
 		fdput(f);
 	}
 	return ret;
