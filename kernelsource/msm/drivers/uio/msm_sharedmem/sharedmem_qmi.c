@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -68,11 +68,47 @@ static struct msg_desc rfsa_get_buffer_addr_resp_desc = {
 	.ei_array = rfsa_get_buff_addr_resp_msg_v01_ei,
 };
 
+int get_uio_addr_size_by_name( char *name, u64 *address, u32 *size )
+{
+        int result = -ENOENT;
+        int client_found = 0;
+        struct list_head *curr_node;
+        struct shared_addr_list *list_entry;
+
+        if (size == 0)
+                return -ENOMEM;
+
+        down_read(&sharedmem_list_lock);
+
+        list_for_each(curr_node, &list.node) {
+                list_entry = list_entry(curr_node, struct shared_addr_list,
+                                        node);
+                if (  !strncmp(list_entry->entry.name, name, sizeof(list_entry->entry.name)) ) {
+                        *address = list_entry->entry.address;
+                        *size    = list_entry->entry.size;
+                        list_entry->entry.request_count++;
+                        result = 0;
+                        client_found = 1;
+                        break;
+                }
+        }
+
+        up_read(&sharedmem_list_lock);
+
+        if (client_found != 1) {
+                pr_err("Unknown client name %s\n", name);
+                result = -ENOENT;
+        }
+        return result;
+}
+
 void sharedmem_qmi_add_entry(struct sharemem_qmi_entry *qmi_entry)
 {
 	struct shared_addr_list *list_entry;
 
 	list_entry = kzalloc(sizeof(*list_entry), GFP_KERNEL);
+
+	/* If we cannot add the entry log the failure and bail */
 	if (list_entry == NULL) {
 		pr_err("Alloc of new list entry failed\n");
 		return;
@@ -276,6 +312,7 @@ static u32 fill_debug_info(char *buffer, u32 buffer_size)
 static int debug_open(struct inode *inode, struct file *file)
 {
 	u32 buffer_size;
+
 	if (debug_buffer != NULL)
 		return -EBUSY;
 	buffer_size = DEBUG_BUF_SIZE;

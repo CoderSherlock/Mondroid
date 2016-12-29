@@ -356,7 +356,7 @@ static int spich_open(struct inode *inode, struct file *filp)
 {
 	struct spich_data *spich;
 	unsigned users;
-	unsigned uid = current_uid();
+	kuid_t kuid = current_uid();
 
 	spich = container_of(inode->i_cdev, struct spich_data, cdev);
 
@@ -366,7 +366,7 @@ static int spich_open(struct inode *inode, struct file *filp)
 	/* Processes running as root (uid 0) can always open the device;
 	 * otherwise, non-root processes must wait until all other processes
 	 * close the device */
-	if ((uid != 0) && (users != 0)) {
+	if ((kuid.val != 0) && (users != 0)) {
 		--spich->users;
 		spin_unlock_irq(&spich->spi_lock);
 		return -EBUSY;
@@ -932,7 +932,7 @@ static unsigned int spich_poll(struct file *filp,
 	struct spich_data *spich;
 	unsigned int mask = 0;
 	unsigned users;
-	unsigned uid = current_uid();
+	kuid_t kuid = current_uid();
 
 	spich = filp->private_data;
 
@@ -944,7 +944,7 @@ static unsigned int spich_poll(struct file *filp,
 	 * then only the root user gets access to SPI traffic */
 	spin_lock_irq(&spich->spi_lock);
 	users = spich->users;
-	if ((uid != 0) && (users > 1)) {
+	if ((kuid.val != 0) && (users > 1)) {
 		spin_unlock_irq(&spich->spi_lock);
 		return 0;
 	}

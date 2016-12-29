@@ -919,7 +919,8 @@ struct ol_txrx_vdev_t {
 			adf_nbuf_t tail;
 			int depth;
 		} txq;
-		u_int32_t paused_reason;
+		uint32_t paused_reason;
+		uint64_t pause_timestamp;
 		adf_os_spinlock_t mutex;
 		adf_os_timer_t timer;
 		int max_q_depth;
@@ -1136,6 +1137,9 @@ struct ol_txrx_peer_t {
 	u_int16_t tx_limit_flag;
 	u_int16_t tx_pause_flag;
 #endif
+	adf_os_time_t last_assoc_rcvd;
+	adf_os_time_t last_disassoc_rcvd;
+	adf_os_time_t last_deauth_rcvd;
 	struct ol_rx_reorder_history * reorder_history;
 };
 

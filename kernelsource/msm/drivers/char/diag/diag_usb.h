@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -38,19 +38,31 @@
 
 #define DIAG_USB_MODE		0
 
+struct diag_usb_buf_tbl_t {
+	struct list_head track;
+	unsigned char *buf;
+	uint32_t len;
+	atomic_t ref_count;
+	int ctxt;
+};
+
 struct diag_usb_info {
 	int id;
 	int ctxt;
 	char name[DIAG_USB_NAME_SZ];
-	int connected;
+	atomic_t connected;
+	atomic_t diag_state;
+	atomic_t read_pending;
 	int enabled;
 	int mempool;
+	int max_size;
+	struct list_head buf_tbl;
 	unsigned long read_cnt;
 	unsigned long write_cnt;
 	spinlock_t lock;
+	spinlock_t write_lock;
 	struct usb_diag_ch *hdl;
 	struct diag_mux_ops *ops;
-	int read_pending;
 	unsigned char *read_buf;
 	struct diag_request *read_ptr;
 	struct work_struct read_work;

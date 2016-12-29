@@ -65,6 +65,9 @@
 #ifdef IPA_OFFLOAD
 #include <wlan_hdd_ipa.h>
 #endif
+#include "adf_trace.h"
+
+#include "wlan_hdd_nan_datapath.h"
 
 /*---------------------------------------------------------------------------
   Preprocessor definitions and constants
@@ -85,55 +88,8 @@ const v_U8_t hdd_QdiscAcToTlAC[] = {
 };
 
 /*---------------------------------------------------------------------------
-  Type declarations
-  -------------------------------------------------------------------------*/
-
-#ifdef FEATURE_WLAN_DIAG_SUPPORT
-#define HDD_EAPOL_ETHER_TYPE             (0x888E)
-#define HDD_EAPOL_ETHER_TYPE_OFFSET      (12)
-#define HDD_EAPOL_PACKET_TYPE_OFFSET     (15)
-#define HDD_EAPOL_KEY_INFO_OFFSET        (19)
-#define HDD_EAPOL_DEST_MAC_OFFSET        (0)
-#define HDD_EAPOL_SRC_MAC_OFFSET         (6)
-#define EAPOL_MASK                       0x8013
-#define EAPOL_M1_BIT_MASK                0x8000
-#define EAPOL_M2_BIT_MASK                0x0001
-#define EAPOL_M3_BIT_MASK                0x8013
-#define EAPOL_M4_BIT_MASK                0x0003
-#endif /* FEATURE_WLAN_DIAG_SUPPORT */
-
-/*---------------------------------------------------------------------------
   Function definitions and documentation
   -------------------------------------------------------------------------*/
-
-/**
- * wlan_hdd_is_eapol() - Function to check if frame is EAPOL or not
- * @skb:    skb data
- *
- * This function checks if the frame is an EAPOL frame or not
- *
- * Return: true (1) if packet is EAPOL
- *
- */
-static bool wlan_hdd_is_eapol(struct sk_buff *skb)
-{
-	uint16_t ether_type;
-
-	if (!skb) {
-		hddLog(VOS_TRACE_LEVEL_ERROR, FL("skb is NULL"));
-		return false;
-	}
-
-	ether_type = (uint16_t)(*(uint16_t *)
-			(skb->data + HDD_ETHERTYPE_802_1_X_FRAME_OFFSET));
-
-	if (ether_type == VOS_SWAP_U16(HDD_ETHERTYPE_802_1_X)) {
-		return true;
-	} else {
-		/* No error msg handled since this will happen often */
-		return false;
-	}
-}
 
 /**
  * wlan_hdd_is_wai() - Check if frame is EAPOL or WAPI
@@ -307,7 +263,8 @@ void hdd_tx_resume_timer_expired_handler(void *adapter_context)
    }
 
    hddLog(LOG1, FL("Enabling queues"));
-   netif_tx_wake_all_queues(pAdapter->dev);
+   wlan_hdd_netif_queue_control(pAdapter, WLAN_WAKE_ALL_NETIF_QUEUE,
+            WLAN_CONTROL_PATH);
    pAdapter->hdd_stats.hddTxRxStats.txflow_unpause_cnt++;
    pAdapter->hdd_stats.hddTxRxStats.is_txflow_paused = FALSE;
 
@@ -351,7 +308,9 @@ void hdd_tx_resume_cb(void *adapter_context,
            return;
        }
        hddLog(LOG1, FL("Enabling queues"));
-       netif_tx_wake_all_queues(pAdapter->dev);
+       wlan_hdd_netif_queue_control(pAdapter,
+            WLAN_WAKE_ALL_NETIF_QUEUE,
+            WLAN_DATA_FLOW_CONTROL);
        pAdapter->hdd_stats.hddTxRxStats.txflow_unpause_cnt++;
        pAdapter->hdd_stats.hddTxRxStats.is_txflow_paused = FALSE;
 
@@ -360,7 +319,9 @@ void hdd_tx_resume_cb(void *adapter_context,
     else if (VOS_FALSE == tx_resume)  /* Pause TX  */
     {
         hddLog(LOG1, FL("Disabling queues"));
-        netif_tx_stop_all_queues(pAdapter->dev);
+        wlan_hdd_netif_queue_control(pAdapter,
+            WLAN_STOP_ALL_NETIF_QUEUE,
+            WLAN_DATA_FLOW_CONTROL);
         if (VOS_TIMER_STATE_STOPPED ==
             vos_timer_getCurrentState(&pAdapter->tx_flow_control_timer))
         {
@@ -396,6 +357,13 @@ void hdd_tx_resume_cb(void *adapter_context,
  */
 void hdd_drop_skb(hdd_adapter_t *adapter, struct sk_buff *skb)
 {
+	DPTRACE(adf_dp_trace(skb, ADF_DP_TRACE_DROP_PACKET_RECORD,
+			(uint8_t *)skb->data, skb->len));
+	if (skb->len > ADF_DP_TRACE_RECORD_SIZE)
+		DPTRACE(adf_dp_trace(skb, ADF_DP_TRACE_DROP_PACKET_RECORD,
+				(uint8_t *)&skb->data[ADF_DP_TRACE_RECORD_SIZE],
+				(skb->len - ADF_DP_TRACE_RECORD_SIZE)));
+
 	++adapter->stats.tx_dropped;
 	++adapter->hdd_stats.hddTxRxStats.txXmitDropped;
 	kfree_skb(skb);
@@ -416,6 +384,14 @@ void hdd_drop_skb_list(hdd_adapter_t *adapter, struct sk_buff *skb,
 	struct sk_buff *skb_next;
 
 	while (skb) {
+		DPTRACE(adf_dp_trace(skb, ADF_DP_TRACE_DROP_PACKET_RECORD,
+				(uint8_t *)skb->data, skb->len));
+		if (skb->len > ADF_DP_TRACE_RECORD_SIZE)
+			DPTRACE(adf_dp_trace(skb,
+				ADF_DP_TRACE_DROP_PACKET_RECORD,
+				(uint8_t *)&skb->data[ADF_DP_TRACE_RECORD_SIZE],
+				(skb->len - ADF_DP_TRACE_RECORD_SIZE)));
+
 		++adapter->stats.tx_dropped;
 		++adapter->hdd_stats.hddTxRxStats.txXmitDropped;
 		if (is_update_ac_stats == TRUE) {
@@ -482,8 +458,8 @@ int __hdd_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
            v_MACADDR_t *pDestMacAddress = (v_MACADDR_t*)skb->data;
 
            if ( VOS_STATUS_SUCCESS !=
-               hdd_Ibss_GetStaId(&pAdapter->sessionCtx.station,
-                                 pDestMacAddress, &STAId))
+               hdd_get_peer_sta_id(&pAdapter->sessionCtx.station,
+                                   pDestMacAddress, &STAId))
            {
                STAId = HDD_WLAN_INVALID_STA_ID;
            }
@@ -502,9 +478,17 @@ int __hdd_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
                     "%s: Received Unicast frame with invalid staID", __func__);
                goto drop_pkt;
            }
-       }
-       else
-       {
+       } else if (WLAN_HDD_NDI == pAdapter->device_mode) {
+           v_MACADDR_t *pDestMacAddress = (v_MACADDR_t *)skb->data;
+           if (hdd_get_peer_sta_id(&pAdapter->sessionCtx.station,
+                                   pDestMacAddress, &STAId)
+                       != VOS_STATUS_SUCCESS) {
+               VOS_TRACE(VOS_MODULE_ID_HDD_DATA, VOS_TRACE_LEVEL_WARN,
+                         FL("Can't find peer: %pM, dropping packet"),
+                         pDestMacAddress);
+               goto drop_pkt;
+           }
+       } else {
            if (WLAN_HDD_OCB != pAdapter->device_mode
                && eConnectionState_Associated !=
                   pHddStaCtx->conn_info.connState) {
@@ -531,7 +515,8 @@ int __hdd_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
                                     pAdapter->tx_flow_low_watermark,
                                     pAdapter->tx_flow_high_watermark_offset)) {
            hddLog(LOG1, FL("Disabling queues"));
-           netif_tx_stop_all_queues(dev);
+           wlan_hdd_netif_queue_control(pAdapter, WLAN_STOP_ALL_NETIF_QUEUE,
+                    WLAN_DATA_FLOW_CONTROL);
            if ((pAdapter->tx_flow_timer_initialized == TRUE) &&
                (VOS_TIMER_STATE_STOPPED ==
                 vos_timer_getCurrentState(&pAdapter->tx_flow_control_timer))) {
@@ -620,22 +605,30 @@ int __hdd_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
            skb->queue_mapping = hddLinuxUpToAcMap[up];
        }
 
-       wlan_hdd_log_eapol(skb,
-                          WIFI_EVENT_DRIVER_EAPOL_FRAME_TRANSMIT_REQUESTED);
-
 #ifdef QCA_PKT_PROTO_TRACE
        if ((hddCtxt->cfg_ini->gEnableDebugLog & VOS_PKT_TRAC_TYPE_EAPOL) ||
            (hddCtxt->cfg_ini->gEnableDebugLog & VOS_PKT_TRAC_TYPE_DHCP))
        {
            proto_type = vos_pkt_get_proto_type(skb,
                         hddCtxt->cfg_ini->gEnableDebugLog, 0);
-           if (VOS_PKT_TRAC_TYPE_EAPOL & proto_type)
-           {
+           switch (proto_type) {
+           case VOS_PKT_TRAC_TYPE_EAPOL:
                vos_pkt_trace_buf_update("ST:T:EPL");
-           }
-           else if (VOS_PKT_TRAC_TYPE_DHCP & proto_type)
-           {
-               vos_pkt_trace_buf_update("ST:T:DHC");
+               break;
+           case VOS_PKT_TRAC_TYPE_DHCP:
+               hdd_dhcp_pkt_trace_buf_update(skb, TX_PATH, STA);
+               break;
+           case VOS_PKT_TRAC_TYPE_ARP:
+               vos_pkt_trace_buf_update("ST:T:ARP");
+               break;
+           case VOS_PKT_TRAC_TYPE_NS:
+               vos_pkt_trace_buf_update("ST:T:NS");
+               break;
+           case VOS_PKT_TRAC_TYPE_NA:
+               vos_pkt_trace_buf_update("ST:T:NA");
+               break;
+           default:
+               break;
            }
        }
 #endif /* QCA_PKT_PROTO_TRACE */
@@ -650,6 +643,21 @@ int __hdd_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
            list_tail->next = skb;
            list_tail = list_tail->next;
        }
+       vos_mem_zero(skb->cb, sizeof(skb->cb));
+       adf_dp_trace_log_pkt(pAdapter->sessionId, skb,
+           WIFI_EVENT_DRIVER_EAPOL_FRAME_TRANSMIT_REQUESTED);
+       NBUF_SET_PACKET_TRACK(skb, NBUF_TX_PKT_DATA_TRACK);
+       NBUF_UPDATE_TX_PKT_COUNT(skb, NBUF_TX_PKT_HDD);
+
+       adf_dp_trace_set_track(skb);
+       DPTRACE(adf_dp_trace(skb, ADF_DP_TRACE_HDD_PACKET_PTR_RECORD,
+                 (uint8_t *)&skb->data, sizeof(skb->data)));
+       DPTRACE(adf_dp_trace(skb, ADF_DP_TRACE_HDD_PACKET_RECORD,
+                 (uint8_t *)skb->data, skb->len));
+       if (skb->len > ADF_DP_TRACE_RECORD_SIZE)
+           DPTRACE(adf_dp_trace(skb, ADF_DP_TRACE_HDD_PACKET_RECORD,
+                      (uint8_t *)&skb->data[ADF_DP_TRACE_RECORD_SIZE],
+                      (skb->len - ADF_DP_TRACE_RECORD_SIZE)));
        skb = skb_next;
        continue;
 
@@ -702,30 +710,87 @@ int hdd_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	return ret;
 }
 
-/**============================================================================
-  @brief hdd_Ibss_GetStaId() - Get the StationID using the Peer Mac address
-
-  @param pHddStaCtx : [in] pointer to HDD Station Context
-  pMacAddress [in]  pointer to Peer Mac address
-  staID [out]  pointer to Station Index
-  @return    : VOS_STATUS_SUCCESS/VOS_STATUS_E_FAILURE
-  ===========================================================================*/
-
-VOS_STATUS hdd_Ibss_GetStaId(hdd_station_ctx_t *pHddStaCtx, v_MACADDR_t *pMacAddress, v_U8_t *staId)
+/**
+ * hdd_get_peer_sta_id() - Get the StationID using the Peer Mac address
+ * @sta_ctx: pointer to HDD Station Context
+ * @peer_mac_addr: pointer to Peer Mac address
+ * @sta_id: pointer to Station Index
+ *
+ * Returns: VOS_STATUS_SUCCESS on success, VOS_STATUS_E_FAILURE on error
+ */
+VOS_STATUS hdd_get_peer_sta_id(hdd_station_ctx_t *sta_ctx,
+			     v_MACADDR_t *peer_mac_addr,
+			     uint8_t *sta_id)
 {
-    v_U8_t idx;
+	v_U8_t idx;
 
-    for (idx = 0; idx < HDD_MAX_NUM_IBSS_STA; idx++)
-    {
-        if (vos_mem_compare(&pHddStaCtx->conn_info.peerMacAddress[ idx ],
-                pMacAddress, sizeof(v_MACADDR_t)))
-        {
-            *staId = pHddStaCtx->conn_info.staId[idx];
-            return VOS_STATUS_SUCCESS;
-        }
-    }
+	for (idx = 0; idx < HDD_MAX_NUM_IBSS_STA; idx++) {
+		if (vos_mem_compare(&sta_ctx->conn_info.peerMacAddress[idx],
+				peer_mac_addr, sizeof(v_MACADDR_t))) {
+			*sta_id = sta_ctx->conn_info.staId[idx];
+			return VOS_STATUS_SUCCESS;
+		}
+	}
 
-    return VOS_STATUS_E_FAILURE;
+	return VOS_STATUS_E_FAILURE;
+}
+
+/**
+ * wlan_display_tx_timeout_stats() - HDD tx timeout stats display handler
+ * @adapter: hdd adapter
+ *
+ * Function called by tx timeout handler to display the stats when timeout
+ * occurs during trabsmission.
+ *
+ * Return: none
+ */
+void wlan_display_tx_timeout_stats(hdd_adapter_t *adapter)
+{
+	hdd_context_t *hdd_ctx = WLAN_HDD_GET_CTX(adapter);
+	uint8_t pause_bitmap = 0;
+	vos_time_t pause_timestamp = 0;
+	A_STATUS status;
+
+	VOS_TRACE(VOS_MODULE_ID_HDD_DATA, VOS_TRACE_LEVEL_INFO,
+		  "carrier state: %d", netif_carrier_ok(adapter->dev));
+
+	/* to display the neif queue pause/unpause history */
+	wlan_hdd_display_netif_queue_history(hdd_ctx);
+
+	/* to display the count of packets at diferent layers */
+	adf_nbuf_tx_desc_count_display();
+
+	/* printing last 100 records from DPTRACE */
+	adf_dp_trace_dump_all(100);
+
+	/* to print the pause bitmap of local ll queues */
+	status = tlshim_get_ll_queue_pause_bitmap(adapter->sessionId,
+			&pause_bitmap, &pause_timestamp);
+	if (status != A_OK)
+		hddLog(LOGE, FL("vdev is NULL for vdev id %d"),
+		       adapter->sessionId);
+	else
+		hddLog(LOGE,
+		       FL("LL vdev queues pause bitmap: %d, last pause timestamp %lu"),
+		       pause_bitmap, pause_timestamp);
+
+	/*
+	 * To invoke the bug report to flush driver as well as fw logs
+	 * when timeout happens. It happens when it has been more
+	 * than 5 minutes and the timeout has happened at least 3 times
+	 * since the last generation of bug report.
+	 */
+	adapter->bug_report_count++;
+	if (adapter->bug_report_count >= HDD_BUG_REPORT_MIN_COUNT &&
+	   (jiffies_to_msecs(jiffies - adapter->last_tx_jiffies) >=
+	    HDD_BUG_REPORT_MIN_TIME)) {
+		adapter->bug_report_count = 0;
+		adapter->last_tx_jiffies = jiffies;
+		vos_flush_logs(WLAN_LOG_TYPE_FATAL,
+			       WLAN_LOG_INDICATOR_HOST_DRIVER,
+			       WLAN_LOG_REASON_HDD_TIME_OUT,
+			       DUMP_VOS_TRACE);
+	}
 }
 
 /**
@@ -746,6 +811,8 @@ static void __hdd_tx_timeout(struct net_device *dev)
 
    hddLog(LOGE, FL("Transmission timeout occurred jiffies %lu trans_start %lu"),
           jiffies, dev->trans_start);
+   DPTRACE(adf_dp_trace(NULL, ADF_DP_TRACE_HDD_TX_TIMEOUT,
+                        NULL, 0));
    /*
     * Getting here implies we disabled the TX queues for too long. Queues are
     * disabled either because of disassociation or low resource scenarios. In
@@ -769,12 +836,10 @@ static void __hdd_tx_timeout(struct net_device *dev)
 
    for (i = 0; i < NUM_TX_QUEUES; i++) {
       txq = netdev_get_tx_queue(dev, i);
-      hddLog(LOG1, FL("Queue%d status: %d txq->trans_start %lu"),
+      hddLog(LOGE, FL("Queue%d status: %d txq->trans_start %lu"),
              i, netif_tx_queue_stopped(txq), txq->trans_start);
    }
-
-   VOS_TRACE( VOS_MODULE_ID_HDD_DATA, VOS_TRACE_LEVEL_INFO,
-              "carrier state: %d", netif_carrier_ok(dev));
+   wlan_display_tx_timeout_stats(pAdapter);
 }
 
 /**
@@ -1152,17 +1217,33 @@ VOS_STATUS hdd_rx_packet_cbk(v_VOID_t *vosContext,
             continue;
       }
 
-      wlan_hdd_log_eapol(skb, WIFI_EVENT_DRIVER_EAPOL_FRAME_RECEIVED);
+      adf_dp_trace_log_pkt(pAdapter->sessionId, skb,
+          WIFI_EVENT_DRIVER_EAPOL_FRAME_RECEIVED);
 
 #ifdef QCA_PKT_PROTO_TRACE
       if ((pHddCtx->cfg_ini->gEnableDebugLog & VOS_PKT_TRAC_TYPE_EAPOL) ||
           (pHddCtx->cfg_ini->gEnableDebugLog & VOS_PKT_TRAC_TYPE_DHCP)) {
          proto_type = vos_pkt_get_proto_type(skb,
                         pHddCtx->cfg_ini->gEnableDebugLog, 0);
-         if (VOS_PKT_TRAC_TYPE_EAPOL & proto_type)
-            vos_pkt_trace_buf_update("ST:R:EPL");
-         else if (VOS_PKT_TRAC_TYPE_DHCP & proto_type)
-            vos_pkt_trace_buf_update("ST:R:DHC");
+         switch (proto_type) {
+         case VOS_PKT_TRAC_TYPE_EAPOL:
+             vos_pkt_trace_buf_update("ST:R:EPL");
+             break;
+         case VOS_PKT_TRAC_TYPE_DHCP:
+             hdd_dhcp_pkt_trace_buf_update(skb, RX_PATH, STA);
+             break;
+         case VOS_PKT_TRAC_TYPE_ARP:
+             vos_pkt_trace_buf_update("ST:R:ARP");
+             break;
+         case VOS_PKT_TRAC_TYPE_NS:
+             vos_pkt_trace_buf_update("ST:R:NS");
+             break;
+         case VOS_PKT_TRAC_TYPE_NA:
+             vos_pkt_trace_buf_update("ST:R:NA");
+             break;
+         default:
+             break;
+         }
       }
 #endif /* QCA_PKT_PROTO_TRACE */
 
@@ -1194,11 +1275,12 @@ VOS_STATUS hdd_rx_packet_cbk(v_VOID_t *vosContext,
       if (skb->next) {
          rxstat = netif_rx(skb);
       } else {
-#ifdef WLAN_FEATURE_HOLD_RX_WAKELOCK
-         vos_wake_lock_timeout_acquire(&pHddCtx->rx_wake_lock,
-                                       HDD_WAKE_LOCK_DURATION,
-                                       WIFI_POWER_EVENT_WAKELOCK_HOLD_RX);
-#endif
+         if ((pHddCtx->cfg_ini->rx_wakelock_timeout) &&
+             (PACKET_BROADCAST != skb->pkt_type) &&
+             (PACKET_MULTICAST != skb->pkt_type))
+	    vos_wake_lock_timeout_acquire(&pHddCtx->rx_wake_lock,
+                        pHddCtx->cfg_ini->rx_wakelock_timeout,
+                        WIFI_POWER_EVENT_WAKELOCK_HOLD_RX);
          /*
           * This is the last packet on the chain
           * Scheduling rx sirq
@@ -1219,122 +1301,354 @@ VOS_STATUS hdd_rx_packet_cbk(v_VOID_t *vosContext,
    return VOS_STATUS_SUCCESS;
 }
 
-#ifdef FEATURE_WLAN_DIAG_SUPPORT
-
 /**
- * wlan_hdd_get_eapol_params() - Function to extract EAPOL params
- * @skb:                sbb data
- * @eapol_params:       Pointer to hold the parsed EAPOL params
- * @event_type:         Event type to indicate Tx/Rx
+ * hdd_reason_type_to_string() - return string conversion of reason type
+ * @reason: reason type
  *
- * This function parses the input skb data to get the EAPOL params,if the
- * packet is EAPOL and store it in the pointer passed as input
+ * This utility function helps log string conversion of reason type.
  *
- * Return: 0 on success and negative value in failure
- *
+ * Return: string conversion of device mode, if match found;
+ *        "Unknown" otherwise.
  */
-static int wlan_hdd_get_eapol_params(struct sk_buff *skb,
-			      struct vos_event_wlan_eapol *eapol_params,
-			      uint8_t event_type)
+const char *hdd_reason_type_to_string(enum netif_reason_type reason)
 {
-	bool ret;
-	uint8_t packet_type=0;
-
-	ret = wlan_hdd_is_eapol(skb);
-
-	if (!ret)
-		return -1;
-
-	packet_type = (uint8_t)(*(uint8_t *)
-			(skb->data + HDD_EAPOL_PACKET_TYPE_OFFSET));
-
-	eapol_params->eapol_packet_type = packet_type;
-	eapol_params->eapol_key_info = (uint16_t)(*(uint16_t *)
-				       (skb->data + HDD_EAPOL_KEY_INFO_OFFSET));
-	eapol_params->event_sub_type = event_type;
-	eapol_params->eapol_rate = 0;/* As of now, zero */
-
-	vos_mem_copy(eapol_params->dest_addr,
-			(skb->data + HDD_EAPOL_DEST_MAC_OFFSET),
-			sizeof(eapol_params->dest_addr));
-	vos_mem_copy(eapol_params->src_addr,
-			(skb->data + HDD_EAPOL_SRC_MAC_OFFSET),
-			sizeof(eapol_params->src_addr));
-	return 0;
-}
-/**
- * wlan_hdd_event_eapol_log() - Function to log EAPOL events
- * @eapol_params:    Structure containing EAPOL params
- *
- * This function logs the parsed EAPOL params
- *
- * Return: None
- *
- */
-static void wlan_hdd_event_eapol_log(struct vos_event_wlan_eapol eapol_params)
-{
-	WLAN_VOS_DIAG_EVENT_DEF(wlan_diag_event, struct vos_event_wlan_eapol);
-
-	wlan_diag_event.event_sub_type = eapol_params.event_sub_type;
-	wlan_diag_event.eapol_packet_type = eapol_params.eapol_packet_type;
-	wlan_diag_event.eapol_key_info = eapol_params.eapol_key_info;
-	wlan_diag_event.eapol_rate = eapol_params.eapol_rate;
-	vos_mem_copy(wlan_diag_event.dest_addr,
-		     eapol_params.dest_addr,
-		     sizeof (wlan_diag_event.dest_addr));
-        vos_mem_copy(wlan_diag_event.src_addr,
-		     eapol_params.src_addr,
-		     sizeof (wlan_diag_event.src_addr));
-
-	WLAN_VOS_DIAG_EVENT_REPORT(&wlan_diag_event, EVENT_WLAN_EAPOL);
-}
-
-/**
- * wlan_hdd_log_eapol() - Function to check and extract EAPOL params
- * @skb:               skb data
- * @event_type:        One of enum wifi_connectivity_events to indicate Tx/Rx
- *
- * This function parses the input skb data to get the EAPOL params,if the
- * packet is EAPOL and store it in the pointer passed as input
- *
- * Return: None
- *
- */
-void wlan_hdd_log_eapol(struct sk_buff *skb,
-		uint8_t event_type)
-{
-	int ret;
-	struct vos_event_wlan_eapol eapol_params;
-
-	ret = wlan_hdd_get_eapol_params(skb, &eapol_params, event_type);
-	if (ret)
-		return;
-
-	wlan_hdd_event_eapol_log(eapol_params);
-	if ((eapol_params.eapol_key_info & EAPOL_MASK) == EAPOL_M1_BIT_MASK) {
-		hddLog(LOG1,
-			FL("%s: M1 packet"), eapol_params.event_sub_type ==
-				WIFI_EVENT_DRIVER_EAPOL_FRAME_RECEIVED ?
-								"RX" : "TX");
-	} else if ((eapol_params.eapol_key_info & EAPOL_MASK) ==
-						EAPOL_M2_BIT_MASK) {
-		hddLog(LOG1,
-			FL("%s: M2 packet"), eapol_params.event_sub_type ==
-				WIFI_EVENT_DRIVER_EAPOL_FRAME_RECEIVED ?
-								"RX" : "TX");
-
-	} else if ((eapol_params.eapol_key_info & EAPOL_MASK) ==
-						EAPOL_M3_BIT_MASK) {
-		hddLog(LOG1,
-			FL("%s: M3 packet"), eapol_params.event_sub_type ==
-				WIFI_EVENT_DRIVER_EAPOL_FRAME_RECEIVED ?
-								"RX" : "TX");
-	} else if ((eapol_params.eapol_key_info & EAPOL_MASK) ==
-						EAPOL_M4_BIT_MASK) {
-		hddLog(LOG1,
-			FL("%s: M4 packet"), eapol_params.event_sub_type ==
-				WIFI_EVENT_DRIVER_EAPOL_FRAME_RECEIVED ?
-								"RX" : "TX");
+	switch (reason) {
+	CASE_RETURN_STRING(WLAN_CONTROL_PATH);
+	CASE_RETURN_STRING(WLAN_DATA_FLOW_CONTROL);
+	default:
+		return "Invalid";
 	}
 }
-#endif /* FEATURE_WLAN_DIAG_SUPPORT */
+
+/**
+ * hdd_action_type_to_string() - return string conversion of action type
+ * @action: action type
+ *
+ * This utility function helps log string conversion of action_type.
+ *
+ * Return: string conversion of device mode, if match found;
+ *        "Unknown" otherwise.
+ */
+const char *hdd_action_type_to_string(enum netif_action_type action)
+{
+	switch (action) {
+	CASE_RETURN_STRING(WLAN_STOP_ALL_NETIF_QUEUE);
+	CASE_RETURN_STRING(WLAN_START_ALL_NETIF_QUEUE);
+	CASE_RETURN_STRING(WLAN_WAKE_ALL_NETIF_QUEUE);
+	CASE_RETURN_STRING(WLAN_STOP_ALL_NETIF_QUEUE_N_CARRIER);
+	CASE_RETURN_STRING(WLAN_START_ALL_NETIF_QUEUE_N_CARRIER);
+	CASE_RETURN_STRING(WLAN_NETIF_TX_DISABLE);
+	CASE_RETURN_STRING(WLAN_NETIF_TX_DISABLE_N_CARRIER);
+	CASE_RETURN_STRING(WLAN_NETIF_CARRIER_ON);
+	CASE_RETURN_STRING(WLAN_NETIF_CARRIER_OFF);
+	default:
+		return "Invalid";
+	}
+}
+
+/**
+ * wlan_hdd_update_queue_oper_stats - update queue operation statistics
+ * @adapter: adapter handle
+ * @action: action type
+ * @reason: reason type
+ */
+static void wlan_hdd_update_queue_oper_stats(hdd_adapter_t *adapter,
+	enum netif_action_type action, enum netif_reason_type reason)
+{
+	switch (action) {
+	case WLAN_STOP_ALL_NETIF_QUEUE:
+	case WLAN_STOP_ALL_NETIF_QUEUE_N_CARRIER:
+	case WLAN_NETIF_TX_DISABLE:
+	case WLAN_NETIF_TX_DISABLE_N_CARRIER:
+		adapter->queue_oper_stats[reason].pause_count++;
+		break;
+	case WLAN_START_ALL_NETIF_QUEUE:
+	case WLAN_WAKE_ALL_NETIF_QUEUE:
+	case WLAN_START_ALL_NETIF_QUEUE_N_CARRIER:
+		adapter->queue_oper_stats[reason].unpause_count++;
+		break;
+	default:
+		break;
+	}
+}
+
+/**
+ * wlan_hdd_update_txq_timestamp() - update txq timestamp
+ * @dev: net device
+ *
+ * Return: none
+ */
+static void wlan_hdd_update_txq_timestamp(struct net_device *dev)
+{
+	struct netdev_queue *txq;
+	int i;
+	bool unlock;
+
+	for (i = 0; i < NUM_TX_QUEUES; i++) {
+		txq = netdev_get_tx_queue(dev, i);
+		unlock = __netif_tx_trylock(txq);
+		txq_trans_update(txq);
+		if (unlock == true)
+			__netif_tx_unlock(txq);
+	}
+}
+
+/**
+ * wlan_hdd_update_unpause_time() - update unpause time
+ * @adapter: hdd adapter handle
+ *
+ * Return: none
+ */
+static void wlan_hdd_update_unpause_time(hdd_adapter_t *adapter)
+{
+	adf_os_time_t curr_time = vos_system_ticks();
+
+	adapter->total_unpause_time += curr_time - adapter->last_time;
+	adapter->last_time = curr_time;
+}
+
+/**
+ * wlan_hdd_update_pause_time() - update pause time
+ * @adapter: hdd adapter handle
+ *
+ * Return: none
+ */
+static void wlan_hdd_update_pause_time(hdd_adapter_t *adapter)
+{
+	adf_os_time_t curr_time = vos_system_ticks();
+
+	adapter->total_pause_time += curr_time - adapter->last_time;
+	adapter->last_time = curr_time;
+}
+
+/**
+ * wlan_hdd_netif_queue_control() - Use for netif_queue related actions
+ * @adapter: adapter handle
+ * @action: action type
+ * @reason: reason type
+ *
+ * This is single function which is used for netif_queue related
+ * actions like start/stop of network queues and on/off carrier
+ * option.
+ *
+ * Return: None
+ */
+void wlan_hdd_netif_queue_control(hdd_adapter_t *adapter,
+		enum netif_action_type action, enum netif_reason_type reason)
+{
+	if ((!adapter) || (WLAN_HDD_ADAPTER_MAGIC != adapter->magic) ||
+	    (!adapter->dev)) {
+		hddLog(LOGE, FL("adapter is invalid"));
+		return;
+	}
+
+	switch (action) {
+	case WLAN_NETIF_CARRIER_ON:
+		netif_carrier_on(adapter->dev);
+		break;
+
+	case WLAN_NETIF_CARRIER_OFF:
+		netif_carrier_off(adapter->dev);
+		break;
+
+	case WLAN_STOP_ALL_NETIF_QUEUE:
+		spin_lock_bh(&adapter->pause_map_lock);
+		if (!adapter->pause_map) {
+			netif_tx_stop_all_queues(adapter->dev);
+			wlan_hdd_update_txq_timestamp(adapter->dev);
+			wlan_hdd_update_unpause_time(adapter);
+		}
+		adapter->pause_map |= (1 << reason);
+		spin_unlock_bh(&adapter->pause_map_lock);
+		break;
+
+	case WLAN_START_ALL_NETIF_QUEUE:
+		spin_lock_bh(&adapter->pause_map_lock);
+		adapter->pause_map &= ~(1 << reason);
+		if (!adapter->pause_map) {
+			netif_tx_start_all_queues(adapter->dev);
+			wlan_hdd_update_pause_time(adapter);
+		}
+		spin_unlock_bh(&adapter->pause_map_lock);
+		break;
+
+	case WLAN_WAKE_ALL_NETIF_QUEUE:
+		spin_lock_bh(&adapter->pause_map_lock);
+		adapter->pause_map &= ~(1 << reason);
+		if (!adapter->pause_map) {
+			netif_tx_wake_all_queues(adapter->dev);
+			wlan_hdd_update_pause_time(adapter);
+		}
+		spin_unlock_bh(&adapter->pause_map_lock);
+		break;
+
+	case WLAN_STOP_ALL_NETIF_QUEUE_N_CARRIER:
+		spin_lock_bh(&adapter->pause_map_lock);
+		if (!adapter->pause_map) {
+			netif_tx_stop_all_queues(adapter->dev);
+			wlan_hdd_update_txq_timestamp(adapter->dev);
+			wlan_hdd_update_unpause_time(adapter);
+		}
+		adapter->pause_map |= (1 << reason);
+		netif_carrier_off(adapter->dev);
+		spin_unlock_bh(&adapter->pause_map_lock);
+		break;
+
+	case WLAN_START_ALL_NETIF_QUEUE_N_CARRIER:
+		spin_lock_bh(&adapter->pause_map_lock);
+		netif_carrier_on(adapter->dev);
+		adapter->pause_map &= ~(1 << reason);
+		if (!adapter->pause_map) {
+			netif_tx_start_all_queues(adapter->dev);
+			wlan_hdd_update_pause_time(adapter);
+		}
+		spin_unlock_bh(&adapter->pause_map_lock);
+		break;
+
+	case WLAN_NETIF_TX_DISABLE:
+		spin_lock_bh(&adapter->pause_map_lock);
+		if (!adapter->pause_map) {
+			netif_tx_disable(adapter->dev);
+			wlan_hdd_update_txq_timestamp(adapter->dev);
+			wlan_hdd_update_unpause_time(adapter);
+		}
+		adapter->pause_map |= (1 << reason);
+		spin_unlock_bh(&adapter->pause_map_lock);
+		break;
+
+	case WLAN_NETIF_TX_DISABLE_N_CARRIER:
+		spin_lock_bh(&adapter->pause_map_lock);
+		if (!adapter->pause_map) {
+			netif_tx_disable(adapter->dev);
+			wlan_hdd_update_txq_timestamp(adapter->dev);
+			wlan_hdd_update_unpause_time(adapter);
+		}
+		adapter->pause_map |= (1 << reason);
+		netif_carrier_off(adapter->dev);
+		spin_unlock_bh(&adapter->pause_map_lock);
+		break;
+
+	default:
+		hddLog(LOGE, FL("unsupported netif queue action %d"), action);
+	}
+
+	wlan_hdd_update_queue_oper_stats(adapter, action, reason);
+
+	adapter->queue_oper_history[adapter->history_index].time =
+						vos_system_ticks();
+	adapter->queue_oper_history[adapter->history_index].netif_action =
+						action;
+	adapter->queue_oper_history[adapter->history_index].netif_reason =
+						reason;
+	adapter->queue_oper_history[adapter->history_index].pause_map =
+						adapter->pause_map;
+	if (++adapter->history_index == WLAN_HDD_MAX_HISTORY_ENTRY)
+		adapter->history_index = 0;
+
+}
+
+#ifdef QCA_PKT_PROTO_TRACE
+/**
+ * hdd_dhcp_pkt_trace_buf_update() - Update protocol trace buffer with DHCP
+ * packet info.
+ * @skb: skb pointer
+ * @is_transmission: packet is in transmission or in rx
+ * @is_sta: tx/rx by STA mode
+ *
+ * Return: None
+ */
+void hdd_dhcp_pkt_trace_buf_update (struct sk_buff *skb, int is_transmission,
+				    int is_sta)
+{
+	char tbuf[20];
+	if ((skb->data[DHCP_OPTION53_OFFSET] == DHCP_OPTION53) &&
+	   (skb->data[DHCP_OPTION53_LENGTH_OFFSET] ==
+	   DHCP_OPTION53_LENGTH)) {
+
+		switch (skb->data[DHCP_OPTION53_STATUS_OFFSET]) {
+		case DHCPDISCOVER:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP DIS",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		case DHCPREQUEST:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP REQ",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		case DHCPOFFER:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP OFF",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		case DHCPACK:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP ACK",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		case DHCPNAK:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP NAK",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		case DHCPRELEASE:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP REL",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		case DHCPINFORM:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP INF",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		case DHCPDECLINE:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP DELC",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		default:
+			snprintf(tbuf, sizeof(tbuf),
+				"%s:%s:DHCP INVL",
+				is_sta?"ST":"HA",
+				is_transmission?"T":"R");
+			break;
+		}
+		vos_pkt_trace_buf_update(tbuf);
+		VOS_TRACE(VOS_MODULE_ID_HDD_DATA, VOS_TRACE_LEVEL_INFO,
+			  FL("%s"), tbuf);
+	}
+}
+#endif
+
+#ifdef FEATURE_BUS_BANDWIDTH
+/**
+ * hdd_rst_tcp_delack() - Reset tcp delack value to original level
+ * @hdd_context_t : HDD context
+ *
+ * This is single function which is used for reseting TCP delack
+ * value to its original value.
+ *
+ * Return: None
+ */
+void hdd_rst_tcp_delack(hdd_context_t *hdd_ctx)
+{
+	enum cnss_bus_width_type  next_level = CNSS_BUS_WIDTH_LOW;
+
+	hdd_ctx->rx_high_ind_cnt = 0;
+	wlan_hdd_send_svc_nlink_msg(WLAN_SVC_WLAN_TP_IND, &next_level,
+							sizeof(next_level));
+}
+#else
+void hdd_rst_tcp_delack(hdd_context_t *hdd_ctx)
+{
+	return;
+}
+#endif /* FEATURE_BUS_BANDWIDTH */

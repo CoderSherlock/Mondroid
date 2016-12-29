@@ -3527,7 +3527,7 @@ qpnp_chg_regulator_boost_disable(struct regulator_dev *rdev)
 			return rc;
 		}
 
-		usleep(2000);
+		usleep_range(2000, 2010);
 
 		rc = qpnp_chg_masked_write(chip,
 			chip->chgr_base + SEC_ACCESS,
@@ -3568,7 +3568,7 @@ qpnp_chg_regulator_boost_disable(struct regulator_dev *rdev)
 			return rc;
 		}
 
-		usleep(1000);
+		usleep_range(1000, 1010);
 
 		qpnp_chg_usb_suspend_enable(chip, 0);
 	}

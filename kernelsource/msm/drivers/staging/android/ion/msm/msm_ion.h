@@ -83,6 +83,13 @@ struct ion_co_heap_pdata {
 	void *(*setup_ion_region)(void);
 };
 
+struct msm_ion_prefetch_info {
+	struct list_head list;
+	int heap_id;
+	unsigned long *sizes;
+	int nr_sizes;
+};
+
 /**
  * struct ion_cma_pdata - extra data for CMA regions
  * @default_prefetch_size - default size to use for prefetching
@@ -94,7 +101,7 @@ struct ion_cma_pdata {
 #ifdef CONFIG_ION
 /**
  *  msm_ion_client_create - allocate a client using the ion_device specified in
- *				drivers/gpu/ion/msm/msm_ion.c
+ *				drivers/staging/android/ion/msm/msm_ion.c
  *
  * name is the same as ion_client_create, return values
  * are the same as ion_client_create.
@@ -132,7 +139,7 @@ int ion_handle_get_flags(struct ion_client *client, struct ion_handle *handle,
  */
 
 int ion_handle_get_size(struct ion_client *client, struct ion_handle *handle,
-			unsigned long *size);
+			size_t *size);
 /**
  * msm_ion_do_cache_op - do cache operations.
  *
@@ -150,9 +157,6 @@ int ion_handle_get_size(struct ion_client *client, struct ion_handle *handle,
 int msm_ion_do_cache_op(struct ion_client *client, struct ion_handle *handle,
 			void *vaddr, unsigned long len, unsigned int cmd);
 
-int msm_ion_secure_table(struct sg_table *table);
-
-int msm_ion_unsecure_table(struct sg_table *table);
 #else
 static inline struct ion_client *msm_ion_client_create(const char *name)
 {
@@ -160,7 +164,7 @@ static inline struct ion_client *msm_ion_client_create(const char *name)
 }
 
 static inline int ion_handle_get_size(struct ion_client *client,
-				struct ion_handle *handle, unsigned long *size)
+				struct ion_handle *handle, size_t *size)
 {
 	return -ENODEV;
 }
@@ -171,17 +175,6 @@ static inline int msm_ion_do_cache_op(struct ion_client *client,
 {
 	return -ENODEV;
 }
-
-static inline int msm_ion_secure_table(struct sg_table *table)
-{
-	return -ENODEV;
-}
-
-static inline int msm_ion_unsecure_table(struct sg_table *table)
-{
-	return -ENODEV;
-}
-
 
 #endif /* CONFIG_ION */
 

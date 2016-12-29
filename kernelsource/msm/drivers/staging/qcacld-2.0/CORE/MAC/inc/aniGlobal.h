@@ -194,6 +194,19 @@ enum log_event_indicator {
 };
 
 /**
+ * enum log_dump_trace_mask - Mask to indicate what traces to log
+ * @DUMP_NO_TRACE: Do not dump any logs
+ * @DUMP_VOS_TRACE: Dump vos trace logs
+ * @DUMP_PACKET_TRACE: Dump packet trace
+ *
+ */
+enum log_dump_trace_mask {
+	DUMP_NO_TRACE      = 0x0,
+	DUMP_VOS_TRACE     = 0x1,
+	DUMP_PACKET_TRACE  = 0x2
+};
+
+/**
  * enum log_event_host_reason_code - Reason code for bug report
  * @WLAN_LOG_REASON_CODE_UNUSED: Unused
  * @WLAN_LOG_REASON_ROAM_FAIL: Driver initiated roam has failed
@@ -235,6 +248,7 @@ enum log_event_host_reason_code {
 	WLAN_LOG_REASON_MGMT_FRAME_TIMEOUT,
 	WLAN_LOG_REASON_SME_OUT_OF_CMD_BUF,
 	WLAN_LOG_REASON_NO_SCAN_RESULTS,
+	WLAN_LOG_REASON_STALE_SESSION_FOUND,
 };
 
 
@@ -1079,6 +1093,7 @@ typedef struct sMacOpenParameters
  */
     tANI_U8 olIniInfo;
     v_BOOL_t ssdp;
+    bool enable_mc_list;
     bool enable_bcst_ptrn;
     /*
      * DFS Phyerror Filtering offload status from ini
@@ -1267,6 +1282,7 @@ typedef struct sAniSirGlobal
     bool first_scan_done;
     int8_t first_scan_bucket_threshold;
     sir_mgmt_frame_ind_callback mgmt_frame_ind_cb;
+    sir_p2p_ack_ind_callback p2p_ack_ind_cb;
 } tAniSirGlobal;
 
 typedef enum

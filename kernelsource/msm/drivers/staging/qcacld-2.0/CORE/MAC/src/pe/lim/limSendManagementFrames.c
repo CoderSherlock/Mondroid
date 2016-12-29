@@ -2839,12 +2839,12 @@ limSendReassocReqWithFTIEsMgmtFrame(tpAniSirGlobal     pMac,
 
 #if defined(WLAN_FEATURE_VOWIFI_11R) || defined(FEATURE_WLAN_ESE) || defined(FEATURE_WLAN_LFR)
     if ((NULL != psessionEntry->ftPEContext.pFTPreAuthReq) &&
-         (SIR_BAND_5_GHZ == limGetRFBand(
+         ( SIR_BAND_5_GHZ == limGetRFBand(
               psessionEntry->ftPEContext.pFTPreAuthReq->preAuthchannelNum)))
          txFlag |= HAL_USE_BD_RATE2_FOR_MANAGEMENT_FRAME;
     else
 #endif
-     if((SIR_BAND_5_GHZ == limGetRFBand(psessionEntry->currentOperChannel)) ||
+     if( (SIR_BAND_5_GHZ == limGetRFBand(psessionEntry->currentOperChannel)) ||
                 (psessionEntry->pePersona == VOS_P2P_CLIENT_MODE) ||
                 (psessionEntry->pePersona == VOS_P2P_GO_MODE))
          txFlag |= HAL_USE_BD_RATE2_FOR_MANAGEMENT_FRAME;
@@ -3237,7 +3237,7 @@ limSendReassocReqMgmtFrame(tpAniSirGlobal     pMac,
         psessionEntry->assocReqLen = nPayload;
     }
 
-    if((SIR_BAND_5_GHZ == limGetRFBand(psessionEntry->currentOperChannel)) ||
+    if( (SIR_BAND_5_GHZ == limGetRFBand(psessionEntry->currentOperChannel)) ||
             (psessionEntry->pePersona == VOS_P2P_CLIENT_MODE) ||
             (psessionEntry->pePersona == VOS_P2P_GO_MODE))
     {
@@ -3601,12 +3601,12 @@ limSendAuthMgmtFrame(tpAniSirGlobal pMac,
 
 #if defined(WLAN_FEATURE_VOWIFI_11R) || defined(FEATURE_WLAN_ESE) || defined(FEATURE_WLAN_LFR)
     if ((NULL != psessionEntry->ftPEContext.pFTPreAuthReq) &&
-         (SIR_BAND_5_GHZ == limGetRFBand(
+         ( SIR_BAND_5_GHZ == limGetRFBand(
              psessionEntry->ftPEContext.pFTPreAuthReq->preAuthchannelNum)))
         txFlag |= HAL_USE_BD_RATE2_FOR_MANAGEMENT_FRAME;
     else
 #endif
-    if((SIR_BAND_5_GHZ == limGetRFBand(psessionEntry->currentOperChannel)) ||
+    if( (SIR_BAND_5_GHZ == limGetRFBand(psessionEntry->currentOperChannel)) ||
          (psessionEntry->pePersona == VOS_P2P_CLIENT_MODE) ||
          (psessionEntry->pePersona == VOS_P2P_GO_MODE))
         txFlag |= HAL_USE_BD_RATE2_FOR_MANAGEMENT_FRAME;
@@ -3861,11 +3861,13 @@ end:
 
 eHalStatus limDisassocTxCompleteCnf(tpAniSirGlobal pMac, tANI_U32 txCompleteSuccess)
 {
+    limLog(pMac, LOG1, FL("txCompleteSuccess: %d"), txCompleteSuccess);
     return limSendDisassocCnf(pMac);
 }
 
 eHalStatus limDeauthTxCompleteCnf(tpAniSirGlobal pMac, tANI_U32 txCompleteSuccess)
 {
+    limLog(pMac, LOG1, FL("txCompleteSuccess: %d"), txCompleteSuccess);
     return limSendDeauthCnf(pMac);
 }
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -18,6 +18,8 @@
 #include <linux/mutex.h>
 #include <sound/audio_cal_utils.h>
 
+static int unmap_memory(struct cal_type_data *cal_type,
+			struct cal_block_data *cal_block);
 
 size_t get_cal_info_size(int32_t cal_type)
 {
@@ -55,6 +57,7 @@ size_t get_cal_info_size(int32_t cal_type)
 		size = sizeof(struct audio_cal_info_adm_top);
 		break;
 	case ADM_CUST_TOPOLOGY_CAL_TYPE:
+	case CORE_CUSTOM_TOPOLOGIES_CAL_TYPE:
 		size = 0;
 		break;
 	case ADM_AUDPROC_CAL_TYPE:
@@ -88,6 +91,22 @@ size_t get_cal_info_size(int32_t cal_type)
 	case AFE_FB_SPKR_PROT_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_spk_prot_cfg);
 		break;
+	case AFE_FB_SPKR_PROT_TH_VI_CAL_TYPE:
+		/*
+		 * Since get and set parameter structures are different in size
+		 * use the maximum size of get and set parameter structure
+		 */
+		size = max(sizeof(struct audio_cal_info_sp_th_vi_ftm_cfg),
+			   sizeof(struct audio_cal_info_sp_th_vi_param));
+		break;
+	case AFE_FB_SPKR_PROT_EX_VI_CAL_TYPE:
+		/*
+		 * Since get and set parameter structures are different in size
+		 * use the maximum size of get and set parameter structure
+		 */
+		size = max(sizeof(struct audio_cal_info_sp_ex_vi_ftm_cfg),
+			   sizeof(struct audio_cal_info_sp_ex_vi_param));
+		break;
 	case AFE_ANC_CAL_TYPE:
 		size = 0;
 		break;
@@ -104,6 +123,9 @@ size_t get_cal_info_size(int32_t cal_type)
 		size = 0;
 		break;
 	case LSM_TOPOLOGY_CAL_TYPE:
+		size = sizeof(struct audio_cal_info_lsm_top);
+		break;
+	case ULP_LSM_TOPOLOGY_ID_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_lsm_top);
 		break;
 	case LSM_CAL_TYPE:
@@ -135,6 +157,7 @@ size_t get_cal_info_size(int32_t cal_type)
 		break;
 	case DTS_EAGLE_CAL_TYPE:
 		size = 0;
+		break;
 	case AUDIO_CORE_METAINFO_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_metainfo);
 		break;
@@ -180,6 +203,7 @@ size_t get_user_cal_type_size(int32_t cal_type)
 		size = sizeof(struct audio_cal_type_adm_top);
 		break;
 	case ADM_CUST_TOPOLOGY_CAL_TYPE:
+	case CORE_CUSTOM_TOPOLOGIES_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_basic);
 		break;
 	case ADM_AUDPROC_CAL_TYPE:
@@ -213,6 +237,22 @@ size_t get_user_cal_type_size(int32_t cal_type)
 	case AFE_FB_SPKR_PROT_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_fb_spk_prot_cfg);
 		break;
+	case AFE_FB_SPKR_PROT_TH_VI_CAL_TYPE:
+		/*
+		 * Since get and set parameter structures are different in size
+		 * use the maximum size of get and set parameter structure
+		 */
+		size = max(sizeof(struct audio_cal_type_sp_th_vi_ftm_cfg),
+			   sizeof(struct audio_cal_type_sp_th_vi_param));
+		break;
+	case AFE_FB_SPKR_PROT_EX_VI_CAL_TYPE:
+		/*
+		 * Since get and set parameter structures are different in size
+		 * use the maximum size of get and set parameter structure
+		 */
+		size = max(sizeof(struct audio_cal_type_sp_ex_vi_ftm_cfg),
+			   sizeof(struct audio_cal_type_sp_ex_vi_param));
+		break;
 	case AFE_ANC_CAL_TYPE:
 		size = 0;
 		break;
@@ -229,6 +269,9 @@ size_t get_user_cal_type_size(int32_t cal_type)
 		size = sizeof(struct audio_cal_type_basic);
 		break;
 	case LSM_TOPOLOGY_CAL_TYPE:
+		size = sizeof(struct audio_cal_type_lsm_top);
+		break;
+	case ULP_LSM_TOPOLOGY_ID_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_lsm_top);
 		break;
 	case LSM_CAL_TYPE:
@@ -260,6 +303,7 @@ size_t get_user_cal_type_size(int32_t cal_type)
 		break;
 	case DTS_EAGLE_CAL_TYPE:
 		size = 0;
+		break;
 	case AUDIO_CORE_METAINFO_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_metainfo);
 		break;
@@ -403,16 +447,12 @@ static void destroy_all_cal_blocks(struct cal_type_data *cal_type)
 		cal_block = list_entry(ptr,
 			struct cal_block_data, list);
 
-		if (cal_type->info.cal_util_callbacks.unmap_cal != NULL) {
-			ret = cal_type->info.cal_util_callbacks.
-				unmap_cal(cal_type->info.reg.cal_type,
-					cal_block);
-			if (ret < 0) {
-				pr_err("%s: unmap_cal failed, cal type %d, ret = %d!\n",
-					__func__,
-				       cal_type->info.reg.cal_type,
-					ret);
-			}
+		ret = unmap_memory(cal_type, cal_block);
+		if (ret < 0) {
+			pr_err("%s: unmap_memory failed, cal type %d, ret = %d!\n",
+				__func__,
+			       cal_type->info.reg.cal_type,
+				ret);
 		}
 		delete_cal_block(cal_block);
 		cal_block = NULL;
@@ -553,14 +593,13 @@ static struct cal_block_data *create_cal_block(struct cal_type_data *cal_type,
 		goto done;
 	}
 
-	cal_block = kmalloc(sizeof(*cal_type),
+	cal_block = kzalloc(sizeof(*cal_block),
 		GFP_KERNEL);
 	if (cal_block == NULL) {
 		pr_err("%s: could not allocate cal_block!\n", __func__);
 		goto done;
 	}
 
-	memset(cal_block, 0, sizeof(*cal_block));
 	INIT_LIST_HEAD(&cal_block->list);
 	list_add_tail(&cal_block->list, &cal_type->cal_blocks);
 
@@ -585,7 +624,7 @@ static struct cal_block_data *create_cal_block(struct cal_type_data *cal_type,
 				client_info_size);
 	}
 
-	cal_block->cal_info = kmalloc(
+	cal_block->cal_info = kzalloc(
 		get_cal_info_size(cal_type->info.reg.cal_type),
 		GFP_KERNEL);
 	if (cal_block->cal_info == NULL) {
@@ -594,7 +633,7 @@ static struct cal_block_data *create_cal_block(struct cal_type_data *cal_type,
 		goto err;
 	}
 	cal_block->buffer_number = basic_cal->cal_hdr.buffer_number;
-	pr_debug("%s: created block for cal type %d, buf num %d, map handle %d, map size %zd paddr 0x%pa!\n",
+	pr_debug("%s: created block for cal type %d, buf num %d, map handle %d, map size %zd paddr 0x%pK!\n",
 		__func__, cal_type->info.reg.cal_type,
 		cal_block->buffer_number,
 		cal_block->map_data.ion_map_handle,
@@ -655,6 +694,7 @@ static int realloc_memory(struct cal_block_data *cal_block)
 		cal_block->map_data.ion_handle);
 	cal_block->map_data.ion_client = NULL;
 	cal_block->map_data.ion_handle = NULL;
+	cal_block->cal_data.size = 0;
 
 	ret = cal_block_ion_alloc(cal_block);
 	if (ret < 0)
@@ -867,8 +907,7 @@ int cal_utils_set_cal(size_t data_size, void *data,
 		goto done;
 	}
 
-	if ((data_size > get_user_cal_type_size(
-		cal_type->info.reg.cal_type)) || (data_size < 0)) {
+	if (data_size > get_user_cal_type_size(cal_type->info.reg.cal_type)) { //HTC_AUD klockwork ID: 502
 		pr_err("%s: cal_type %d, data_size of %zd is invalid, expecting %zd!\n",
 			__func__, cal_type->info.reg.cal_type, data_size,
 			get_user_cal_type_size(cal_type->info.reg.cal_type));

@@ -73,6 +73,7 @@
 
 #include "sapApi.h"
 #include "vos_trace.h"
+#include "adf_trace.h"
 
 
 
@@ -177,6 +178,7 @@ VOS_STATUS vos_preOpen ( v_CONTEXT_t *pVosContext )
    #endif
    vos_register_debugcb_init();
 
+   adf_dp_trace_init();
    return VOS_STATUS_SUCCESS;
 
 } /* vos_preOpen()*/
@@ -499,6 +501,7 @@ VOS_STATUS vos_open( v_CONTEXT_t *pVosContext, v_SIZE_t hddContextSize )
 
   macOpenParms.ssdp = pHddCtx->cfg_ini->ssdp;
   macOpenParms.enable_bcst_ptrn = pHddCtx->cfg_ini->bcastptrn;
+  macOpenParms.enable_mc_list = pHddCtx->cfg_ini->fEnableMCAddrList;
 
 #ifdef FEATURE_WLAN_RA_FILTERING
    macOpenParms.RArateLimitInterval = pHddCtx->cfg_ini->RArateLimitInterval;
@@ -1892,7 +1895,7 @@ VOS_STATUS vos_mq_post_message_by_priority(VOS_MQ_ID msgQueueId,
            vos_flush_logs(WLAN_LOG_TYPE_FATAL,
                           WLAN_LOG_INDICATOR_HOST_ONLY,
                           WLAN_LOG_REASON_VOS_MSG_UNDER_RUN,
-                          true);
+                          DUMP_VOS_TRACE);
       }
       if (VOS_WRAPPER_MAX_FAIL_COUNT == debug_count) {
           vos_wlanRestart();
@@ -2732,7 +2735,8 @@ void vos_get_log_and_reset_completion(uint32_t *is_fatal,
 
 	if ((WLAN_LOG_INDICATOR_HOST_DRIVER == *indicator) &&
 	    ((WLAN_LOG_REASON_SME_OUT_OF_CMD_BUF == *reason_code) ||
-		 (WLAN_LOG_REASON_SME_COMMAND_STUCK == *reason_code)))
+		 (WLAN_LOG_REASON_SME_COMMAND_STUCK == *reason_code) ||
+		 (WLAN_LOG_REASON_STALE_SESSION_FOUND == *reason_code)))
 		*is_ssr_needed = true;
 	else
 		*is_ssr_needed = false;
@@ -2838,6 +2842,8 @@ void vos_wlan_flush_host_logs_for_fatal(void)
  * @indicator: Source which trigerred the bug report
  * @reason_code: Reason for triggering bug report
  * @dump_vos_trace: If vos trace are needed in logs.
+ * @pkt_trace: flag to indicate when to report packet trace
+ *             dump this info when connection related error occurs
  *
  * This function sets the log related params and send the WMI command to the
  * FW to flush its logs. On receiving the flush completion event from the FW
@@ -2848,7 +2854,7 @@ void vos_wlan_flush_host_logs_for_fatal(void)
 VOS_STATUS vos_flush_logs(uint32_t is_fatal,
 		uint32_t indicator,
 		uint32_t reason_code,
-		bool dump_vos_trace)
+		uint32_t dump_trace)
 {
 	uint32_t ret;
 	VOS_STATUS status;
@@ -2889,14 +2895,15 @@ VOS_STATUS vos_flush_logs(uint32_t is_fatal,
 	}
 
 	VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
-			"%s: Triggering bug report: type:%d, indicator=%d reason_code=%d",
-			__func__, is_fatal, indicator, reason_code);
+			"%s: Triggering bug report: type:%d, indicator=%d reason_code=%d dump_trace=0x%x",
+			__func__, is_fatal, indicator, reason_code, dump_trace);
 
-	if (dump_vos_trace)
+	if (dump_trace & DUMP_VOS_TRACE)
 		vosTraceDumpAll(vos_context->pMACContext, 0, 0, 500, 0);
 
 #ifdef QCA_PKT_PROTO_TRACE
-	vos_pkt_trace_buf_dump();
+	if (dump_trace & DUMP_PACKET_TRACE)
+		vos_pkt_trace_buf_dump();
 #endif
 	if (WLAN_LOG_INDICATOR_HOST_ONLY == indicator) {
 		vos_wlan_flush_host_logs_for_fatal();

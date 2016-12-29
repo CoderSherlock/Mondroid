@@ -59,7 +59,7 @@
 #include "sirMacProtDef.h"
 #include "regdomain_common.h"
 #include "rrmApi.h"
-
+#include "nan_datapath.h"
 
 #include "sapApi.h"
 
@@ -1877,8 +1877,19 @@ __limProcessSmeJoinReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
          */
         lim_update_rrm_capability(pMac, pSmeJoinReq);
 
-        /* check for the existence of start BSS session  */
+        if (pe_find_session_by_sme_session_id(pMac, pSmeJoinReq->sessionId)) {
+            limLog(pMac, LOGE,
+                 FL("A session already exist for the SME session %d"),
+                 pSmeJoinReq->sessionId);
+            vos_flush_logs(WLAN_LOG_TYPE_FATAL,
+                           WLAN_LOG_INDICATOR_HOST_DRIVER,
+                           WLAN_LOG_REASON_STALE_SESSION_FOUND,
+                           DUMP_VOS_TRACE);
+            retCode = eSIR_SME_REFUSED;
+            goto end;
+        }
 
+        /* check for the existence of start BSS session  */
         if((psessionEntry = peFindSessionByBssid(pMac,pSmeJoinReq->bssDescription.bssId,&sessionId)) != NULL)
         {
             limLog(pMac, LOGE, FL("Session(%d) Already exists for BSSID: "
@@ -2195,6 +2206,8 @@ __limProcessSmeJoinReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
 
         regMax = cfgGetRegulatoryMaxTransmitPower( pMac, psessionEntry->currentOperChannel );
 
+        localPowerConstraint = regMax;
+
         if(!pMac->psOffloadEnabled)
         {
            limExtractApCapability( pMac,
@@ -2222,16 +2235,9 @@ __limProcessSmeJoinReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
               );
         }
 
-        /* If power constraint is zero then update it with Region max.
-         * MaxTxpower will be the MIN of regmax and power constraint */
-        if (localPowerConstraint == 0)
-            localPowerConstraint = regMax;
+        psessionEntry->maxTxPower = limGetMaxTxPower(regMax,
+                   localPowerConstraint, pMac->roam.configParam.nTxPowerCap);
 
-#ifdef FEATURE_WLAN_ESE
-            psessionEntry->maxTxPower = limGetMaxTxPower(regMax, localPowerConstraint, pMac->roam.configParam.nTxPowerCap);
-#else
-            psessionEntry->maxTxPower = VOS_MIN( regMax, (localPowerConstraint) );
-#endif
         if(!pMac->psOffloadEnabled)
         {
             if (pMac->lim.gLimCurrentBssUapsd)
@@ -2255,7 +2261,8 @@ __limProcessSmeJoinReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
              }
         }
         limLog(pMac, LOG1,
-              FL("regMax = %d, localPowerConstraint = %d, max tx = %d, UAPSD flag for all AC - 0x%2x"),
+               FL("regMax = %d, localPowerConstraint = %d,"
+                  "max tx pwr = %d, UAPSD flag for all AC - 0x%2x"),
                         regMax, localPowerConstraint,
                         psessionEntry->maxTxPower,
                         psessionEntry->gUapsdPerAcBitmask);
@@ -2385,6 +2392,7 @@ __limProcessSmeReassocReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
     tpPESession        psessionEntry = NULL;
     tANI_U8            sessionId;
     tANI_U8            smeSessionId;
+    uint8_t            no_of_sessions;
     tANI_U16           transactionId;
     tPowerdBm            localPowerConstraint = 0, regMax = 0;
     tANI_U32           teleBcnEn = 0;
@@ -2419,6 +2427,20 @@ __limProcessSmeReassocReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
         goto end;
     }
 
+    no_of_sessions =
+        pe_count_session_with_sme_session_id(pMac, pReassocReq->sessionId);
+    if (no_of_sessions > 1) {
+        limLog(pMac, LOGE,
+               FL("%d sessions exist for the SME session %d"),
+               no_of_sessions, pReassocReq->sessionId);
+        vos_flush_logs(WLAN_LOG_TYPE_FATAL,
+                      WLAN_LOG_INDICATOR_HOST_DRIVER,
+                      WLAN_LOG_REASON_STALE_SESSION_FOUND,
+                      DUMP_VOS_TRACE);
+        retCode = eSIR_SME_REFUSED;
+        goto end;
+   }
+
    if((psessionEntry = peFindSessionByBssid(pMac,pReassocReq->bssDescription.bssId,&sessionId))==NULL)
     {
         limLog(pMac, LOGE, FL("Session does not exist for given bssId"));
@@ -2445,6 +2467,45 @@ __limProcessSmeReassocReq(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
 
     psessionEntry->dot11mode = pReassocReq->dot11mode;
     psessionEntry->vhtCapability = IS_DOT11_MODE_VHT(pReassocReq->dot11mode);
+
+#ifdef WLAN_FEATURE_11AC
+        if (psessionEntry->vhtCapability) {
+            if (psessionEntry->pePersona == VOS_STA_MODE)
+                psessionEntry->txBFIniFeatureEnabled =
+                      pReassocReq->txBFIniFeatureEnabled;
+            else
+                psessionEntry->txBFIniFeatureEnabled = 0;
+
+            psessionEntry->txMuBformee = pReassocReq->txMuBformee;
+            psessionEntry->enableVhtpAid = pReassocReq->enableVhtpAid;
+            psessionEntry->enableVhtGid = pReassocReq->enableVhtGid;
+            if (psessionEntry->txBFIniFeatureEnabled) {
+                if (cfgSetInt(pMac, WNI_CFG_VHT_SU_BEAMFORMEE_CAP,
+                                 psessionEntry->txBFIniFeatureEnabled)
+                                                      != eSIR_SUCCESS) {
+                    limLog(pMac, LOGE, FL("could not set  "
+                                "WNI_CFG_VHT_SU_BEAMFORMEE_CAP at CFG"));
+                    retCode = eSIR_LOGP_EXCEPTION;
+                    goto end;
+                }
+                if (cfgSetInt(pMac, WNI_CFG_VHT_CSN_BEAMFORMEE_ANT_SUPPORTED,
+                                              pReassocReq->txBFCsnValue)
+                                                       != eSIR_SUCCESS) {
+                    limLog(pMac, LOGE, FL("could not set "
+                     "WNI_CFG_VHT_CSN_BEAMFORMEE_ANT_SUPPORTED at CFG"));
+                    retCode = eSIR_LOGP_EXCEPTION;
+                    goto end;
+                }
+            }
+        }
+        limLog(pMac, LOG1,
+               FL("vhtCapability: %d txBFIniFeatureEnabled: %d"
+                 "txBFCsnValue: %d txMuBformee: %d"),
+               psessionEntry->vhtCapability,
+               psessionEntry->txBFIniFeatureEnabled,
+               pReassocReq->txBFCsnValue,
+               psessionEntry->txMuBformee);
+#endif
 
     psessionEntry->enableHtSmps = pReassocReq->enableHtSmps;
     psessionEntry->htSmpsvalue = pReassocReq->htSmps;
@@ -5755,6 +5816,31 @@ __limProcessSmeResetApCapsChange(tpAniSirGlobal pMac, tANI_U32 *pMsgBuf)
     return;
 }
 
+/* lim_register_p2p_ack_ind_cb() - Save the p2p ack indication callback.
+ * @mac_ctx: Mac pointer
+ * @msg_buf: Msg pointer containing the callback
+ *
+ * This function is used to save the p2p ack indication callback in PE.
+ *
+ * Return: None
+ */
+static void lim_register_p2p_ack_ind_cb(tpAniSirGlobal mac_ctx,
+				uint32_t *msg_buf)
+{
+	struct sir_sme_p2p_ack_ind_cb_req *sme_req =
+		(struct sir_sme_p2p_ack_ind_cb_req *)msg_buf;
+
+	if (NULL == msg_buf) {
+		limLog(mac_ctx, LOGE, FL("msg_buf is null"));
+		return;
+	}
+	if (sme_req->callback)
+		mac_ctx->p2p_ack_ind_cb =
+				sme_req->callback;
+	else
+		limLog(mac_ctx, LOGE, FL("sme_req->callback is null"));
+}
+
 /**
  * lim_register_mgmt_frame_ind_cb() - Save the Management frame
  * indication callback in PE.
@@ -6189,6 +6275,13 @@ limProcessSmeReqMessages(tpAniSirGlobal pMac, tpSirMsgQ pMsg)
             break;
         case eWNI_SME_REGISTER_MGMT_FRAME_CB:
             lim_register_mgmt_frame_ind_cb(pMac, pMsgBuf);
+            break;
+        case eWNI_SME_NDP_INITIATOR_REQ:
+        case eWNI_SME_NDP_RESPONDER_REQ:
+            lim_handle_ndp_request_message(pMac, pMsg);
+            break;
+        case eWNI_SME_REGISTER_P2P_ACK_CB:
+            lim_register_p2p_ack_ind_cb(pMac, pMsgBuf);
             break;
         default:
             vos_mem_free((v_VOID_t*)pMsg->bodyptr);

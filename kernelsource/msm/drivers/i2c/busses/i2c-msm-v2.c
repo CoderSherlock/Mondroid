@@ -32,7 +32,8 @@
 #include <linux/dma-mapping.h>
 #include <linux/i2c.h>
 #include <linux/of.h>
-#include <linux/of_i2c.h>
+#include <linux/gpio.h>
+#include <linux/of_gpio.h>
 #include <linux/msm-sps.h>
 #include <linux/msm-bus.h>
 #include <linux/msm-bus-board.h>
@@ -51,6 +52,10 @@ static int i2c_msm_xfer_wait_for_completion(struct i2c_msm_ctrl *ctrl,
 static int  i2c_msm_pm_resume(struct device *dev);
 static void i2c_msm_pm_suspend(struct device *dev);
 static void i2c_msm_clk_path_init(struct i2c_msm_ctrl *ctrl);
+static struct pinctrl_state *
+i2c_msm_rsrcs_gpio_get_state(struct i2c_msm_ctrl *ctrl, const char *name);
+static void i2c_msm_pm_pinctrl_state(struct i2c_msm_ctrl *ctrl,
+				bool runtime_active);
 
 /* string table for enum i2c_msm_xfer_mode_id */
 const char * const i2c_msm_mode_str_tbl[] = {
@@ -1080,6 +1085,18 @@ static int i2c_msm_dma_xfer_prepare(struct i2c_msm_ctrl *ctrl)
 			tx->desc_cnt_cur += 2; /* msg + tag */
 		}
 
+		/* for last buffer in a transfer msg */
+		if (buf->is_last) {
+			/* add ovrhead byte cnt for tags specific to DMA mode */
+			ctrl->xfer.rx_ovrhd_cnt += 2; /* EOT+FLUSH_STOP tags*/
+			ctrl->xfer.tx_ovrhd_cnt += 2; /* EOT+FLUSH_STOP tags */
+
+			/* increment rx desc cnt to read off tags and
+			 * increment tx desc cnt to queue EOT+FLUSH_STOP tags */
+			tx->desc_cnt_cur++;
+			rx->desc_cnt_cur++;
+		}
+
 		if ((rx->desc_cnt_cur >= I2C_MSM_DMA_RX_SZ) ||
 		    (tx->desc_cnt_cur >= I2C_MSM_DMA_TX_SZ))
 			return -ENOMEM;
@@ -1144,55 +1161,6 @@ static void i2c_msm_dma_callback_xfer_complete(void *dma_async_param)
 	complete(&ctrl->xfer.complete);
 }
 
-static int i2c_msm_dma_xfer_buf(struct i2c_msm_ctrl *ctrl,
-	struct i2c_msm_dma_chan *chan, phys_addr_t buf_phys_addr, u32 buf_len,
-								u32 flags)
-{
-	struct scatterlist sg[1];
-	struct dma_async_tx_descriptor *dma_desc;
-
-	sg_init_table(sg, 1);
-	sg_dma_len(&sg[0])     = buf_len;
-	sg_dma_address(&sg[0]) = buf_phys_addr;
-
-	dma_desc = dmaengine_prep_slave_sg(chan->dma_chan, sg, 1, chan->dir,
-									flags);
-
-	if (dma_desc < 0) {
-		dev_err(ctrl->dev,
-		   "error dmaengine_prep_slave_sg:%ld\n", PTR_ERR(dma_desc));
-		return PTR_ERR(dma_desc);
-	}
-	dma_desc->callback = i2c_msm_dma_callback_xfer_complete;
-	dma_desc->callback_param = ctrl;
-
-	dmaengine_submit(dma_desc);
-	dma_async_issue_pending(chan->dma_chan);
-
-	return 0;
-}
-
-/*
- * i2c_msm_dma_xfer_rmv_inp_fifo_tag: read the input tag off the rx chan
- *
- * The tag in the rx channel is "dont care" from DMA transfer perspective.
- * Here we queue a buffer to read this tag off the fifo.
- */
-static int i2c_msm_dma_xfer_rmv_inp_fifo_tag(struct i2c_msm_ctrl *ctrl, u32 len)
-{
-	int ret;
-	ret = i2c_msm_dma_xfer_buf(ctrl, &ctrl->xfer.dma.chan[I2C_MSM_DMA_RX],
-					 ctrl->xfer.dma.input_tag.phy_addr,
-					 len, 0);
-
-	if (ret < 0)
-		dev_err(ctrl->dev,
-			"error on reading DMA input tags len:%d sps-err:%d\n",
-			len, ret);
-
-	return ret;
-}
-
 /*
  * i2c_msm_dma_xfer_process: Queue transfers to DMA
  * @pre 1)QUP is in run state. 2) i2c_msm_dma_xfer_prepare() was called.
@@ -1201,14 +1169,18 @@ static int i2c_msm_dma_xfer_rmv_inp_fifo_tag(struct i2c_msm_ctrl *ctrl, u32 len)
 static int i2c_msm_dma_xfer_process(struct i2c_msm_ctrl *ctrl)
 {
 	struct i2c_msm_xfer_mode_dma *dma = &ctrl->xfer.dma;
-	struct i2c_msm_dma_chan *tx;
-	struct i2c_msm_dma_chan *rx;
-	struct i2c_msm_dma_buf  *buf_itr;
-	struct i2c_msm_dma_chan *chan;
+	struct i2c_msm_dma_chan *tx       = &dma->chan[I2C_MSM_DMA_TX];
+	struct i2c_msm_dma_chan *rx       = &dma->chan[I2C_MSM_DMA_RX];
+	struct scatterlist *sg_rx         = NULL;
+	struct scatterlist *sg_rx_itr     = NULL;
+	struct scatterlist *sg_tx         = NULL;
+	struct scatterlist *sg_tx_itr     = NULL;
+	struct dma_async_tx_descriptor     *dma_desc_rx;
+	struct dma_async_tx_descriptor     *dma_desc_tx;
+	struct i2c_msm_dma_buf             *buf_itr;
 	int  i;
-	int  ret           = 0;
-	u32  dma_flags     = 0; /* dma_flags!=0 only on last xfer */
-	char str[64];
+	int  ret = 0;
+
 	i2c_msm_dbg(ctrl, MSM_DBG, "Going to enqueue %zu buffers in DMA",
 							dma->buf_arr_cnt);
 
@@ -1220,88 +1192,121 @@ static int i2c_msm_dma_xfer_process(struct i2c_msm_ctrl *ctrl)
 		return ret;
 	}
 
-	tx = &dma->chan[I2C_MSM_DMA_TX];
-	rx = &dma->chan[I2C_MSM_DMA_RX];
+	sg_tx = kzalloc(sizeof(struct scatterlist) * tx->desc_cnt_cur,
+								GFP_KERNEL);
+	if (!sg_tx) {
+		ret = -ENOMEM;
+		goto dma_xfer_end;
+	}
+	sg_init_table(sg_tx, tx->desc_cnt_cur);
+	sg_tx_itr = sg_tx;
+
+	sg_rx = kzalloc(sizeof(struct scatterlist) * rx->desc_cnt_cur,
+								GFP_KERNEL);
+	if (!sg_rx) {
+		ret = -ENOMEM;
+		goto dma_xfer_end;
+	}
+	sg_init_table(sg_rx, rx->desc_cnt_cur);
+	sg_rx_itr = sg_rx;
+
 	buf_itr = dma->buf_arr;
 
 	for (i = 0; i < dma->buf_arr_cnt ; ++i, ++buf_itr) {
 		/* Queue tag */
-		i2c_msm_dbg(ctrl, MSM_DBG, "queueing dma tag %s",
-			i2c_msm_dbg_dma_tag_to_str(&buf_itr->tag, str,
-							ARRAY_SIZE(str)));
+		sg_dma_address(sg_tx_itr) = buf_itr->tag.buf;
+		sg_dma_len(sg_tx_itr) = buf_itr->tag.len;
+		++sg_tx_itr;
 
-		ret = i2c_msm_dma_xfer_buf(ctrl, tx, buf_itr->tag.buf,
-						buf_itr->tag.len, dma_flags);
-		if (ret) {
-			dev_err(ctrl->dev, "error:%d on queuing tag in dma.\n",
-									ret);
-			goto dma_xfer_end;
-		}
-
-		/* Step over read tag + len in input FIFO on read transfer*/
-		if (buf_itr->is_rx) {
-			ret = i2c_msm_dma_xfer_rmv_inp_fifo_tag(ctrl, 2);
-			if (ret)
-				goto dma_xfer_end;
-		}
-
-		/* Set EOT on last transfer if it is a write */
-		if (buf_itr->is_last && !ctrl->xfer.last_is_rx)
-			dma_flags = (SPS_IOVEC_FLAG_EOT | SPS_IOVEC_FLAG_NWD);
-
-		/* Queue data to appropriate channel */
-		chan = buf_itr->is_rx ? rx : tx;
-
-		i2c_msm_dbg(ctrl, MSM_DBG,
-			"Queue data buf to %s chan desc(phy:0x%llx len:%zu) "
-			"EOT:%d NWD:%d",
-			chan->name, (u64) buf_itr->ptr.phy_addr, buf_itr->len,
-			!!(dma_flags & SPS_IOVEC_FLAG_EOT),
-			!!(dma_flags & SPS_IOVEC_FLAG_NWD));
-
-		ret = i2c_msm_dma_xfer_buf(ctrl, chan, buf_itr->ptr.phy_addr,
-						buf_itr->len, dma_flags);
-		if (ret < 0) {
-			dev_err(ctrl->dev,
-				"error:%d on queuing data to %s DMA channel\n",
-				ret, chan->name);
-			goto dma_xfer_end;
-		}
-	}
-
-	if (ctrl->xfer.last_is_rx) {
-		/*
-		 * Reading the tag off the input fifo has side effects and
-		 * it is mandatory for getting the DMA's interrupt.
+		/* read off tag + len bytes(don't care) in input FIFO
+		 * on read transfer
 		 */
-		ret = i2c_msm_dma_xfer_rmv_inp_fifo_tag(ctrl, 2);
-		if (ret)
-			goto dma_xfer_end;
+		if (buf_itr->is_rx) {
+			/* rid of input tag */
+			sg_dma_address(sg_rx_itr) =
+					ctrl->xfer.dma.input_tag.phy_addr;
+			sg_dma_len(sg_rx_itr)     = QUP_BUF_OVERHD_BC;
+			++sg_rx_itr;
 
-		dma_flags = (SPS_IOVEC_FLAG_EOT | SPS_IOVEC_FLAG_NWD);
-
-		/* queue the two bytes of EOT + FLUSH_STOP tags to tx. */
-		ret = i2c_msm_dma_xfer_buf(ctrl, tx,
-			dma->eot_n_flush_stop_tags.phy_addr, 2, dma_flags);
-		if (ret < 0) {
-			dev_err(ctrl->dev,
-			"error:%d on queuing EOT+FLUSH_STOP tags to tx EOT:1 NWD:1\n",
-									ret);
-			goto dma_xfer_end;
+			/* queue data buffer */
+			sg_dma_address(sg_rx_itr) = buf_itr->ptr.phy_addr;
+			sg_dma_len(sg_rx_itr)     = buf_itr->len;
+			++sg_rx_itr;
+		} else {
+			sg_dma_address(sg_tx_itr) = buf_itr->ptr.phy_addr;
+			sg_dma_len(sg_tx_itr)     = buf_itr->len;
+			++sg_tx_itr;
 		}
 	}
+
+	/* this tag will be copied to rx fifo */
+	sg_dma_address(sg_tx_itr) = dma->eot_n_flush_stop_tags.phy_addr;
+	sg_dma_len(sg_tx_itr)     = QUP_BUF_OVERHD_BC;
+	++sg_tx_itr;
+
+	/*
+	 * Reading the tag off the input fifo has side effects and
+	 * it is mandatory for getting the DMA's interrupt.
+	 */
+	sg_dma_address(sg_rx_itr) = ctrl->xfer.dma.input_tag.phy_addr;
+	sg_dma_len(sg_rx_itr)     = QUP_BUF_OVERHD_BC;
+	++sg_rx_itr;
+
+	/*
+	 * We only want a single BAM interrupt per transfer, and we always
+	 * add a flush-stop i2c tag as the last tx sg entry. Since the dma
+	 * driver puts the supplied BAM flags only on the last BAM descriptor,
+	 * the flush stop will always be the one which generate that interrupt
+	 * and invokes the callback.
+	 */
+	dma_desc_tx = dmaengine_prep_slave_sg(tx->dma_chan,
+						sg_tx,
+						sg_tx_itr - sg_tx,
+						tx->dir,
+						(SPS_IOVEC_FLAG_EOT |
+							SPS_IOVEC_FLAG_NWD));
+	if (dma_desc_tx < 0) {
+		dev_err(ctrl->dev, "error dmaengine_prep_slave_sg tx:%ld\n",
+							PTR_ERR(dma_desc_tx));
+		ret = PTR_ERR(dma_desc_tx);
+		goto dma_xfer_end;
+	}
+
+	/* callback defined for tx dma desc */
+	dma_desc_tx->callback       = i2c_msm_dma_callback_xfer_complete;
+	dma_desc_tx->callback_param = ctrl;
+	dmaengine_submit(dma_desc_tx);
+	dma_async_issue_pending(tx->dma_chan);
+
+	/* queue the rx dma desc */
+	dma_desc_rx = dmaengine_prep_slave_sg(rx->dma_chan, sg_rx,
+					sg_rx_itr - sg_rx, rx->dir, 0);
+	if (dma_desc_rx < 0) {
+		dev_err(ctrl->dev,
+			"error dmaengine_prep_slave_sg rx:%ld\n",
+						PTR_ERR(dma_desc_rx));
+		ret = PTR_ERR(dma_desc_rx);
+		goto dma_xfer_end;
+	}
+
+	dmaengine_submit(dma_desc_rx);
+	dma_async_issue_pending(rx->dma_chan);
 
 	/* Set the QUP State to Run when completes the txn */
 	ret = i2c_msm_qup_state_set(ctrl, QUP_STATE_RUN);
 	if (ret) {
 		dev_err(ctrl->dev, "transition to run state failed before DMA transaction :%d\n",
 									ret);
-		return ret;
+		goto dma_xfer_end;
 	}
 
 	ret = i2c_msm_xfer_wait_for_completion(ctrl, &ctrl->xfer.complete);
 
 dma_xfer_end:
+	/* free scatter-gather lists */
+	kfree(sg_tx);
+	kfree(sg_rx);
+
 	return ret;
 }
 
@@ -1443,11 +1448,6 @@ static int i2c_msm_dma_xfer(struct i2c_msm_ctrl *ctrl)
 	if (ret) {
 		dev_err(ctrl->dev, "DMA Init Failed: %d\n", ret);
 		return ret;
-	}
-
-	if (ctrl->xfer.last_is_rx) {
-		ctrl->xfer.rx_ovrhd_cnt += 2; /* EOT+FLUSH_STOP tags*/
-		ctrl->xfer.tx_ovrhd_cnt += 2; /* EOT+FLUSH_STOP tags */
 	}
 
 	/* dma map user's buffers and create tags */
@@ -1908,74 +1908,81 @@ static void i2c_msm_qup_init(struct i2c_msm_ctrl *ctrl)
 			"error on verifying HW support (I2C_MAST_GEN=0)\n");
 }
 
-/*
- * qup_i2c_try_recover_bus_busy: issue QUP bus clear command
- */
-static int qup_i2c_try_recover_bus_busy(struct i2c_msm_ctrl *ctrl)
+
+static void qup_i2c_recover_bit_bang(struct i2c_msm_ctrl *ctrl)
 {
-	int ret;
-	ulong min_sleep_usec;
+	int i, ret;
+	int gpio_clk;
+	int gpio_dat;
+	bool gpio_clk_status = false;
+	uint32_t status = readl_relaxed(ctrl->rsrcs.base + QUP_I2C_STATUS);
+	struct pinctrl_state *bitbang;
 
-	/* call i2c_msm_qup_init() to set core in idle state */
-	i2c_msm_qup_init(ctrl);
+	disable_irq(ctrl->rsrcs.irq);
+	gpio_clk = of_get_named_gpio(ctrl->adapter.dev.of_node, "qcom,i2c-clk",
+				     0);
+	gpio_dat = of_get_named_gpio(ctrl->adapter.dev.of_node, "qcom,i2c-dat",
+				     0);
 
-	/* must be in run state for bus clear */
-	ret = i2c_msm_qup_state_set(ctrl, QUP_STATE_RUN);
-	if (ret < 0) {
-		dev_err(ctrl->dev, "error: bus clear fail to set run state\n");
-		return ret;
+	if (gpio_clk < 0 || gpio_dat < 0) {
+		dev_warn(ctrl->dev, "SW bigbang err: i2c gpios not known\n");
+		goto recovery_exit;
 	}
 
-	/*
-	 * call i2c_msm_qup_xfer_init_run_state() to set clock dividers.
-	 * the dividers are necessary for bus clear.
-	 */
-	i2c_msm_qup_xfer_init_run_state(ctrl);
+	bitbang = i2c_msm_rsrcs_gpio_get_state(ctrl, "i2c_bitbang");
+	if (bitbang)
+		ret = pinctrl_select_state(ctrl->rsrcs.pinctrl, bitbang);
+	if (!bitbang || ret) {
+		dev_err(ctrl->dev, "GPIO pins have no bitbang setting\n");
+		goto recovery_exit;
+	}
 
-	writel_relaxed(0x1, ctrl->rsrcs.base + QUP_I2C_MASTER_BUS_CLR);
-
-	/*
-	 * wait for recovery (9 clock pulse cycles) to complete.
-	 * min_time = 9 clock *10  (1000% margin)
-	 * max_time = 10* min_time
-	 */
-	min_sleep_usec =
-	  max_t(ulong, (9 * 10 * USEC_PER_SEC) / ctrl->rsrcs.clk_freq_out, 100);
-
-	usleep_range(min_sleep_usec, min_sleep_usec * 10);
-	return ret;
-}
-
-static int qup_i2c_recover_bus_busy(struct i2c_msm_ctrl *ctrl)
-{
-	u32 bus_clr, bus_active, status;
-	int retry = 0;
-	dev_info(ctrl->dev, "Executing bus recovery procedure (9 clk pulse)\n");
-
-	do {
-		qup_i2c_try_recover_bus_busy(ctrl);
-		bus_clr    = readl_relaxed(ctrl->rsrcs.base +
-							QUP_I2C_MASTER_BUS_CLR);
-		status     = readl_relaxed(ctrl->rsrcs.base + QUP_I2C_STATUS);
-		bus_active = status & I2C_STATUS_BUS_ACTIVE;
-		if (++retry >= I2C_QUP_MAX_BUS_RECOVERY_RETRY)
+	for (i = 0; i < 9; i++) {
+		if (gpio_get_value(gpio_dat) && gpio_clk_status)
 			break;
-	} while (bus_clr || bus_active);
+		gpio_direction_output(gpio_clk, 0);
+		udelay(5);
+		gpio_direction_output(gpio_dat, 0);
+		udelay(5);
+		gpio_direction_input(gpio_clk);
+		udelay(5);
+		if (!gpio_get_value(gpio_clk))
+			udelay(20);
+		if (!gpio_get_value(gpio_clk))
+			usleep_range(10000, 10001);
+		gpio_clk_status = gpio_get_value(gpio_clk);
+		gpio_direction_input(gpio_dat);
+		udelay(5);
+	}
 
-	dev_info(ctrl->dev, "Bus recovery %s after %d retries\n",
-		(bus_clr || bus_active) ? "fail" : "success", retry);
-	return 0;
+	i2c_msm_pm_pinctrl_state(ctrl, true);
+	udelay(10);
+
+	status = readl_relaxed(ctrl->rsrcs.base + QUP_I2C_STATUS);
+	if (!(status & I2C_STATUS_BUS_ACTIVE)) {
+		dev_info(ctrl->dev, "Bus busy cleared after %d clock cycles, "
+			 "status %x\n",
+			 i, status);
+		goto recovery_exit;
+	}
+
+	dev_warn(ctrl->dev, "Bus still busy, status %x\n", status);
+recovery_exit:
+	enable_irq(ctrl->rsrcs.irq);
 }
 
 static int i2c_msm_qup_post_xfer(struct i2c_msm_ctrl *ctrl, int err)
 {
+	if (ctrl->xfer.err == I2C_MSM_ERR_ARB_LOST)
+		qup_i2c_recover_bit_bang(ctrl);
+
 	/* poll until bus is released */
 	if (i2c_msm_qup_poll_bus_active_unset(ctrl)) {
 		if ((ctrl->xfer.err == I2C_MSM_ERR_ARB_LOST) ||
 		    (ctrl->xfer.err == I2C_MSM_ERR_BUS_ERR)  ||
 		    (ctrl->xfer.err == I2C_MSM_ERR_TIMEOUT)) {
 			if (i2c_msm_qup_slv_holds_bus(ctrl))
-				qup_i2c_recover_bus_busy(ctrl);
+				qup_i2c_recover_bit_bang(ctrl);
 
 			/* do not generalize error to EIO if its already set */
 			if (!err)
@@ -2281,6 +2288,11 @@ i2c_msm_frmwrk_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 	int ret = 0;
 	struct i2c_msm_ctrl      *ctrl = i2c_get_adapdata(adap);
 	struct i2c_msm_xfer      *xfer = &ctrl->xfer;
+
+	if (IS_ERR_OR_NULL(msgs)) {
+		dev_err(ctrl->dev, " error on msgs Accessing invalid  pointer location\n");
+		return PTR_ERR(msgs);
+	}
 
 	ret = i2c_msm_pm_xfer_start(ctrl);
 	if (ret)
@@ -2749,7 +2761,7 @@ static int i2c_msm_pm_sys_resume_noirq(struct device *dev)
 static void i2c_msm_pm_rt_init(struct device *dev)
 {
 	pm_runtime_set_suspended(dev);
-	pm_runtime_set_autosuspend_delay(dev, MSEC_PER_SEC);
+	pm_runtime_set_autosuspend_delay(dev, (MSEC_PER_SEC >> 2));
 	pm_runtime_use_autosuspend(dev);
 	pm_runtime_enable(dev);
 }
@@ -2784,10 +2796,13 @@ static void i2c_msm_pm_rt_init(struct device *dev) {}
 #endif
 
 static const struct dev_pm_ops i2c_msm_pm_ops = {
+#ifdef CONFIG_PM_SLEEP
 	.suspend_noirq		= i2c_msm_pm_sys_suspend_noirq,
 	.resume_noirq		= i2c_msm_pm_sys_resume_noirq,
-	.runtime_suspend	= i2c_msm_pm_rt_suspend,
-	.runtime_resume		= i2c_msm_pm_rt_resume,
+#endif
+	SET_RUNTIME_PM_OPS(i2c_msm_pm_rt_suspend,
+			   i2c_msm_pm_rt_resume,
+			   NULL)
 };
 
 static u32 i2c_msm_frmwrk_func(struct i2c_adapter *adap)
@@ -2814,15 +2829,11 @@ static int i2c_msm_frmwrk_reg(struct platform_device *pdev,
 
 	ctrl->adapter.nr = pdev->id;
 	ctrl->adapter.dev.parent = &pdev->dev;
+	ctrl->adapter.dev.of_node = pdev->dev.of_node;
 	ret = i2c_add_numbered_adapter(&ctrl->adapter);
 	if (ret) {
 		dev_err(ctrl->dev, "error i2c_add_adapter failed\n");
 		return ret;
-	}
-
-	if (ctrl->dev->of_node) {
-		ctrl->adapter.dev.of_node = pdev->dev.of_node;
-		of_i2c_register_devices(&ctrl->adapter);
 	}
 
 	return ret;
@@ -2967,7 +2978,7 @@ static int i2c_msm_init(void)
 {
 	return platform_driver_register(&i2c_msm_driver);
 }
-subsys_initcall(i2c_msm_init);
+arch_initcall(i2c_msm_init);
 
 static void i2c_msm_exit(void)
 {

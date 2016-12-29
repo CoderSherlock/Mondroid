@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -34,6 +34,7 @@
 #include <linux/srcu.h>
 #include <linux/wait.h>
 #include <soc/qcom/smem.h>
+#include <soc/qcom/tracer_pkt.h>
 #include "glink_core_if.h"
 #include "glink_private.h"
 #include "glink_xprt_if.h"
@@ -49,6 +50,7 @@
 #define RPM_TOC_SIZE 256
 #define RPM_MAX_TOC_ENTRIES 20
 #define RPM_FIFO_ADDR_ALIGN_BYTES 3
+#define TRACER_PKT_FEATURE BIT(2)
 
 /**
  * enum command_types - definition of the types of commands sent/received
@@ -68,6 +70,8 @@
  * @READ_NOTIF_CMD:		Request for a notification when this cmd is read
  * @RX_DONE_W_REUSE_CMD:	Same as @RX_DONE but also reuse the used intent
  * @SIGNALS_CMD:		Sideband signals
+ * @TRACER_PKT_CMD:		Start of a Tracer Packet Command
+ * @TRACER_PKT_CONT_CMD:	Continuation or end of a Tracer Packet Command
  */
 enum command_types {
 	VERSION_CMD,
@@ -86,6 +90,8 @@ enum command_types {
 	READ_NOTIF_CMD,
 	RX_DONE_W_REUSE_CMD,
 	SIGNALS_CMD,
+	TRACER_PKT_CMD,
+	TRACER_PKT_CONT_CMD,
 };
 
 /**
@@ -105,18 +111,44 @@ struct channel_desc {
 };
 
 /**
+ * struct mailbox_config_info - description of a mailbox tranposrt channel
+ * @tx_read_index:	Offset into the tx fifo where data should be read from.
+ * @tx_write_index:	Offset into the tx fifo where new data will be placed.
+ * @tx_size:		Size of the transmit fifo in bytes.
+ * @rx_read_index:	Offset into the rx fifo where data should be read from.
+ * @rx_write_index:	Offset into the rx fifo where new data will be placed.
+ * @rx_size:		Size of the receive fifo in bytes.
+ * @fifo:		The fifos for the channel.
+ */
+struct mailbox_config_info {
+	uint32_t tx_read_index;
+	uint32_t tx_write_index;
+	uint32_t tx_size;
+	uint32_t rx_read_index;
+	uint32_t rx_write_index;
+	uint32_t rx_size;
+	char fifo[]; /* tx fifo, then rx fifo */
+};
+
+/**
  * struct edge_info - local information for managing a single complete edge
  * @xprt_if:			The transport interface registered with the
  *				glink core associated with this edge.
  * @xprt_cfg:			The transport configuration for the glink core
  *				assocaited with this edge.
  * @intentless:			True if this edge runs in intentless mode.
+ * @irq_disabled:		Flag indicating the whether interrupt is enabled
+ *				or disabled.
  * @remote_proc_id:		The SMEM processor id for the remote side.
+ * @rx_reset_reg:		Reference to the register to reset the rx irq
+ *				line, if applicable.
  * @out_irq_reg:		Reference to the register to send an irq to the
  *				remote side.
  * @out_irq_mask:		Mask written to @out_irq_reg to trigger the
  *				correct irq.
  * @irq_line:			The incoming interrupt line.
+ * @tx_irq_count:		Number of interrupts triggered.
+ * @rx_irq_count:		Number of interrupts received.
  * @tx_ch_desc:			Reference to the channel description structure
  *				for tx in SMEM for this edge.
  * @rx_ch_desc:			Reference to the channel description structure
@@ -137,20 +169,35 @@ struct channel_desc {
  *				been sent, and a response is pending from the
  *				remote side.  Protected by @write_lock.
  * @kwork:			Work to be executed when an irq is received.
- * @kworker:			Handle to the entity processing @kwork.
+ * @kworker:			Handle to the entity processing of
+				deferred commands.
+ * @tasklet			Handle to tasklet to process incoming data
+				packets in atomic manner.
  * @task:			Handle to the task context used to run @kworker.
  * @use_ref:			Active uses of this transport use this to grab
  *				a reference.  Used for ssr synchronization.
  * @in_ssr:			Signals if this transport is in ssr.
+ * @rx_lock:			Used to serialize concurrent instances of rx
+ *				processing.
+ * @deferred_cmds:		List of deferred commands that need to be
+ *				processed in process context.
+ * @num_pw_states:		Size of @ramp_time_us.
+ * @ramp_time_us:		Array of ramp times in microseconds where array
+ *				index position represents a power state.
+ * @mailbox:			Mailbox transport channel description reference.
  */
 struct edge_info {
 	struct glink_transport_if xprt_if;
 	struct glink_core_transport_cfg xprt_cfg;
 	bool intentless;
+	bool irq_disabled;
 	uint32_t remote_proc_id;
+	void __iomem *rx_reset_reg;
 	void __iomem *out_irq_reg;
 	uint32_t out_irq_mask;
 	uint32_t irq_line;
+	uint32_t tx_irq_count;
+	uint32_t rx_irq_count;
 	struct channel_desc *tx_ch_desc;
 	struct channel_desc *rx_ch_desc;
 	void __iomem *tx_fifo;
@@ -166,18 +213,44 @@ struct edge_info {
 	struct kthread_work kwork;
 	struct kthread_worker kworker;
 	struct task_struct *task;
+	struct tasklet_struct tasklet;
 	struct srcu_struct use_ref;
 	bool in_ssr;
+	spinlock_t rx_lock;
+	struct list_head deferred_cmds;
+	uint32_t num_pw_states;
+	unsigned long *ramp_time_us;
+	struct mailbox_config_info *mailbox;
+};
+
+/**
+ * struct deferred_cmd - description of a command to be processed later
+ * @list_node:	Used to put this command on a list in the edge.
+ * @id:		ID of the command.
+ * @param1:	Parameter one of the command.
+ * @param2:	Parameter two of the command.
+ * @data:	Extra data associated with the command, if applicable.
+ *
+ * This structure stores the relevant information of a command that was removed
+ * from the fifo but needs to be processed at a later time.
+ */
+struct deferred_cmd {
+	struct list_head list_node;
+	uint16_t id;
+	uint16_t param1;
+	uint32_t param2;
+	void *data;
 };
 
 static uint32_t negotiate_features_v1(struct glink_transport_if *if_ptr,
 				      const struct glink_core_version *version,
 				      uint32_t features);
+static void register_debugfs_info(struct edge_info *einfo);
 
 static struct edge_info *edge_infos[NUM_SMEM_SUBSYSTEMS];
 static DEFINE_MUTEX(probe_lock);
 static struct glink_core_version versions[] = {
-	{1, 0x00, negotiate_features_v1},
+	{1, TRACER_PKT_FEATURE, negotiate_features_v1},
 };
 
 /**
@@ -192,6 +265,7 @@ static void send_irq(struct edge_info *einfo)
 	 */
 	wmb();
 	writel_relaxed(einfo->out_irq_mask, einfo->out_irq_reg);
+	einfo->tx_irq_count++;
 }
 
 /**
@@ -548,12 +622,17 @@ static int fifo_tx(struct edge_info *einfo, const void *data, int len)
 	unsigned long flags;
 	int ret;
 
+	DEFINE_WAIT(wait);
+
 	spin_lock_irqsave(&einfo->write_lock, flags);
 	while (fifo_write_avail(einfo) < len) {
 		send_tx_blocked_signal(einfo);
 		spin_unlock_irqrestore(&einfo->write_lock, flags);
-		wait_event(einfo->tx_blocked_queue,
-				fifo_write_avail(einfo) < len || einfo->in_ssr);
+		prepare_to_wait(&einfo->tx_blocked_queue, &wait,
+							TASK_UNINTERRUPTIBLE);
+		if (fifo_write_avail(einfo) < len && !einfo->in_ssr)
+			schedule();
+		finish_wait(&einfo->tx_blocked_queue, &wait);
 		spin_lock_irqsave(&einfo->write_lock, flags);
 		if (einfo->in_ssr) {
 			spin_unlock_irqrestore(&einfo->write_lock, flags);
@@ -567,46 +646,14 @@ static int fifo_tx(struct edge_info *einfo, const void *data, int len)
 }
 
 /**
- * process_remote_open() - process an open command from the remote side
- * @einfo:	The edge where the command was received on.
- * @rcid:	The remote channel id associated with this open command.
- * @name_len:	The length of the channel name in the open command.
- */
-static void process_remote_open(struct edge_info *einfo, uint16_t rcid,
-				uint32_t name_len)
-{
-	uint32_t len;
-	char *name;
-	char trash[FIFO_ALIGNMENT];
-
-	len = ALIGN(name_len, FIFO_ALIGNMENT);
-	name = kmalloc(len, GFP_KERNEL);
-	if (!name) {
-		pr_err("No memory available to rx ch open cmd name.  Discarding cmd.\n");
-		while (len) {
-			fifo_read(einfo, trash, FIFO_ALIGNMENT);
-			len -= FIFO_ALIGNMENT;
-		}
-		return;
-	}
-
-	fifo_read(einfo, name, len);
-
-	einfo->xprt_if.glink_core_if_ptr->rx_cmd_ch_remote_open(
-						&einfo->xprt_if,
-						rcid,
-						name,
-						SMEM_XPRT_ID);
-}
-
-/**
  * process_rx_data() - process received data from an edge
  * @einfo:	The edge the data was received on.
+ * @cmd_id:	ID to specify the type of data.
  * @rcid:	The remote channel id associated with the data.
  * @intend_id:	The intent the data should be put in.
  */
-static void process_rx_data(struct edge_info *einfo, uint32_t rcid,
-			    uint32_t intent_id)
+static void process_rx_data(struct edge_info *einfo, uint16_t cmd_id,
+			    uint32_t rcid, uint32_t intent_id)
 {
 	struct command {
 		uint32_t frag_size;
@@ -628,7 +675,7 @@ static void process_rx_data(struct edge_info *einfo, uint32_t rcid,
 		err = true;
 	} else if (intent->data == NULL) {
 		if (einfo->intentless) {
-			intent->data = kmalloc(cmd.frag_size, GFP_KERNEL);
+			intent->data = kmalloc(cmd.frag_size, GFP_ATOMIC);
 			if (!intent->data)
 				err = true;
 			else
@@ -680,6 +727,12 @@ static void process_rx_data(struct edge_info *einfo, uint32_t rcid,
 	if (alignment)
 		fifo_read(einfo, trash, alignment);
 
+	if (unlikely((cmd_id == TRACER_PKT_CMD ||
+		      cmd_id == TRACER_PKT_CONT_CMD) && !cmd.size_remaining)) {
+		tracer_pkt_log_event(intent->data, GLINK_XPRT_RX);
+		intent->tracer_pkt = true;
+	}
+
 	einfo->xprt_if.glink_core_if_ptr->rx_put_pkt_ctx(&einfo->xprt_if,
 							rcid,
 							intent,
@@ -688,14 +741,67 @@ static void process_rx_data(struct edge_info *einfo, uint32_t rcid,
 }
 
 /**
- * rx_worker() - worker function to process received commands
- * @work:	kwork associated with the edge to process commands on.
+ * queue_cmd() - queue a deferred command for later processing
+ * @einfo:	Edge to queue commands on.
+ * @cmd:	Command to queue.
+ * @data:	Command specific data to queue with the command.
  *
- * Assumes that only one instance of this function will be operating on any
- * particular edge at any point in time to eliminate the need for locking read
- * operations.
+ * Return: True if queuing was successful, false otherwise.
  */
-static void rx_worker(struct kthread_work *work)
+static bool queue_cmd(struct edge_info *einfo, void *cmd, void *data)
+{
+	struct command {
+		uint16_t id;
+		uint16_t param1;
+		uint32_t param2;
+	};
+	struct command *_cmd = cmd;
+	struct deferred_cmd *d_cmd;
+
+	d_cmd = kmalloc(sizeof(*d_cmd), GFP_ATOMIC);
+	if (!d_cmd) {
+		GLINK_ERR("%s: Discarding cmd %d\n", __func__, _cmd->id);
+		return false;
+	}
+	d_cmd->id = _cmd->id;
+	d_cmd->param1 = _cmd->param1;
+	d_cmd->param2 = _cmd->param2;
+	d_cmd->data = data;
+	list_add_tail(&d_cmd->list_node, &einfo->deferred_cmds);
+	queue_kthread_work(&einfo->kworker, &einfo->kwork);
+	return true;
+}
+
+/**
+ * get_rx_fifo() - Find the rx fifo for an edge
+ * @einfo:	Edge to find the fifo for.
+ *
+ * Return: True if fifo was found, false otherwise.
+ */
+static bool get_rx_fifo(struct edge_info *einfo)
+{
+	if (einfo->mailbox) {
+		einfo->rx_fifo = &einfo->mailbox->fifo[einfo->mailbox->tx_size];
+		einfo->rx_fifo_size = einfo->mailbox->rx_size;
+	} else {
+		einfo->rx_fifo = smem_get_entry(SMEM_GLINK_NATIVE_XPRT_FIFO_1,
+							&einfo->rx_fifo_size,
+							einfo->remote_proc_id,
+							SMEM_ITEM_CACHED_FLAG);
+		if (!einfo->rx_fifo)
+			return false;
+	}
+
+	return true;
+}
+
+/**
+ * __rx_worker() - process received commands on a specific edge
+ * @einfo:	Edge to process commands on.
+ * @atomic_ctx:	Indicates if the caller is in atomic context and requires any
+ *		non-atomic operations to be deferred.
+ */
+static void __rx_worker(struct edge_info *einfo, bool atomic_ctx)
 {
 	struct command {
 		uint16_t id;
@@ -708,23 +814,24 @@ static void rx_worker(struct kthread_work *work)
 	};
 	struct command cmd;
 	struct intent_desc intent;
-	struct edge_info *einfo;
+	struct intent_desc *intents;
 	int i;
 	bool granted;
 	unsigned long flags;
 	bool trigger_wakeup = false;
 	int rcu_id;
-
-	einfo = container_of(work, struct edge_info, kwork);
+	uint16_t rcid;
+	uint32_t name_len;
+	uint32_t len;
+	char *name;
+	char trash[FIFO_ALIGNMENT];
+	struct deferred_cmd *d_cmd;
+	void *cmd_data;
 
 	rcu_id = srcu_read_lock(&einfo->use_ref);
 
 	if (unlikely(!einfo->rx_fifo)) {
-		einfo->rx_fifo = smem_get_entry(SMEM_GLINK_NATIVE_XPRT_FIFO_1,
-							&einfo->rx_fifo_size,
-							einfo->remote_proc_id,
-							SMEM_ITEM_CACHED_FLAG);
-		if (!einfo->rx_fifo) {
+		if (!get_rx_fifo(einfo)) {
 			srcu_read_unlock(&einfo->use_ref, rcu_id);
 			return;
 		}
@@ -736,14 +843,14 @@ static void rx_worker(struct kthread_work *work)
 		srcu_read_unlock(&einfo->use_ref, rcu_id);
 		return;
 	}
-	if (fifo_write_avail(einfo)) {
-		if (einfo->tx_resume_needed) {
+	if (!atomic_ctx) {
+		if (einfo->tx_resume_needed && fifo_write_avail(einfo)) {
 			einfo->tx_resume_needed = false;
 			einfo->xprt_if.glink_core_if_ptr->tx_resume(
 							&einfo->xprt_if);
 		}
 		spin_lock_irqsave(&einfo->write_lock, flags);
-		if (einfo->tx_blocked_signal_sent) {
+		if (waitqueue_active(&einfo->tx_blocked_queue)) {
 			einfo->tx_blocked_signal_sent = false;
 			trigger_wakeup = true;
 		}
@@ -753,64 +860,230 @@ static void rx_worker(struct kthread_work *work)
 	}
 
 
-	while (fifo_read_avail(einfo)) {
+	/*
+	 * Access to the fifo needs to be synchronized, however only the calls
+	 * into the core from process_rx_data() are compatible with an atomic
+	 * processing context.  For everything else, we need to do all the fifo
+	 * processing, then unlock the lock for the call into the core.  Data
+	 * in the fifo is allowed to be processed immediately instead of being
+	 * ordered with the commands because the channel open process prevents
+	 * intents from being queued (which prevents data from being sent) until
+	 * all the channel open commands are processed by the core, thus
+	 * eliminating a race.
+	 */
+	spin_lock_irqsave(&einfo->rx_lock, flags);
+	while (fifo_read_avail(einfo) ||
+			(!atomic_ctx && !list_empty(&einfo->deferred_cmds))) {
 		if (einfo->in_ssr)
 			break;
-		fifo_read(einfo, &cmd, sizeof(cmd));
+
+		if (!atomic_ctx && !list_empty(&einfo->deferred_cmds)) {
+			d_cmd = list_first_entry(&einfo->deferred_cmds,
+						struct deferred_cmd, list_node);
+			list_del(&d_cmd->list_node);
+			cmd.id = d_cmd->id;
+			cmd.param1 = d_cmd->param1;
+			cmd.param2 = d_cmd->param2;
+			cmd_data = d_cmd->data;
+			kfree(d_cmd);
+		} else {
+			fifo_read(einfo, &cmd, sizeof(cmd));
+			cmd_data = NULL;
+		}
+
 		switch (cmd.id) {
 		case VERSION_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->rx_cmd_version(
 								&einfo->xprt_if,
 								cmd.param1,
 								cmd.param2);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case VERSION_ACK_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->rx_cmd_version_ack(
 								&einfo->xprt_if,
 								cmd.param1,
 								cmd.param2);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case OPEN_CMD:
-			process_remote_open(einfo, cmd.param1, cmd.param2);
+			rcid = cmd.param1;
+			name_len = cmd.param2;
+
+			if (cmd_data) {
+				name = cmd_data;
+			} else {
+				len = ALIGN(name_len, FIFO_ALIGNMENT);
+				name = kmalloc(len, GFP_ATOMIC);
+				if (!name) {
+					pr_err("No memory available to rx ch open cmd name.  Discarding cmd.\n");
+					while (len) {
+						fifo_read(einfo, trash,
+								FIFO_ALIGNMENT);
+						len -= FIFO_ALIGNMENT;
+					}
+					break;
+				}
+				fifo_read(einfo, name, len);
+			}
+			if (atomic_ctx) {
+				if (!queue_cmd(einfo, &cmd, name))
+					kfree(name);
+				break;
+			}
+
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
+			einfo->xprt_if.glink_core_if_ptr->rx_cmd_ch_remote_open(
+								&einfo->xprt_if,
+								rcid,
+								name,
+								SMEM_XPRT_ID);
+			kfree(name);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case CLOSE_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->
 							rx_cmd_ch_remote_close(
 								&einfo->xprt_if,
 								cmd.param1);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case OPEN_ACK_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->rx_cmd_ch_open_ack(
 								&einfo->xprt_if,
 								cmd.param1,
 								SMEM_XPRT_ID);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case RX_INTENT_CMD:
-			for (i = 0; i < cmd.param2; ++i) {
-				fifo_read(einfo, &intent, sizeof(intent));
+			/*
+			 * One intent listed with this command.  This is the
+			 * expected case and can be optimized over the general
+			 * case of an array of intents.
+			 */
+			if (cmd.param2 == 1) {
+				if (cmd_data) {
+					intent.id = ((struct intent_desc *)
+								cmd_data)->id;
+					intent.size = ((struct intent_desc *)
+								cmd_data)->size;
+					kfree(cmd_data);
+				} else {
+					fifo_read(einfo, &intent,
+								sizeof(intent));
+				}
+				if (atomic_ctx) {
+					cmd_data = kmalloc(sizeof(intent),
+								GFP_ATOMIC);
+					if (!cmd_data) {
+						pr_err("%s: dropping cmd %d\n",
+								__func__,
+								cmd.id);
+						break;
+					}
+					((struct intent_desc *)cmd_data)->id =
+								intent.id;
+					((struct intent_desc *)cmd_data)->size =
+								intent.size;
+					if (!queue_cmd(einfo, &cmd, cmd_data))
+						kfree(cmd_data);
+					break;
+				}
+				spin_unlock_irqrestore(&einfo->rx_lock, flags);
 				einfo->xprt_if.glink_core_if_ptr->
 						rx_cmd_remote_rx_intent_put(
 								&einfo->xprt_if,
 								cmd.param1,
 								intent.id,
 								intent.size);
+				spin_lock_irqsave(&einfo->rx_lock, flags);
+				break;
 			}
+
+			/* Array of intents to process */
+			if (cmd_data) {
+				intents = cmd_data;
+			} else {
+				intents = kmalloc(sizeof(*intents) * cmd.param2,
+								GFP_ATOMIC);
+				if (!intents) {
+					for (i = 0; i < cmd.param2; ++i)
+						fifo_read(einfo, &intent,
+								sizeof(intent));
+					break;
+				}
+				fifo_read(einfo, intents,
+					sizeof(*intents) * cmd.param2);
+			}
+			if (atomic_ctx) {
+				if (!queue_cmd(einfo, &cmd, intents))
+					kfree(intents);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
+			for (i = 0; i < cmd.param2; ++i) {
+				einfo->xprt_if.glink_core_if_ptr->
+					rx_cmd_remote_rx_intent_put(
+							&einfo->xprt_if,
+							cmd.param1,
+							intents[i].id,
+							intents[i].size);
+			}
+			kfree(intents);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case RX_DONE_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->rx_cmd_tx_done(
 								&einfo->xprt_if,
 								cmd.param1,
 								cmd.param2,
 								false);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case RX_INTENT_REQ_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->
 						rx_cmd_remote_rx_intent_req(
 								&einfo->xprt_if,
 								cmd.param1,
 								cmd.param2);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case RX_INTENT_REQ_ACK_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			granted = false;
 			if (cmd.param2 == 1)
 				granted = true;
@@ -819,45 +1092,95 @@ static void rx_worker(struct kthread_work *work)
 								&einfo->xprt_if,
 								cmd.param1,
 								granted);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case TX_DATA_CMD:
 		case TX_DATA_CONT_CMD:
-			process_rx_data(einfo, cmd.param1, cmd.param2);
+		case TRACER_PKT_CMD:
+		case TRACER_PKT_CONT_CMD:
+			process_rx_data(einfo, cmd.id, cmd.param1, cmd.param2);
 			break;
 		case CLOSE_ACK_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->rx_cmd_ch_close_ack(
 								&einfo->xprt_if,
 								cmd.param1);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case READ_NOTIF_CMD:
 			send_irq(einfo);
 			break;
 		case SIGNALS_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->rx_cmd_remote_sigs(
 								&einfo->xprt_if,
 								cmd.param1,
 								cmd.param2);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		case RX_DONE_W_REUSE_CMD:
+			if (atomic_ctx) {
+				queue_cmd(einfo, &cmd, NULL);
+				break;
+			}
+			spin_unlock_irqrestore(&einfo->rx_lock, flags);
 			einfo->xprt_if.glink_core_if_ptr->rx_cmd_tx_done(
 								&einfo->xprt_if,
 								cmd.param1,
 								cmd.param2,
 								true);
+			spin_lock_irqsave(&einfo->rx_lock, flags);
 			break;
 		default:
 			pr_err("Unrecognized command: %d\n", cmd.id);
 			break;
 		}
 	}
+	spin_unlock_irqrestore(&einfo->rx_lock, flags);
 	srcu_read_unlock(&einfo->use_ref, rcu_id);
+}
+
+/**
+ * rx_worker_atomic() - worker function to process received command in atomic
+ *			context.
+ * @param:	The param parameter passed during initialization of the tasklet.
+ */
+static void rx_worker_atomic(unsigned long param)
+{
+	struct edge_info *einfo = (struct edge_info *)param;
+
+	__rx_worker(einfo, true);
+}
+
+/**
+ * rx_worker() - worker function to process received commands
+ * @work:	kwork associated with the edge to process commands on.
+ */
+static void rx_worker(struct kthread_work *work)
+{
+	struct edge_info *einfo;
+
+	einfo = container_of(work, struct edge_info, kwork);
+	__rx_worker(einfo, false);
 }
 
 irqreturn_t irq_handler(int irq, void *priv)
 {
 	struct edge_info *einfo = (struct edge_info *)priv;
 
-	queue_kthread_work(&einfo->kworker, &einfo->kwork);
+	if (einfo->rx_reset_reg)
+		writel_relaxed(einfo->out_irq_mask, einfo->rx_reset_reg);
+
+	tasklet_hi_schedule(&einfo->tasklet);
+	einfo->rx_irq_count++;
 
 	return IRQ_HANDLED;
 }
@@ -956,6 +1279,9 @@ static uint32_t set_version(struct glink_transport_if *if_ptr, uint32_t version,
 
 	ret = einfo->intentless ?
 				GCAP_INTENTLESS | GCAP_SIGNALS : GCAP_SIGNALS;
+
+	if (features & TRACER_PKT_FEATURE)
+		ret |= GCAP_TRACER_PKT;
 
 	srcu_read_unlock(&einfo->use_ref, rcu_id);
 	return ret;
@@ -1130,6 +1456,7 @@ static void tx_cmd_ch_remote_close_ack(struct glink_transport_if *if_ptr,
 static int ssr(struct glink_transport_if *if_ptr)
 {
 	struct edge_info *einfo;
+	struct deferred_cmd *cmd;
 
 	einfo = container_of(if_ptr, struct edge_info, xprt_if);
 
@@ -1139,6 +1466,14 @@ static int ssr(struct glink_transport_if *if_ptr)
 	wake_up_all(&einfo->tx_blocked_queue);
 
 	synchronize_srcu(&einfo->use_ref);
+
+	while (!list_empty(&einfo->deferred_cmds)) {
+		cmd = list_first_entry(&einfo->deferred_cmds,
+						struct deferred_cmd, list_node);
+		list_del(&cmd->list_node);
+		kfree(cmd->data);
+		kfree(cmd);
+	}
 
 	einfo->tx_resume_needed = false;
 	einfo->tx_blocked_signal_sent = false;
@@ -1463,7 +1798,7 @@ static int poll(struct glink_transport_if *if_ptr, uint32_t lcid)
 	}
 
 	if (fifo_read_avail(einfo)) {
-		queue_kthread_work(&einfo->kworker, &einfo->kwork);
+		__rx_worker(einfo, true);
 		srcu_read_unlock(&einfo->use_ref, rcu_id);
 		return 1;
 	}
@@ -1511,10 +1846,12 @@ static int mask_rx_irq(struct glink_transport_if *if_ptr, uint32_t lcid,
 
 	if (mask) {
 		irq_chip->irq_mask(irq_data);
+		einfo->irq_disabled = true;
 		if (pstruct)
 			irq_set_affinity(einfo->irq_line, pstruct);
 	} else {
 		irq_chip->irq_unmask(irq_data);
+		einfo->irq_disabled = false;
 	}
 
 	srcu_read_unlock(&einfo->use_ref, rcu_id);
@@ -1522,15 +1859,16 @@ static int mask_rx_irq(struct glink_transport_if *if_ptr, uint32_t lcid,
 }
 
 /**
- * tx() - convert a data transmit cmd to wire format and transmit
+ * tx_data() - convert a data/tracer_pkt to wire format and transmit
  * @if_ptr:	The transport to transmit on.
+ * @cmd_id:	The command ID to transmit.
  * @lcid:	The local channel id to encode.
  * @pctx:	The data to encode.
  *
  * Return: Number of bytes written or standard Linux error code.
  */
-static int tx(struct glink_transport_if *if_ptr, uint32_t lcid,
-	      struct glink_core_tx_pkt *pctx)
+static int tx_data(struct glink_transport_if *if_ptr, uint16_t cmd_id,
+		   uint32_t lcid, struct glink_core_tx_pkt *pctx)
 {
 	struct command {
 		uint16_t id;
@@ -1565,15 +1903,23 @@ static int tx(struct glink_transport_if *if_ptr, uint32_t lcid,
 		return -EFAULT;
 	}
 
-	if (einfo->intentless && pctx->size_remaining != pctx->size) {
+	if (einfo->intentless &&
+	    (pctx->size_remaining != pctx->size || cmd_id == TRACER_PKT_CMD)) {
 		srcu_read_unlock(&einfo->use_ref, rcu_id);
 		return -EINVAL;
 	}
 
-	if (pctx->size_remaining == pctx->size)
-		cmd.id = TX_DATA_CMD;
-	else
-		cmd.id = TX_DATA_CONT_CMD;
+	if (cmd_id == TX_DATA_CMD) {
+		if (pctx->size_remaining == pctx->size)
+			cmd.id = TX_DATA_CMD;
+		else
+			cmd.id = TX_DATA_CONT_CMD;
+	} else {
+		if (pctx->size_remaining == pctx->size)
+			cmd.id = TRACER_PKT_CMD;
+		else
+			cmd.id = TRACER_PKT_CONT_CMD;
+	}
 	cmd.lcid = lcid;
 	cmd.riid = pctx->riid;
 	data_start = get_tx_vaddr(pctx, pctx->size - pctx->size_remaining,
@@ -1609,6 +1955,8 @@ static int tx(struct glink_transport_if *if_ptr, uint32_t lcid,
 	pctx->size_remaining -= size;
 	cmd.size_left = pctx->size_remaining;
 	zeros_size = ALIGN(size, FIFO_ALIGNMENT) - cmd.size;
+	if (cmd.id == TRACER_PKT_CMD)
+		tracer_pkt_log_event((void *)(pctx->data), GLINK_XPRT_TX);
 
 	fifo_write_complex(einfo, &cmd, sizeof(cmd), data_start, size, zeros,
 								zeros_size);
@@ -1617,8 +1965,90 @@ static int tx(struct glink_transport_if *if_ptr, uint32_t lcid,
 		cmd.size_left);
 	spin_unlock_irqrestore(&einfo->write_lock, flags);
 
+	/* Fake tx_done for intentless since its not supported over the wire */
+	if (einfo->intentless) {
+		spin_lock_irqsave(&einfo->rx_lock, flags);
+		cmd.id = RX_DONE_CMD;
+		cmd.lcid = pctx->rcid;
+		queue_cmd(einfo, &cmd, NULL);
+		spin_unlock_irqrestore(&einfo->rx_lock, flags);
+	}
+
 	srcu_read_unlock(&einfo->use_ref, rcu_id);
 	return cmd.size;
+}
+
+/**
+ * tx() - convert a data transmit cmd to wire format and transmit
+ * @if_ptr:	The transport to transmit on.
+ * @lcid:	The local channel id to encode.
+ * @pctx:	The data to encode.
+ *
+ * Return: Number of bytes written or standard Linux error code.
+ */
+static int tx(struct glink_transport_if *if_ptr, uint32_t lcid,
+	      struct glink_core_tx_pkt *pctx)
+{
+	return tx_data(if_ptr, TX_DATA_CMD, lcid, pctx);
+}
+
+/**
+ * tx_cmd_tracer_pkt() - convert a tracer packet cmd to wire format and transmit
+ * @if_ptr:	The transport to transmit on.
+ * @lcid:	The local channel id to encode.
+ * @pctx:	The data to encode.
+ *
+ * Return: Number of bytes written or standard Linux error code.
+ */
+static int tx_cmd_tracer_pkt(struct glink_transport_if *if_ptr, uint32_t lcid,
+	      struct glink_core_tx_pkt *pctx)
+{
+	return tx_data(if_ptr, TRACER_PKT_CMD, lcid, pctx);
+}
+
+/**
+ * get_power_vote_ramp_time() - Get the ramp time required for the power
+ *				votes to be applied
+ * @if_ptr:	The transport interface on which power voting is requested.
+ * @state:	The power state for which ramp time is required.
+ *
+ * Return: The ramp time specific to the power state, standard error otherwise.
+ */
+static unsigned long get_power_vote_ramp_time(
+				struct glink_transport_if *if_ptr,
+				uint32_t state)
+{
+	struct edge_info *einfo;
+
+	einfo = container_of(if_ptr, struct edge_info, xprt_if);
+
+	if (state >= einfo->num_pw_states || !(einfo->ramp_time_us))
+		return (unsigned long)ERR_PTR(-EINVAL);
+
+	return einfo->ramp_time_us[state];
+}
+
+/**
+ * power_vote() - Update the power votes to meet qos requirement
+ * @if_ptr:	The transport interface on which power voting is requested.
+ * @state:	The power state for which the voting should be done.
+ *
+ * Return: 0 on Success, standard error otherwise.
+ */
+static int power_vote(struct glink_transport_if *if_ptr, uint32_t state)
+{
+	return 0;
+}
+
+/**
+ * power_unvote() - Remove the all the power votes
+ * @if_ptr:	The transport interface on which power voting is requested.
+ *
+ * Return: 0 on Success, standard error otherwise.
+ */
+static int power_unvote(struct glink_transport_if *if_ptr)
+{
+	return 0;
 }
 
 /**
@@ -1662,6 +2092,10 @@ static void init_xprt_if(struct edge_info *einfo)
 	einfo->xprt_if.poll = poll;
 	einfo->xprt_if.mask_rx_irq = mask_rx_irq;
 	einfo->xprt_if.wait_link_down = wait_link_down;
+	einfo->xprt_if.tx_cmd_tracer_pkt = tx_cmd_tracer_pkt;
+	einfo->xprt_if.get_power_vote_ramp_time = get_power_vote_ramp_time;
+	einfo->xprt_if.power_vote = power_vote;
+	einfo->xprt_if.power_unvote = power_unvote;
 }
 
 /**
@@ -1677,6 +2111,59 @@ static void init_xprt_cfg(struct edge_info *einfo, const char *name)
 	einfo->xprt_cfg.versions_entries = ARRAY_SIZE(versions);
 	einfo->xprt_cfg.max_cid = SZ_64K;
 	einfo->xprt_cfg.max_iid = SZ_2G;
+}
+
+/**
+ * parse_qos_dt_params() - Parse the power states from DT
+ * @dev:	Reference to the platform device for a specific edge.
+ * @einfo:	Edge information for the edge probe function is called.
+ *
+ * Return: 0 on success, standard error code otherwise.
+ */
+static int parse_qos_dt_params(struct device_node *node,
+				struct edge_info *einfo)
+{
+	int rc;
+	int i;
+	char *key;
+	uint32_t *arr32;
+	uint32_t num_states;
+
+	key = "qcom,ramp-time";
+	if (!of_find_property(node, key, &num_states))
+		return -ENODEV;
+
+	num_states /= sizeof(uint32_t);
+
+	einfo->num_pw_states = num_states;
+
+	arr32 = kmalloc_array(num_states, sizeof(uint32_t), GFP_KERNEL);
+	if (!arr32)
+		return -ENOMEM;
+
+	einfo->ramp_time_us = kmalloc_array(num_states, sizeof(unsigned long),
+					GFP_KERNEL);
+	if (!einfo->ramp_time_us) {
+		rc = -ENOMEM;
+		goto mem_alloc_fail;
+	}
+
+	rc = of_property_read_u32_array(node, key, arr32, num_states);
+	if (rc) {
+		rc = -ENODEV;
+		goto invalid_key;
+	}
+	for (i = 0; i < num_states; i++)
+		einfo->ramp_time_us[i] = arr32[i];
+
+	rc = 0;
+	return rc;
+
+invalid_key:
+	kfree(einfo->ramp_time_us);
+mem_alloc_fail:
+	kfree(arr32);
+	return rc;
 }
 
 /**
@@ -1702,12 +2189,15 @@ static int subsys_name_to_id(const char *name)
 		return SMEM_RPM;
 	if (!strcmp(name, "wcnss"))
 		return SMEM_WCNSS;
+	if (!strcmp(name, "spss"))
+		return SMEM_SPSS;
 	return -ENODEV;
 }
 
 static int glink_smem_native_probe(struct platform_device *pdev)
 {
 	struct device_node *node;
+	struct device_node *phandle_node;
 	struct edge_info *einfo;
 	int rc;
 	char *key;
@@ -1770,9 +2260,12 @@ static int glink_smem_native_probe(struct platform_device *pdev)
 	init_waitqueue_head(&einfo->tx_blocked_queue);
 	init_kthread_work(&einfo->kwork, rx_worker);
 	init_kthread_worker(&einfo->kworker);
+	tasklet_init(&einfo->tasklet, rx_worker_atomic, (unsigned long)einfo);
 	einfo->read_from_fifo = read_from_fifo;
 	einfo->write_to_fifo = write_to_fifo;
 	init_srcu_struct(&einfo->use_ref);
+	spin_lock_init(&einfo->rx_lock);
+	INIT_LIST_HEAD(&einfo->deferred_cmds);
 
 	mutex_lock(&probe_lock);
 	if (edge_infos[einfo->remote_proc_id]) {
@@ -1827,6 +2320,12 @@ static int glink_smem_native_probe(struct platform_device *pdev)
 		goto smem_alloc_fail;
 	}
 
+	key = "qcom,qos-config";
+	phandle_node = of_parse_phandle(node, key, 0);
+	if (phandle_node && !(of_get_glink_core_qos_cfg(phandle_node,
+							&einfo->xprt_cfg)))
+		parse_qos_dt_params(node, einfo);
+
 	rc = glink_core_register_transport(&einfo->xprt_if, &einfo->xprt_cfg);
 	if (rc == -EPROBE_DEFER)
 		goto reg_xprt_fail;
@@ -1850,6 +2349,7 @@ static int glink_smem_native_probe(struct platform_device *pdev)
 		pr_err("%s: enable_irq_wake() failed on %d\n", __func__,
 								irq_line);
 
+	register_debugfs_info(einfo);
 	/* fake an interrupt on this edge to see if the remote side is up */
 	irq_handler(0, einfo);
 	return 0;
@@ -1861,6 +2361,7 @@ smem_alloc_fail:
 	flush_kthread_worker(&einfo->kworker);
 	kthread_stop(einfo->task);
 	einfo->task = NULL;
+	tasklet_kill(&einfo->tasklet);
 kthread_fail:
 	iounmap(einfo->out_irq_reg);
 ioremap_fail:
@@ -1946,10 +2447,13 @@ static int glink_rpm_native_probe(struct platform_device *pdev)
 	init_waitqueue_head(&einfo->tx_blocked_queue);
 	init_kthread_work(&einfo->kwork, rx_worker);
 	init_kthread_worker(&einfo->kworker);
+	tasklet_init(&einfo->tasklet, rx_worker_atomic, (unsigned long)einfo);
 	einfo->intentless = true;
 	einfo->read_from_fifo = memcpy32_fromio;
 	einfo->write_to_fifo = memcpy32_toio;
 	init_srcu_struct(&einfo->use_ref);
+	spin_lock_init(&einfo->rx_lock);
+	INIT_LIST_HEAD(&einfo->deferred_cmds);
 
 	mutex_lock(&probe_lock);
 	if (edge_infos[einfo->remote_proc_id]) {
@@ -1990,17 +2494,17 @@ static int glink_rpm_native_probe(struct platform_device *pdev)
 								RPM_TOC_SIZE);
 	tocp = (uint32_t *)toc;
 	if (*tocp != RPM_TOC_ID) {
-		rc = ENODEV;
+		rc = -ENODEV;
 		pr_err("%s: TOC id %d is not valid\n", __func__, *tocp);
-		goto kthread_fail;
+		goto toc_init_fail;
 	}
 	++tocp;
 	num_toc_entries = *tocp;
 	if (num_toc_entries > RPM_MAX_TOC_ENTRIES) {
-		rc = ENODEV;
+		rc = -ENODEV;
 		pr_err("%s: %d is too many toc entries\n", __func__,
 							num_toc_entries);
-		goto kthread_fail;
+		goto toc_init_fail;
 	}
 	++tocp;
 
@@ -2019,7 +2523,7 @@ static int glink_rpm_native_probe(struct platform_device *pdev)
 			break;
 		}
 		++tocp;
-		einfo->tx_fifo_size = *tocp - sizeof(*einfo->tx_ch_desc);
+		einfo->tx_fifo_size = *tocp;
 		if (einfo->tx_fifo_size > resource_size(msgram_r) ||
 			(uintptr_t)(einfo->tx_fifo + einfo->tx_fifo_size) >
 				(uintptr_t)(msgram + resource_size(msgram_r))) {
@@ -2030,9 +2534,9 @@ static int glink_rpm_native_probe(struct platform_device *pdev)
 		break;
 	}
 	if (!einfo->tx_fifo) {
-		rc = ENODEV;
+		rc = -ENODEV;
 		pr_err("%s: tx fifo not found\n", __func__);
-		goto kthread_fail;
+		goto toc_init_fail;
 	}
 
 	tocp = (uint32_t *)toc;
@@ -2052,7 +2556,7 @@ static int glink_rpm_native_probe(struct platform_device *pdev)
 			break;
 		}
 		++tocp;
-		einfo->rx_fifo_size = *tocp - sizeof(*einfo->rx_ch_desc);
+		einfo->rx_fifo_size = *tocp;
 		if (einfo->rx_fifo_size > resource_size(msgram_r) ||
 			(uintptr_t)(einfo->rx_fifo + einfo->rx_fifo_size) >
 				(uintptr_t)(msgram + resource_size(msgram_r))) {
@@ -2063,9 +2567,9 @@ static int glink_rpm_native_probe(struct platform_device *pdev)
 		break;
 	}
 	if (!einfo->rx_fifo) {
-		rc = ENODEV;
+		rc = -ENODEV;
 		pr_err("%s: rx fifo not found\n", __func__);
-		goto kthread_fail;
+		goto toc_init_fail;
 	}
 
 	einfo->tx_ch_desc->write_index = 0;
@@ -2094,18 +2598,276 @@ static int glink_rpm_native_probe(struct platform_device *pdev)
 		pr_err("%s: enable_irq_wake() failed on %d\n", __func__,
 								irq_line);
 
+	register_debugfs_info(einfo);
 	einfo->xprt_if.glink_core_if_ptr->link_up(&einfo->xprt_if);
 	return 0;
 
 request_irq_fail:
 	glink_core_unregister_transport(&einfo->xprt_if);
 reg_xprt_fail:
+toc_init_fail:
 	flush_kthread_worker(&einfo->kworker);
 	kthread_stop(einfo->task);
 	einfo->task = NULL;
+	tasklet_kill(&einfo->tasklet);
 kthread_fail:
 	iounmap(msgram);
 msgram_ioremap_fail:
+	iounmap(einfo->out_irq_reg);
+irq_ioremap_fail:
+	mutex_lock(&probe_lock);
+	edge_infos[einfo->remote_proc_id] = NULL;
+	mutex_unlock(&probe_lock);
+invalid_key:
+missing_key:
+	kfree(einfo);
+edge_info_alloc_fail:
+	return rc;
+}
+
+static int glink_mailbox_probe(struct platform_device *pdev)
+{
+	struct device_node *node;
+	struct edge_info *einfo;
+	int rc;
+	char *key;
+	const char *subsys_name;
+	uint32_t irq_line;
+	uint32_t irq_mask;
+	struct resource *irq_r;
+	struct resource *mbox_loc_r;
+	struct resource *mbox_size_r;
+	struct resource *rx_reset_r;
+	void *mbox_loc;
+	void *mbox_size;
+	struct mailbox_config_info *mbox_cfg;
+	uint32_t mbox_cfg_size;
+	phys_addr_t cfg_p_addr;
+
+	node = pdev->dev.of_node;
+
+	einfo = kzalloc(sizeof(*einfo), GFP_KERNEL);
+	if (!einfo) {
+		rc = -ENOMEM;
+		goto edge_info_alloc_fail;
+	}
+
+	key = "label";
+	subsys_name = of_get_property(node, key, NULL);
+	if (!subsys_name) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	key = "interrupts";
+	irq_line = irq_of_parse_and_map(node, 0);
+	if (!irq_line) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	key = "qcom,irq-mask";
+	rc = of_property_read_u32(node, key, &irq_mask);
+	if (rc) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	key = "irq-reg-base";
+	irq_r = platform_get_resource_byname(pdev, IORESOURCE_MEM, key);
+	if (!irq_r) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	key = "mbox-loc-addr";
+	mbox_loc_r = platform_get_resource_byname(pdev, IORESOURCE_MEM, key);
+	if (!mbox_loc_r) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	key = "mbox-loc-size";
+	mbox_size_r = platform_get_resource_byname(pdev, IORESOURCE_MEM, key);
+	if (!mbox_size_r) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	key = "irq-rx-reset";
+	rx_reset_r = platform_get_resource_byname(pdev, IORESOURCE_MEM, key);
+	if (!rx_reset_r) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	key = "qcom,tx-ring-size";
+	rc = of_property_read_u32(node, key, &einfo->tx_fifo_size);
+	if (rc) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	key = "qcom,rx-ring-size";
+	rc = of_property_read_u32(node, key, &einfo->rx_fifo_size);
+	if (rc) {
+		pr_err("%s: missing key %s\n", __func__, key);
+		rc = -ENODEV;
+		goto missing_key;
+	}
+
+	if (subsys_name_to_id(subsys_name) == -ENODEV) {
+		pr_err("%s: unknown subsystem: %s\n", __func__, subsys_name);
+		rc = -ENODEV;
+		goto invalid_key;
+	}
+	einfo->remote_proc_id = subsys_name_to_id(subsys_name);
+
+	init_xprt_cfg(einfo, subsys_name);
+	einfo->xprt_cfg.name = "mailbox";
+	init_xprt_if(einfo);
+	spin_lock_init(&einfo->write_lock);
+	init_waitqueue_head(&einfo->tx_blocked_queue);
+	init_kthread_work(&einfo->kwork, rx_worker);
+	init_kthread_worker(&einfo->kworker);
+	tasklet_init(&einfo->tasklet, rx_worker_atomic, (unsigned long)einfo);
+	einfo->read_from_fifo = read_from_fifo;
+	einfo->write_to_fifo = write_to_fifo;
+	init_srcu_struct(&einfo->use_ref);
+	spin_lock_init(&einfo->rx_lock);
+	INIT_LIST_HEAD(&einfo->deferred_cmds);
+
+	mutex_lock(&probe_lock);
+	if (edge_infos[einfo->remote_proc_id]) {
+		pr_err("%s: duplicate subsys %s is not valid\n", __func__,
+								subsys_name);
+		rc = -ENODEV;
+		mutex_unlock(&probe_lock);
+		goto invalid_key;
+	}
+	edge_infos[einfo->remote_proc_id] = einfo;
+	mutex_unlock(&probe_lock);
+
+	einfo->out_irq_mask = irq_mask;
+	einfo->out_irq_reg = ioremap_nocache(irq_r->start,
+							resource_size(irq_r));
+	if (!einfo->out_irq_reg) {
+		pr_err("%s: unable to map irq reg\n", __func__);
+		rc = -ENOMEM;
+		goto irq_ioremap_fail;
+	}
+
+	mbox_loc = ioremap_nocache(mbox_loc_r->start,
+						resource_size(mbox_loc_r));
+	if (!mbox_loc) {
+		pr_err("%s: unable to map mailbox location reg\n", __func__);
+		rc = -ENOMEM;
+		goto mbox_loc_ioremap_fail;
+	}
+
+	mbox_size = ioremap_nocache(mbox_size_r->start,
+						resource_size(mbox_size_r));
+	if (!mbox_size) {
+		pr_err("%s: unable to map mailbox size reg\n", __func__);
+		rc = -ENOMEM;
+		goto mbox_size_ioremap_fail;
+	}
+
+	einfo->rx_reset_reg = ioremap_nocache(rx_reset_r->start,
+						resource_size(rx_reset_r));
+	if (!einfo->rx_reset_reg) {
+		pr_err("%s: unable to map rx reset reg\n", __func__);
+		rc = -ENOMEM;
+		goto rx_reset_ioremap_fail;
+	}
+
+	einfo->task = kthread_run(kthread_worker_fn, &einfo->kworker,
+						"smem_native_%s", subsys_name);
+	if (IS_ERR(einfo->task)) {
+		rc = PTR_ERR(einfo->task);
+		pr_err("%s: kthread_run failed %d\n", __func__, rc);
+		goto kthread_fail;
+	}
+
+	mbox_cfg_size = sizeof(*mbox_cfg) + einfo->tx_fifo_size +
+							einfo->rx_fifo_size;
+	mbox_cfg = smem_alloc(SMEM_GLINK_NATIVE_XPRT_DESCRIPTOR,
+							mbox_cfg_size,
+							einfo->remote_proc_id,
+							0);
+	if (PTR_ERR(mbox_cfg) == -EPROBE_DEFER) {
+		rc = -EPROBE_DEFER;
+		goto smem_alloc_fail;
+	}
+	if (!mbox_cfg) {
+		pr_err("%s: smem alloc of mailbox struct failed\n", __func__);
+		rc = -ENOMEM;
+		goto smem_alloc_fail;
+	}
+	einfo->mailbox = mbox_cfg;
+	einfo->tx_ch_desc = (struct channel_desc *)(&mbox_cfg->tx_read_index);
+	einfo->rx_ch_desc = (struct channel_desc *)(&mbox_cfg->rx_read_index);
+	mbox_cfg->tx_size = einfo->tx_fifo_size;
+	mbox_cfg->rx_size = einfo->rx_fifo_size;
+	einfo->tx_fifo = &mbox_cfg->fifo[0];
+
+	rc = glink_core_register_transport(&einfo->xprt_if, &einfo->xprt_cfg);
+	if (rc == -EPROBE_DEFER)
+		goto reg_xprt_fail;
+	if (rc) {
+		pr_err("%s: glink core register transport failed: %d\n",
+								__func__, rc);
+		goto reg_xprt_fail;
+	}
+
+	einfo->irq_line = irq_line;
+	rc = request_irq(irq_line, irq_handler,
+			IRQF_TRIGGER_HIGH | IRQF_NO_SUSPEND | IRQF_SHARED,
+			node->name, einfo);
+	if (rc < 0) {
+		pr_err("%s: request_irq on %d failed: %d\n", __func__, irq_line,
+									rc);
+		goto request_irq_fail;
+	}
+	rc = enable_irq_wake(irq_line);
+	if (rc < 0)
+		pr_err("%s: enable_irq_wake() failed on %d\n", __func__,
+								irq_line);
+
+	register_debugfs_info(einfo);
+
+	writel_relaxed(mbox_cfg_size, mbox_size);
+	cfg_p_addr = smem_virt_to_phys(mbox_cfg);
+	writel_relaxed(lower_32_bits(cfg_p_addr), mbox_loc);
+	writel_relaxed(upper_32_bits(cfg_p_addr), mbox_loc + 4);
+	send_irq(einfo);
+	iounmap(mbox_size);
+	iounmap(mbox_loc);
+	return 0;
+
+request_irq_fail:
+	glink_core_unregister_transport(&einfo->xprt_if);
+reg_xprt_fail:
+smem_alloc_fail:
+	flush_kthread_worker(&einfo->kworker);
+	kthread_stop(einfo->task);
+	einfo->task = NULL;
+	tasklet_kill(&einfo->tasklet);
+kthread_fail:
+	iounmap(einfo->rx_reset_reg);
+rx_reset_ioremap_fail:
+	iounmap(mbox_size);
+mbox_size_ioremap_fail:
+	iounmap(mbox_loc);
+mbox_loc_ioremap_fail:
 	iounmap(einfo->out_irq_reg);
 irq_ioremap_fail:
 	mutex_lock(&probe_lock);
@@ -2126,19 +2888,27 @@ edge_info_alloc_fail:
 static void debug_edge(struct seq_file *s)
 {
 	struct edge_info *einfo;
-	int i;
+	struct glink_dbgfs_data *dfs_d;
+
+	dfs_d = s->private;
+	einfo = dfs_d->priv_data;
 
 /*
  * formatted, human readable edge state output, ie:
-ID|NAME      |TX READ   |TX WRITE  |TX SIZE   |RX READ   |RX WRITE  |RX SIZE
+ * TX/RX fifo information:
+ID|EDGE      |TX READ   |TX WRITE  |TX SIZE   |RX READ   |RX WRITE  |RX SIZE
 -------------------------------------------------------------------------------
- 1|mpss      |0x00000128|0x00000128|0x00000800|0x00000256|0x00000256|0x00001000
- 4|lpass     |Link Not Up
+01|mpss      |0x00000128|0x00000128|0x00000800|0x00000256|0x00000256|0x00001000
+ *
+ * Interrupt information:
+ * EDGE      |TX INT    |RX INT
+ * --------------------------------
+ * mpss      |0x00000006|0x00000008
  */
-
+	seq_puts(s, "TX/RX fifo information:\n");
 	seq_printf(s, "%2s|%-10s|%-10s|%-10s|%-10s|%-10s|%-10s|%-10s\n",
 								"ID",
-								"NAME",
+								"EDGE",
 								"TX READ",
 								"TX WRITE",
 								"TX SIZE",
@@ -2147,17 +2917,14 @@ ID|NAME      |TX READ   |TX WRITE  |TX SIZE   |RX READ   |RX WRITE  |RX SIZE
 								"RX SIZE");
 	seq_puts(s,
 		"-------------------------------------------------------------------------------\n");
-	for (i = 0; i < NUM_SMEM_SUBSYSTEMS; ++i) {
-		einfo = edge_infos[i];
-		if (!einfo)
-			continue;
+	if (!einfo)
+		return;
 
-		seq_printf(s, "%02i|%-10s|", i, einfo->xprt_cfg.edge);
-		if (!einfo->rx_fifo) {
-			seq_puts(s, "Link Not Up\n");
-			continue;
-		}
-
+	seq_printf(s, "%02i|%-10s|", einfo->remote_proc_id,
+					einfo->xprt_cfg.edge);
+	if (!einfo->rx_fifo)
+		seq_puts(s, "Link Not Up\n");
+	else
 		seq_printf(s, "0x%08X|0x%08X|0x%08X|0x%08X|0x%08X|0x%08X\n",
 						einfo->tx_ch_desc->read_index,
 						einfo->tx_ch_desc->write_index,
@@ -2165,24 +2932,45 @@ ID|NAME      |TX READ   |TX WRITE  |TX SIZE   |RX READ   |RX WRITE  |RX SIZE
 						einfo->rx_ch_desc->read_index,
 						einfo->rx_ch_desc->write_index,
 						einfo->rx_fifo_size);
-	}
+
+	seq_puts(s, "\nInterrupt information:\n");
+	seq_printf(s, "%-10s|%-10s|%-10s\n", "EDGE", "TX INT", "RX INT");
+	seq_puts(s, "--------------------------------\n");
+	seq_printf(s, "%-10s|0x%08X|0x%08X\n", einfo->xprt_cfg.edge,
+						einfo->tx_irq_count,
+						einfo->rx_irq_count);
 }
 
 /**
- * debugfs_init() - initialize debugfs device entries
+ * register_debugfs_info() - initialize debugfs device entries
+ * @einfo:	Pointer to specific edge_info for which register is called.
  */
-static void debugfs_init(void)
+static void register_debugfs_info(struct edge_info *einfo)
 {
 	struct glink_dbgfs dfs;
+	char *curr_dir_name;
+	int dir_name_len;
 
-	dfs.curr_name = glink_get_xprt_enum_string(GLINK_DBGFS_SMEM);
+	dir_name_len = strlen(einfo->xprt_cfg.edge) +
+				strlen(einfo->xprt_cfg.name) + 2;
+	curr_dir_name = kmalloc(dir_name_len, GFP_KERNEL);
+	if (!curr_dir_name) {
+		GLINK_ERR("%s: Memory allocation failed\n", __func__);
+		return;
+	}
+
+	snprintf(curr_dir_name, dir_name_len, "%s_%s",
+				einfo->xprt_cfg.edge, einfo->xprt_cfg.name);
+	dfs.curr_name = curr_dir_name;
 	dfs.par_name = "xprt";
 	dfs.b_dir_create = false;
-	glink_debugfs_create("XPRT_INFO", debug_edge, &dfs, NULL, false);
+	glink_debugfs_create("XPRT_INFO", debug_edge,
+					&dfs, einfo, false);
+	kfree(curr_dir_name);
 }
 
 #else
-static void debugfs_init(void)
+static void register_debugfs_info(struct edge_info *einfo)
 {
 }
 #endif /* CONFIG_DEBUG_FS */
@@ -2215,6 +3003,20 @@ static struct platform_driver glink_rpm_native_driver = {
 	},
 };
 
+static struct of_device_id mailbox_match_table[] = {
+	{ .compatible = "qcom,glink-mailbox-xprt" },
+	{},
+};
+
+static struct platform_driver glink_mailbox_driver = {
+	.probe = glink_mailbox_probe,
+	.driver = {
+		.name = "msm_glink_mailbox_xprt",
+		.owner = THIS_MODULE,
+		.of_match_table = mailbox_match_table,
+	},
+};
+
 static int __init glink_smem_native_xprt_init(void)
 {
 	int rc;
@@ -2233,7 +3035,13 @@ static int __init glink_smem_native_xprt_init(void)
 		return rc;
 	}
 
-	debugfs_init();
+	rc = platform_driver_register(&glink_mailbox_driver);
+	if (rc) {
+		pr_err("%s: glink_mailbox_driver register failed %d\n",
+								__func__, rc);
+		return rc;
+	}
+
 	return 0;
 }
 arch_initcall(glink_smem_native_xprt_init);

@@ -85,10 +85,8 @@ static void adsp_loader_do(struct platform_device *pdev)
 		goto load_adsp;
 	}
 	if (!strcmp(img_name, "modem")) {
-		/*
-                 * adsp_state always returns "0". So load modem image based on
-		 * apr_modem_state to prevent loading of image twice
-                 */
+		/* adsp_state always returns "0". So load modem image based on
+		apr_modem_state to prevent loading of image twice */
 		adsp_state = apr_get_modem_state();
 		if (adsp_state == APR_SUBSYS_DOWN) {
 			priv = platform_get_drvdata(pdev);
@@ -145,6 +143,12 @@ load_adsp:
 	}
 fail:
 	dev_err(&pdev->dev, "%s: Q6 image loading failed\n", __func__);
+//HTC_AUD_START
+	pr_err("%s: trigger BUG due to Q6/ADSP image is loaded failed\n", __func__);
+#ifdef CONFIG_HTC_AUDIO_DEBUG
+	BUG();
+#endif
+//HTC_AUD_END
 	return;
 }
 
@@ -161,7 +165,7 @@ static ssize_t adsp_boot_store(struct kobject *kobj,
 		pr_debug("%s: going to call adsp_loader_do\n", __func__);
 		adsp_loader_do(adsp_private);
 	} else if (boot == IMAGE_UNLOAD_CMD) {
-		pr_debug("%s: going to call adsp_loader_unloader\n", __func__);
+		pr_debug("%s: going to call adsp_unloader\n", __func__);
 		adsp_loader_unload(adsp_private);
 	}
 	return count;

@@ -1,4 +1,4 @@
-Qualcomm BAM Data Multiplexer Driver
+Qualcomm Technologies, Inc. BAM Data Multiplexer Driver
 
 Required properties:
 - compatible : should be "qcom,bam_dmux"
@@ -12,6 +12,7 @@ Optional properties:
 	Default is 2048.  Other possible values are 4096, 8192, and 16384.
 -qcom,no-cpu-affinity: boolean value indicating that workqueue CPU affinity
 	is not required.
+-qcom,fast-shutdown: boolean value to support fast shutdown time.
 
 Example:
 
@@ -23,4 +24,5 @@ Example:
 		qcom,rx-ring-size = <64>;
 		qcom,max-rx-mtu = <8192>;
 		qcom,no-cpu-affinity;
+		qcom,fast-shutdown;
 	};

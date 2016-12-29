@@ -6,7 +6,8 @@ to be reset.
 
 Required Properties:
 - compatible:	The bus devices need to be compatible with
-		"qcom,mdm2-modem", "qcom,ext-mdm9x25", "qcom,ext-mdm9x35".
+		"qcom,mdm2-modem", "qcom,ext-mdm9x25", "qcom,ext-mdm9x35", "qcom, ext-mdm9x45",
+		"qcom,ext-mdm9x55".
 
 Required named gpio properties:
 - qcom,mdm2ap-errfatal-gpio: gpio for the external modem to indicate to the apps processor
@@ -101,10 +102,12 @@ Optional driver parameters:
 		gpio mux function. The only currently supported modes string is "normal" and
 		corresponds to the value 0x03 that is passed to RPM.
 - qcom,restart-group: List of subsystems that will need to restart together.
-- qcom,mdm-dual-link: Boolean indicates wheter both links can used for
+- qcom,mdm-dual-link: Boolean indicates whether both links can used for
 		communication.
 - qcom,ssctl-instance-id: Instance id used by the subsystem to connect with the SSCTL service.
 - qcom,sysmon-id: platform device id that sysmon is probed with for the subsystem.
+- qcom,pil-force-shutdown: Boolean. If set, the SSR framework will not trigger graceful shutdown
+			   on behalf of the subsystem driver.
 
 Example:
 	mdm0: qcom,mdm0 {

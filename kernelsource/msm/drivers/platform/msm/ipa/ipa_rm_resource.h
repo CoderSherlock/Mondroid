@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -116,10 +116,12 @@ int ipa_rm_resource_producer_deregister(struct ipa_rm_resource_prod *producer,
 				struct ipa_rm_register_params *reg_params);
 
 int ipa_rm_resource_add_dependency(struct ipa_rm_resource *resource,
-				   struct ipa_rm_resource *depends_on);
+				   struct ipa_rm_resource *depends_on,
+				   bool userspace_dep);
 
 int ipa_rm_resource_delete_dependency(struct ipa_rm_resource *resource,
-				      struct ipa_rm_resource *depends_on);
+				      struct ipa_rm_resource *depends_on,
+				      bool userspace_dep);
 
 int ipa_rm_resource_producer_request(struct ipa_rm_resource_prod *producer);
 
@@ -127,7 +129,8 @@ int ipa_rm_resource_producer_release(struct ipa_rm_resource_prod *producer);
 
 int ipa_rm_resource_consumer_request(struct ipa_rm_resource_cons *consumer,
 				u32 needed_bw,
-				bool inc_usage_count);
+				bool inc_usage_count,
+				bool wake_client);
 
 int ipa_rm_resource_consumer_release(struct ipa_rm_resource_cons *consumer,
 				u32 needed_bw,

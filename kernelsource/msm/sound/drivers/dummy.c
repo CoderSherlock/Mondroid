@@ -109,6 +109,9 @@ struct dummy_timer_ops {
 	snd_pcm_uframes_t (*pointer)(struct snd_pcm_substream *);
 };
 
+#define get_dummy_ops(substream) \
+	(*(const struct dummy_timer_ops **)(substream)->runtime->private_data)
+
 struct dummy_model {
 	const char *name;
 	int (*playback_constraints)(struct snd_pcm_runtime *runtime);
@@ -137,7 +140,6 @@ struct snd_dummy {
 	int iobox;
 	struct snd_kcontrol *cd_volume_ctl;
 	struct snd_kcontrol *cd_switch_ctl;
-	const struct dummy_timer_ops *timer_ops;
 };
 
 /*
@@ -231,6 +233,8 @@ struct dummy_model *dummy_models[] = {
  */
 
 struct dummy_systimer_pcm {
+	/* ops must be the first item */
+	const struct dummy_timer_ops *timer_ops;
 	spinlock_t lock;
 	struct timer_list timer;
 	unsigned long base_time;
@@ -368,6 +372,8 @@ static struct dummy_timer_ops dummy_systimer_ops = {
  */
 
 struct dummy_hrtimer_pcm {
+	/* ops must be the first item */
+	const struct dummy_timer_ops *timer_ops;
 	ktime_t base_time;
 	ktime_t period_time;
 	atomic_t running;
@@ -494,31 +500,25 @@ static struct dummy_timer_ops dummy_hrtimer_ops = {
 
 static int dummy_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
-	struct snd_dummy *dummy = snd_pcm_substream_chip(substream);
-
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
-		return dummy->timer_ops->start(substream);
+		return get_dummy_ops(substream)->start(substream);
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
-		return dummy->timer_ops->stop(substream);
+		return get_dummy_ops(substream)->stop(substream);
 	}
 	return -EINVAL;
 }
 
 static int dummy_pcm_prepare(struct snd_pcm_substream *substream)
 {
-	struct snd_dummy *dummy = snd_pcm_substream_chip(substream);
-
-	return dummy->timer_ops->prepare(substream);
+	return get_dummy_ops(substream)->prepare(substream);
 }
 
 static snd_pcm_uframes_t dummy_pcm_pointer(struct snd_pcm_substream *substream)
 {
-	struct snd_dummy *dummy = snd_pcm_substream_chip(substream);
-
-	return dummy->timer_ops->pointer(substream);
+	return get_dummy_ops(substream)->pointer(substream);
 }
 
 static struct snd_pcm_hardware dummy_pcm_hardware = {
@@ -564,17 +564,19 @@ static int dummy_pcm_open(struct snd_pcm_substream *substream)
 	struct snd_dummy *dummy = snd_pcm_substream_chip(substream);
 	struct dummy_model *model = dummy->model;
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	const struct dummy_timer_ops *ops;
 	int err;
 
-	dummy->timer_ops = &dummy_systimer_ops;
+	ops = &dummy_systimer_ops;
 #ifdef CONFIG_HIGH_RES_TIMERS
 	if (hrtimer)
-		dummy->timer_ops = &dummy_hrtimer_ops;
+		ops = &dummy_hrtimer_ops;
 #endif
 
-	err = dummy->timer_ops->create(substream);
+	err = ops->create(substream);
 	if (err < 0)
 		return err;
+	get_dummy_ops(substream) = ops;
 
 	runtime->hw = dummy->pcm_hw;
 	if (substream->pcm->device & 1) {
@@ -596,7 +598,7 @@ static int dummy_pcm_open(struct snd_pcm_substream *substream)
 			err = model->capture_constraints(substream->runtime);
 	}
 	if (err < 0) {
-		dummy->timer_ops->free(substream);
+		get_dummy_ops(substream)->free(substream);
 		return err;
 	}
 	return 0;
@@ -604,8 +606,7 @@ static int dummy_pcm_open(struct snd_pcm_substream *substream)
 
 static int dummy_pcm_close(struct snd_pcm_substream *substream)
 {
-	struct snd_dummy *dummy = snd_pcm_substream_chip(substream);
-	dummy->timer_ops->free(substream);
+	get_dummy_ops(substream)->free(substream);
 	return 0;
 }
 
@@ -1022,7 +1023,7 @@ static void dummy_proc_write(struct snd_info_entry *entry,
 		if (i >= ARRAY_SIZE(fields))
 			continue;
 		snd_info_get_str(item, ptr, sizeof(item));
-		if (strict_strtoull(item, 0, &val))
+		if (kstrtoull(item, 0, &val))
 			continue;
 		if (fields[i].size == sizeof(int))
 			*get_dummy_int_ptr(dummy, fields[i].offset) = val;
@@ -1054,8 +1055,8 @@ static int snd_dummy_probe(struct platform_device *devptr)
 	int idx, err;
 	int dev = devptr->id;
 
-	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
-			      sizeof(struct snd_dummy), &card);
+	err = snd_card_new(&devptr->dev, index[dev], id[dev], THIS_MODULE,
+			   sizeof(struct snd_dummy), &card);
 	if (err < 0)
 		return err;
 	dummy = card->private_data;
@@ -1114,8 +1115,6 @@ static int snd_dummy_probe(struct platform_device *devptr)
 
 	dummy_proc_init(dummy);
 
-	snd_card_set_dev(card, &devptr->dev);
-
 	err = snd_card_register(card);
 	if (err == 0) {
 		platform_set_drvdata(devptr, card);
@@ -1129,7 +1128,6 @@ static int snd_dummy_probe(struct platform_device *devptr)
 static int snd_dummy_remove(struct platform_device *devptr)
 {
 	snd_card_free(platform_get_drvdata(devptr));
-	platform_set_drvdata(devptr, NULL);
 	return 0;
 }
 

@@ -234,8 +234,15 @@ static int rds_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,
 			}
 
 			to_copy = min(tc->t_tinc_data_rem, left);
-			pskb_pull(clone, offset);
-			pskb_trim(clone, to_copy);
+			if (!pskb_pull(clone, offset) ||
+			    pskb_trim(clone, to_copy)) {
+				pr_warn("rds_tcp_data_recv: pull/trim failed "
+					"left %zu data_rem %zu skb_len %d\n",
+					left, tc->t_tinc_data_rem, skb->len);
+				kfree_skb(clone);
+				desc->error = -ENOMEM;
+				goto out;
+			}
 			skb_queue_tail(&tinc->ti_skb_list, clone);
 
 			rdsdebug("skb %p data %p len %d off %u to_copy %zu -> "
@@ -314,13 +321,13 @@ int rds_tcp_recv(struct rds_connection *conn)
 	return ret;
 }
 
-void rds_tcp_data_ready(struct sock *sk, int bytes)
+void rds_tcp_data_ready(struct sock *sk)
 {
-	void (*ready)(struct sock *sk, int bytes);
+	void (*ready)(struct sock *sk);
 	struct rds_connection *conn;
 	struct rds_tcp_connection *tc;
 
-	rdsdebug("data ready sk %p bytes %d\n", sk, bytes);
+	rdsdebug("data ready sk %p\n", sk);
 
 	read_lock(&sk->sk_callback_lock);
 	conn = sk->sk_user_data;
@@ -337,7 +344,7 @@ void rds_tcp_data_ready(struct sock *sk, int bytes)
 		queue_delayed_work(rds_wq, &conn->c_recv_w, 0);
 out:
 	read_unlock(&sk->sk_callback_lock);
-	ready(sk, bytes);
+	ready(sk);
 }
 
 int rds_tcp_recv_init(void)

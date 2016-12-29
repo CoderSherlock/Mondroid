@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,7 +25,7 @@
 #include <linux/skbuff.h>
 #include <linux/debugfs.h>
 #include <linux/clk.h>
-#include <linux/wakelock.h>
+#include <linux/pm.h>
 #include <linux/of.h>
 #include <linux/ipc_logging.h>
 #include <linux/srcu.h>
@@ -131,13 +131,9 @@ static atomic_t bam_dmux_a2_pwr_cntl_in_cnt = ATOMIC_INIT(0);
 				 bam_dmux_write_cpy_bytes);                 \
 	} while (0)
 
-#define DBG_INC_TX_SPS_FAILURE_CNT() do {	\
-		bam_dmux_tx_sps_failure_cnt++;		\
-} while (0)
+#define DBG_INC_TX_SPS_FAILURE_CNT() (bam_dmux_tx_sps_failure_cnt++)
 
-#define DBG_INC_TX_STALL_CNT() do { \
-	bam_dmux_tx_stall_cnt++; \
-} while (0)
+#define DBG_INC_TX_STALL_CNT() (bam_dmux_tx_stall_cnt++)
 
 #define DBG_INC_ACK_OUT_CNT() \
 	atomic_inc(&bam_dmux_ack_out_cnt)
@@ -234,8 +230,10 @@ static struct srcu_struct bam_dmux_srcu;
 
 /* A2 power collaspe */
 #define UL_TIMEOUT_DELAY 1000	/* in ms */
+#define UL_FAST_TIMEOUT_DELAY 100 /* in ms */
 #define SHUTDOWN_TIMEOUT_MS	500
 #define UL_WAKEUP_TIMEOUT_MS	2000
+static uint32_t ul_timeout_delay = UL_TIMEOUT_DELAY;
 static void toggle_apps_ack(void);
 static void reconnect_to_bam(void);
 static void disconnect_to_bam(void);
@@ -259,7 +257,7 @@ static DEFINE_RWLOCK(ul_wakeup_lock);
 static DECLARE_WORK(kickoff_ul_wakeup, kickoff_ul_wakeup_func);
 static int bam_connection_is_active;
 static int wait_for_ack;
-static struct wake_lock bam_wakelock;
+static struct wakeup_source bam_wakelock;
 static int a2_pc_disabled;
 static DEFINE_MUTEX(dfab_status_lock);
 static int dfab_is_on;
@@ -272,7 +270,6 @@ static LIST_HEAD(bam_other_notify_funcs);
 static DEFINE_MUTEX(smsm_cb_lock);
 static DEFINE_MUTEX(delayed_ul_vote_lock);
 static int need_delayed_ul_vote;
-static int in_ssr;
 static int ssr_skipped_disconnect;
 static struct completion shutdown_completion;
 
@@ -315,7 +312,7 @@ static void *bam_ipc_log_txt;
 
 /**
  * Log a state change along with a small message.
- * Complete size of messsage is limited to @todo.
+ * Complete size of message is limited to @todo.
  * Logging is done using IPC Logging infrastructure.
  *
  * States
@@ -486,7 +483,7 @@ static void queue_rx_work_func(struct work_struct *work)
 {
 	/*
 	 * Cold path.  Delays can be tolerated.  Use of GFP_KERNEL should
-	 * guarentee the requested memory will be found, after some ammount of
+	 * guarantee the requested memory will be found, after some ammount of
 	 * delay.
 	 */
 	__queue_rx(GFP_KERNEL);
@@ -704,7 +701,8 @@ static void handle_bam_mux_cmd(struct work_struct *work)
 	switch (rx_hdr->cmd) {
 	case BAM_MUX_HDR_CMD_DATA:
 		if (rx_hdr->pkt_len == 0xffff)
-			rx_hdr->pkt_len = sps_size;
+			/* SPS includes the header bytes, need just payload */
+			rx_hdr->pkt_len = sps_size - sizeof(*rx_hdr);
 		DBG_INC_READ_CNT(rx_hdr->pkt_len);
 		bam_mux_process_data(rx_skb);
 		break;
@@ -831,8 +829,8 @@ static void bam_mux_write_done(struct work_struct *work)
 	if (unlikely(info != info_expected)) {
 		struct tx_pkt_info *errant_pkt;
 
-		DMUX_LOG_KERR("%s: bam_tx_pool mismatch .next=%p,"
-				" list_node=%p, ts=%u.%09lu\n",
+		DMUX_LOG_KERR(
+				"%s: bam_tx_pool mismatch .next=%p, list_node=%p, ts=%u.%09lu\n",
 				__func__, bam_tx_pool.next, &info->list_node,
 				info->ts_sec, info->ts_nsec
 				);
@@ -919,14 +917,17 @@ int msm_bam_dmux_write(uint32_t id, struct sk_buff *skb)
 
 	read_lock(&ul_wakeup_lock);
 	if (!bam_is_connected) {
+		atomic_inc(&ul_ondemand_vote);
 		read_unlock(&ul_wakeup_lock);
 		ul_wakeup();
 		if (unlikely(in_global_reset == 1)) {
 			srcu_read_unlock(&bam_dmux_srcu, rcu_id);
+			atomic_dec(&ul_ondemand_vote);
 			return -EFAULT;
 		}
 		read_lock(&ul_wakeup_lock);
 		notify_all(BAM_DMUX_UL_CONNECTED, (unsigned long)(NULL));
+		atomic_dec(&ul_ondemand_vote);
 	}
 
 	/* if skb do not have any tailroom for padding,
@@ -1126,14 +1127,17 @@ int msm_bam_dmux_open(uint32_t id, void *priv,
 
 	read_lock(&ul_wakeup_lock);
 	if (!bam_is_connected) {
+		atomic_inc(&ul_ondemand_vote);
 		read_unlock(&ul_wakeup_lock);
 		ul_wakeup();
 		if (unlikely(in_global_reset == 1)) {
+			atomic_dec(&ul_ondemand_vote);
 			kfree(hdr);
 			return -EFAULT;
 		}
 		read_lock(&ul_wakeup_lock);
 		notify_all(BAM_DMUX_UL_CONNECTED, (unsigned long)(NULL));
+		atomic_dec(&ul_ondemand_vote);
 	}
 
 	hdr->magic_num = BAM_MUX_HDR_MAGIC_NO;
@@ -1160,17 +1164,21 @@ int msm_bam_dmux_close(uint32_t id)
 	if (id >= BAM_DMUX_NUM_CHANNELS)
 		return -EINVAL;
 	DBG("%s: closing ch %d\n", __func__, id);
-	if (!bam_mux_initialized)
+	if (!bam_mux_initialized || !bam_ch_is_local_open(id))
 		return -ENODEV;
 
 	read_lock(&ul_wakeup_lock);
 	if (!bam_is_connected && !bam_ch_is_in_reset(id)) {
+		atomic_inc(&ul_ondemand_vote);
 		read_unlock(&ul_wakeup_lock);
 		ul_wakeup();
-		if (unlikely(in_global_reset == 1))
+		if (unlikely(in_global_reset == 1)) {
+			atomic_dec(&ul_ondemand_vote);
 			return -EFAULT;
+		}
 		read_lock(&ul_wakeup_lock);
 		notify_all(BAM_DMUX_UL_CONNECTED, (unsigned long)(NULL));
+		atomic_dec(&ul_ondemand_vote);
 	}
 
 	spin_lock_irqsave(&bam_ch[id].lock, flags);
@@ -1486,7 +1494,7 @@ static void bam_mux_tx_notify(struct sps_event_notify *notify)
 		queue_work(bam_mux_tx_workqueue, &pkt->work);
 		break;
 	default:
-		pr_err("%s: recieved unexpected event id %d\n", __func__,
+		pr_err("%s: received unexpected event id %d\n", __func__,
 			notify->event_id);
 	}
 }
@@ -1508,8 +1516,8 @@ static void bam_mux_rx_notify(struct sps_event_notify *notify)
 			ret = bam_ops->sps_get_config_ptr(bam_rx_pipe,
 					&cur_rx_conn);
 			if (ret) {
-				pr_err("%s: sps_get_config() failed %d, interrupts"
-					" not disabled\n", __func__, ret);
+				pr_err("%s: sps_get_config() failed %d, interrupts not disabled\n",
+					__func__, ret);
 				break;
 			}
 			cur_rx_conn.options = SPS_O_AUTO_ENABLE |
@@ -1517,11 +1525,11 @@ static void bam_mux_rx_notify(struct sps_event_notify *notify)
 			ret = bam_ops->sps_set_config_ptr(bam_rx_pipe,
 					&cur_rx_conn);
 			if (ret) {
-				pr_err("%s: sps_set_config() failed %d, interrupts"
-					" not disabled\n", __func__, ret);
+				pr_err("%s: sps_set_config() failed %d, interrupts not disabled\n",
+					__func__, ret);
 				break;
 			}
-			INIT_COMPLETION(shutdown_completion);
+			reinit_completion(&shutdown_completion);
 			grab_wakelock();
 			polling_mode = 1;
 			/*
@@ -1537,7 +1545,7 @@ static void bam_mux_rx_notify(struct sps_event_notify *notify)
 		}
 		break;
 	default:
-		pr_err("%s: recieved unexpected event id %d\n", __func__,
+		pr_err("%s: received unexpected event id %d\n", __func__,
 			notify->event_id);
 	}
 }
@@ -1566,7 +1574,7 @@ static int debug_ul_pkt_cnt(char *buf, int max)
 	int n = 0;
 
 	spin_lock_irqsave(&bam_tx_pool_spinlock, flags);
-	__list_for_each(p, &bam_tx_pool) {
+	list_for_each(p, &bam_tx_pool) {
 		++n;
 	}
 	spin_unlock_irqrestore(&bam_tx_pool_spinlock, flags);
@@ -1612,6 +1620,7 @@ static ssize_t debug_read(struct file *file, char __user *buf,
 {
 	int (*fill)(char *buf, int max) = file->private_data;
 	int bsize = fill(debug_buffer, DEBUG_BUFMAX);
+
 	return simple_read_from_buffer(buf, count, ppos, debug_buffer, bsize);
 }
 
@@ -1665,7 +1674,7 @@ static void notify_all(int event, unsigned long data)
 			notify(priv, event, data);
 	}
 
-	__list_for_each(temp, &bam_other_notify_funcs) {
+	list_for_each(temp, &bam_other_notify_funcs) {
 		func = container_of(temp, struct outside_notify_func,
 								list_node);
 		func->notify(func->priv, event, data);
@@ -1676,13 +1685,17 @@ static void kickoff_ul_wakeup_func(struct work_struct *work)
 {
 	read_lock(&ul_wakeup_lock);
 	if (!bam_is_connected) {
+		atomic_inc(&ul_ondemand_vote);
 		read_unlock(&ul_wakeup_lock);
 		ul_wakeup();
-		if (unlikely(in_global_reset == 1))
+		if (unlikely(in_global_reset == 1)) {
+			atomic_dec(&ul_ondemand_vote);
 			return;
+		}
 		read_lock(&ul_wakeup_lock);
 		ul_packet_written = 1;
 		notify_all(BAM_DMUX_UL_CONNECTED, (unsigned long)(NULL));
+		atomic_dec(&ul_ondemand_vote);
 	}
 	read_unlock(&ul_wakeup_lock);
 }
@@ -1728,11 +1741,11 @@ static inline void ul_powerdown(void)
 
 	if (a2_pc_disabled) {
 		wait_for_dfab = 1;
-		INIT_COMPLETION(dfab_unvote_completion);
+		reinit_completion(&dfab_unvote_completion);
 		release_wakelock();
 	} else {
 		wait_for_ack = 1;
-		INIT_COMPLETION(ul_wakeup_ack_completion);
+		reinit_completion(&ul_wakeup_ack_completion);
 		power_vote(0);
 	}
 	bam_is_connected = 0;
@@ -1815,7 +1828,7 @@ static void ul_timeout(struct work_struct *work)
 	ret = write_trylock_irqsave(&ul_wakeup_lock, flags);
 	if (!ret) { /* failed to grab lock, reschedule and bail */
 		schedule_delayed_work(&ul_timeout_work,
-				msecs_to_jiffies(UL_TIMEOUT_DELAY));
+				msecs_to_jiffies(ul_timeout_delay));
 		return;
 	}
 	if (bam_is_connected) {
@@ -1839,7 +1852,7 @@ static void ul_timeout(struct work_struct *work)
 				__func__, ul_packet_written);
 			ul_packet_written = 0;
 			schedule_delayed_work(&ul_timeout_work,
-					msecs_to_jiffies(UL_TIMEOUT_DELAY));
+					msecs_to_jiffies(ul_timeout_delay));
 		} else {
 			ul_powerdown();
 		}
@@ -1926,7 +1939,7 @@ static void ul_wakeup(void)
 		if (likely(do_vote_dfab))
 			vote_dfab();
 		schedule_delayed_work(&ul_timeout_work,
-				msecs_to_jiffies(UL_TIMEOUT_DELAY));
+				msecs_to_jiffies(ul_timeout_delay));
 		bam_is_connected = 1;
 		mutex_unlock(&wakeup_lock);
 		return;
@@ -1943,18 +1956,20 @@ static void ul_wakeup(void)
 					&ul_wakeup_ack_completion,
 					msecs_to_jiffies(UL_WAKEUP_TIMEOUT_MS));
 		wait_for_ack = 0;
-		if (unlikely(ret == 0) && ssrestart_check()) {
+		if (unlikely(in_global_reset == 1)
+			|| (unlikely(ret == 0) && ssrestart_check())) {
 			mutex_unlock(&wakeup_lock);
 			BAM_DMUX_LOG("%s timeout previous ack\n", __func__);
 			return;
 		}
 	}
-	INIT_COMPLETION(ul_wakeup_ack_completion);
+	reinit_completion(&ul_wakeup_ack_completion);
 	power_vote(1);
 	BAM_DMUX_LOG("%s waiting for wakeup ack\n", __func__);
 	ret = wait_for_completion_timeout(&ul_wakeup_ack_completion,
 					msecs_to_jiffies(UL_WAKEUP_TIMEOUT_MS));
-	if (unlikely(ret == 0) && ssrestart_check()) {
+	if (unlikely(in_global_reset == 1)
+		|| (unlikely(ret == 0) && ssrestart_check())) {
 		mutex_unlock(&wakeup_lock);
 		BAM_DMUX_LOG("%s timeout wakeup ack\n", __func__);
 		return;
@@ -1962,7 +1977,8 @@ static void ul_wakeup(void)
 	BAM_DMUX_LOG("%s waiting completion\n", __func__);
 	ret = wait_for_completion_timeout(&bam_connection_completion,
 					msecs_to_jiffies(UL_WAKEUP_TIMEOUT_MS));
-	if (unlikely(ret == 0) && ssrestart_check()) {
+	if (unlikely(in_global_reset == 1)
+		|| (unlikely(ret == 0) && ssrestart_check())) {
 		mutex_unlock(&wakeup_lock);
 		BAM_DMUX_LOG("%s timeout power on\n", __func__);
 		return;
@@ -1971,7 +1987,7 @@ static void ul_wakeup(void)
 	bam_is_connected = 1;
 	BAM_DMUX_LOG("%s complete\n", __func__);
 	schedule_delayed_work(&ul_timeout_work,
-				msecs_to_jiffies(UL_TIMEOUT_DELAY));
+				msecs_to_jiffies(ul_timeout_delay));
 	mutex_unlock(&wakeup_lock);
 }
 
@@ -1979,8 +1995,11 @@ static void reconnect_to_bam(void)
 {
 	int i;
 
-	in_global_reset = 0;
-	in_ssr = 0;
+	if (in_global_reset) {
+		BAM_DMUX_LOG("%s: skipping due to SSR\n", __func__);
+		return;
+	}
+
 	vote_dfab();
 
 	if (ssr_skipped_disconnect) {
@@ -2054,10 +2073,10 @@ static void disconnect_to_bam(void)
 	ul_powerdown_finish();
 
 	/* tear down BAM connection */
-	INIT_COMPLETION(bam_connection_completion);
+	reinit_completion(&bam_connection_completion);
 
-	/* in_ssr documentation/assumptions found in restart_notifier_cb */
-	if (likely(!in_ssr)) {
+	/* documentation/assumptions found in restart_notifier_cb */
+	if (likely(!in_global_reset)) {
 		BAM_DMUX_LOG("%s: disconnect tx\n", __func__);
 		bam_ops->sps_disconnect_ptr(bam_tx_pipe);
 		BAM_DMUX_LOG("%s: disconnect rx\n", __func__);
@@ -2141,7 +2160,7 @@ static void grab_wakelock(void)
 	BAM_DMUX_LOG("%s: ref count = %d\n", __func__,
 						wakelock_reference_count);
 	if (wakelock_reference_count == 0)
-		wake_lock(&bam_wakelock);
+		__pm_stay_awake(&bam_wakelock);
 	++wakelock_reference_count;
 	spin_unlock_irqrestore(&wakelock_reference_lock, flags);
 }
@@ -2161,7 +2180,7 @@ static void release_wakelock(void)
 						wakelock_reference_count);
 	--wakelock_reference_count;
 	if (wakelock_reference_count == 0)
-		wake_unlock(&bam_wakelock);
+		__pm_relax(&bam_wakelock);
 	spin_unlock_irqrestore(&wakelock_reference_lock, flags);
 }
 
@@ -2191,12 +2210,16 @@ static int restart_notifier_cb(struct notifier_block *this,
 	if (code == SUBSYS_BEFORE_SHUTDOWN) {
 		BAM_DMUX_LOG("%s: begin\n", __func__);
 		in_global_reset = 1;
-		in_ssr = 1;
-		/* wait till all bam_dmux writes completes */
+		/* wakeup ul_wakeup() thread*/
+		complete_all(&ul_wakeup_ack_completion);
+		complete_all(&bam_connection_completion);
+		/* sync to ensure the driver sees SSR */
 		synchronize_srcu(&bam_dmux_srcu);
 		BAM_DMUX_LOG("%s: ssr signaling complete\n", __func__);
 		flush_workqueue(bam_mux_rx_workqueue);
 	}
+	if (code == SUBSYS_BEFORE_POWERUP)
+		in_global_reset = 0;
 	if (code != SUBSYS_AFTER_SHUTDOWN)
 		return NOTIFY_DONE;
 
@@ -2270,7 +2293,6 @@ static int bam_init(void)
 	int skip_iounmap = 0;
 
 	in_global_reset = 0;
-	in_ssr = 0;
 	vote_dfab();
 	/* init BAM */
 	a2_virt_addr = ioremap_nocache(a2_phys_base, a2_phys_size);
@@ -2283,11 +2305,12 @@ static int bam_init(void)
 	a2_props.virt_addr = a2_virt_addr;
 	a2_props.virt_size = a2_phys_size;
 	a2_props.irq = a2_bam_irq;
-	a2_props.options = SPS_BAM_OPT_IRQ_WAKEUP;
+	a2_props.options = SPS_BAM_OPT_IRQ_WAKEUP | SPS_BAM_HOLD_MEM;
 	a2_props.num_pipes = A2_NUM_PIPES;
 	a2_props.summing_threshold = A2_SUMMING_THRESHOLD;
 	a2_props.constrained_logging = true;
 	a2_props.logging_number = 1;
+	a2_props.ipc_loglevel = 3;
 	if (satellite_mode)
 		a2_props.manage = SPS_BAM_MGR_DEVICE_REMOTE;
 	/* need to free on tear down */
@@ -2460,7 +2483,9 @@ static void toggle_apps_ack(void)
 static void bam_dmux_smsm_cb(void *priv, uint32_t old_state, uint32_t new_state)
 {
 	static int last_processed_state;
+	int rcu_id;
 
+	rcu_id = srcu_read_lock(&bam_dmux_srcu);
 	mutex_lock(&smsm_cb_lock);
 	bam_dmux_power_state = new_state & SMSM_A2_POWER_CONTROL ? 1 : 0;
 	DBG_INC_A2_POWER_CONTROL_IN_CNT();
@@ -2469,6 +2494,7 @@ static void bam_dmux_smsm_cb(void *priv, uint32_t old_state, uint32_t new_state)
 	if (last_processed_state == (new_state & SMSM_A2_POWER_CONTROL)) {
 		BAM_DMUX_LOG("%s: already processed this state\n", __func__);
 		mutex_unlock(&smsm_cb_lock);
+		srcu_read_unlock(&bam_dmux_srcu, rcu_id);
 		return;
 	}
 
@@ -2492,16 +2518,20 @@ static void bam_dmux_smsm_cb(void *priv, uint32_t old_state, uint32_t new_state)
 		pr_err("%s: unsupported state change\n", __func__);
 	}
 	mutex_unlock(&smsm_cb_lock);
-
+	srcu_read_unlock(&bam_dmux_srcu, rcu_id);
 }
 
 static void bam_dmux_smsm_ack_cb(void *priv, uint32_t old_state,
 						uint32_t new_state)
 {
+	int rcu_id;
+
+	rcu_id = srcu_read_lock(&bam_dmux_srcu);
 	DBG_INC_ACK_IN_CNT();
 	BAM_DMUX_LOG("%s: 0x%08x -> 0x%08x\n", __func__, old_state,
 			new_state);
 	complete_all(&ul_wakeup_ack_completion);
+	srcu_read_unlock(&bam_dmux_srcu, rcu_id);
 }
 
 /**
@@ -2530,8 +2560,9 @@ void msm_bam_dmux_deinit(void)
 {
 	restart_notifier_cb(NULL, SUBSYS_BEFORE_SHUTDOWN, NULL);
 	restart_notifier_cb(NULL, SUBSYS_AFTER_SHUTDOWN, NULL);
+	restart_notifier_cb(NULL, SUBSYS_BEFORE_POWERUP, NULL);
+	restart_notifier_cb(NULL, SUBSYS_AFTER_POWERUP, NULL);
 	in_global_reset = 0;
-	in_ssr = 0;
 }
 EXPORT_SYMBOL(msm_bam_dmux_deinit);
 
@@ -2660,8 +2691,15 @@ static int bam_dmux_probe(struct platform_device *pdev)
 
 		no_cpu_affinity = of_property_read_bool(pdev->dev.of_node,
 						"qcom,no-cpu-affinity");
+
+		rc = of_property_read_bool(pdev->dev.of_node,
+						"qcom,fast-shutdown");
+		if (rc) {
+			ul_timeout_delay = UL_FAST_TIMEOUT_DELAY;
+		}
+
 		BAM_DMUX_LOG(
-			"%s: base:%p size:%x irq:%d satellite:%d num_buffs:%d dl_mtu:%x cpu-affinity:%d\n",
+			"%s: base:%p size:%x irq:%d satellite:%d num_buffs:%d dl_mtu:%x cpu-affinity:%d ul_timeout_delay:%d\n",
 						__func__,
 						(void *)(uintptr_t)a2_phys_base,
 						a2_phys_size,
@@ -2669,7 +2707,8 @@ static int bam_dmux_probe(struct platform_device *pdev)
 						satellite_mode,
 						num_buffers,
 						dl_mtu,
-						no_cpu_affinity);
+						no_cpu_affinity,
+						ul_timeout_delay);
 	} else { /* fallback to default init data */
 		a2_phys_base = A2_PHYS_BASE;
 		a2_phys_size = A2_PHYS_SIZE;
@@ -2739,7 +2778,7 @@ static int bam_dmux_probe(struct platform_device *pdev)
 	init_completion(&shutdown_completion);
 	complete_all(&shutdown_completion);
 	INIT_DELAYED_WORK(&ul_timeout_work, ul_timeout);
-	wake_lock_init(&bam_wakelock, WAKE_LOCK_SUSPEND, "bam_dmux_wakelock");
+	wakeup_source_init(&bam_wakelock, "bam_dmux_wakelock");
 	init_srcu_struct(&bam_dmux_srcu);
 
 	subsys_h = subsys_notif_register_notifier("modem", &restart_notifier);
@@ -2818,9 +2857,8 @@ static int __init bam_dmux_init(void)
 
 	bam_ipc_log_txt = ipc_log_context_create(BAM_IPC_LOG_PAGES, "bam_dmux",
 			0);
-	if (!bam_ipc_log_txt) {
+	if (!bam_ipc_log_txt)
 		pr_err("%s : unable to create IPC Logging Context", __func__);
-	}
 
 	rx_timer_interval = DEFAULT_POLLING_MIN_SLEEP;
 

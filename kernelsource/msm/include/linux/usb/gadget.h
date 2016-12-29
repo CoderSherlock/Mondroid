@@ -24,8 +24,80 @@
 #include <linux/types.h>
 #include <linux/workqueue.h>
 #include <linux/usb/ch9.h>
+#include <linux/pm_runtime.h>
 
 struct usb_ep;
+
+enum ep_type {
+	EP_TYPE_NORMAL = 0,
+	EP_TYPE_GSI,
+};
+
+/* Operations codes for GSI enabled EPs */
+enum gsi_ep_op {
+	GSI_EP_OP_CONFIG = 0,
+	GSI_EP_OP_STARTXFER,
+	GSI_EP_OP_STORE_DBL_INFO,
+	GSI_EP_OP_ENABLE_GSI,
+	GSI_EP_OP_UPDATEXFER,
+	GSI_EP_OP_RING_IN_DB,
+	GSI_EP_OP_ENDXFER,
+	GSI_EP_OP_GET_CH_INFO,
+	GSI_EP_OP_GET_XFER_IDX,
+	GSI_EP_OP_PREPARE_TRBS,
+	GSI_EP_OP_FREE_TRBS,
+	GSI_EP_OP_SET_CLR_BLOCK_DBL,
+	GSI_EP_OP_CHECK_FOR_SUSPEND,
+};
+
+/*
+ * @buf_base_addr: Base pointer to buffer allocated for each GSI enabled EP.
+ *	TRBs point to buffers that are split from this pool. The size of the
+ *	buffer is num_bufs times buf_len. num_bufs and buf_len are determined
+	based on desired performance and aggregation size.
+ * @dma: DMA address corresponding to buf_base_addr.
+ * @num_bufs: Number of buffers associated with the GSI enabled EP. This
+ *	corresponds to the number of non-zlp TRBs allocated for the EP.
+ *	The value is determined based on desired performance for the EP.
+ * @buf_len: Size of each individual buffer is determined based on aggregation
+ *	negotiated as per the protocol. In case of no aggregation supported by
+ *	the protocol, we use default values.
+ */
+struct usb_gsi_request {
+	void *buf_base_addr;
+	dma_addr_t dma;
+	size_t num_bufs;
+	size_t buf_len;
+};
+
+/*
+ * @last_trb_addr: Address (LSB - based on alignment restrictions) of
+ *	last TRB in queue. Used to identify rollover case.
+ * @const_buffer_size: TRB buffer size in KB (similar to IPA aggregation
+ *	configuration). Must be aligned to Max USB Packet Size.
+ *	Should be 1 <= const_buffer_size <= 31.
+ * @depcmd_low_addr: Used by GSI hardware to write "Update Transfer" cmd
+ * @depcmd_hi_addr: Used to write "Update Transfer" command.
+ * @gevntcount_low_addr: GEVNCOUNT low address for GSI hardware to read and
+ *	clear processed events.
+ * @gevntcount_hi_addr:	GEVNCOUNT high address.
+ * @xfer_ring_len: length of transfer ring in bytes (must be integral
+ *	multiple of TRB size - 16B for xDCI).
+ * @xfer_ring_base_addr: physical base address of transfer ring. Address must
+ *	be aligned to xfer_ring_len rounded to power of two.
+ * @ch_req: Used to pass request specific info for certain operations on GSI EP
+ */
+struct gsi_channel_info {
+	u16 last_trb_addr;
+	u8 const_buffer_size;
+	u32 depcmd_low_addr;
+	u8 depcmd_hi_addr;
+	u32 gevntcount_low_addr;
+	u8 gevntcount_hi_addr;
+	u16 xfer_ring_len;
+	u64 xfer_ring_base_addr;
+	struct usb_gsi_request *ch_req;
+};
 
 /**
  * struct usb_request - describes one i/o request
@@ -74,7 +146,7 @@ struct usb_ep;
  *	Note that for writes (IN transfers) some data bytes may still
  *	reside in a device-side FIFO when the request is reported as
  *	complete.
- *@udc_priv: Vendor private data in usage by the UDC.
+ * @udc_priv: Vendor private data in usage by the UDC.
  *
  * These are allocated/freed through the endpoint they're used with.  The
  * hardware's driver can add extra per-request data to the memory it returns,
@@ -136,6 +208,7 @@ struct usb_ep_ops {
 	struct usb_request *(*alloc_request) (struct usb_ep *ep,
 		gfp_t gfp_flags);
 	void (*free_request) (struct usb_ep *ep, struct usb_request *req);
+
 	int (*queue) (struct usb_ep *ep, struct usb_request *req,
 		gfp_t gfp_flags);
 	int (*dequeue) (struct usb_ep *ep, struct usb_request *req);
@@ -145,6 +218,8 @@ struct usb_ep_ops {
 
 	int (*fifo_status) (struct usb_ep *ep);
 	void (*fifo_flush) (struct usb_ep *ep);
+	int (*gsi_ep_op)(struct usb_ep *ep, void *op_data,
+		enum gsi_ep_op op);
 };
 
 /**
@@ -155,6 +230,9 @@ struct usb_ep_ops {
  * @maxpacket:The maximum packet size used on this endpoint.  The initial
  *	value can sometimes be reduced (hardware allowing), according to
  *      the endpoint descriptor used to configure the endpoint.
+ * @maxpacket_limit:The maximum packet size value which can be handled by this
+ *	endpoint. It's set once by UDC driver when endpoint is initialized, and
+ *	should not be changed. Should not be confused with maxpacket.
  * @max_streams: The maximum number of streams supported
  *	by this EP (0 - 16, actual number is 2^n)
  * @mult: multiplier, 'mult' value for SS Isoc EPs
@@ -166,6 +244,8 @@ struct usb_ep_ops {
  *	enabled and remains valid until the endpoint is disabled.
  * @comp_desc: In case of SuperSpeed support, this is the endpoint companion
  *	descriptor that is used to configure the endpoint
+ * @ep_type: Used to specify type of EP eg. normal vs h/w accelerated.
+ * @ep_intr_num: Interrupter number for EP.
  * @endless: In case where endless transfer is being initiated, this is set
  *	to disable usb event interrupt for few events.
  *
@@ -180,16 +260,35 @@ struct usb_ep {
 	const struct usb_ep_ops	*ops;
 	struct list_head	ep_list;
 	unsigned		maxpacket:16;
+	unsigned		maxpacket_limit:16;
 	unsigned		max_streams:16;
 	unsigned		mult:2;
 	unsigned		maxburst:5;
 	u8			address;
 	const struct usb_endpoint_descriptor	*desc;
 	const struct usb_ss_ep_comp_descriptor	*comp_desc;
+	enum ep_type		ep_type;
+	u8			ep_num;
+	u8			ep_intr_num;
 	bool			endless;
 };
 
 /*-------------------------------------------------------------------------*/
+
+/**
+ * usb_ep_set_maxpacket_limit - set maximum packet size limit for endpoint
+ * @ep:the endpoint being configured
+ * @maxpacket_limit:value of maximum packet size limit
+ *
+ * This function shoud be used only in UDC drivers to initialize endpoint
+ * (usually in probe function).
+ */
+static inline void usb_ep_set_maxpacket_limit(struct usb_ep *ep,
+					      unsigned maxpacket_limit)
+{
+	ep->maxpacket_limit = maxpacket_limit;
+	ep->maxpacket = maxpacket_limit;
+}
 
 /**
  * usb_ep_enable - configure endpoint, making it usable
@@ -336,12 +435,13 @@ static inline int usb_ep_queue(struct usb_ep *ep,
  * @ep:the endpoint associated with the request
  * @req:the request being canceled
  *
- * if the request is still active on the endpoint, it is dequeued and its
+ * If the request is still active on the endpoint, it is dequeued and its
  * completion routine is called (with status -ECONNRESET); else a negative
- * error code is returned.
+ * error code is returned. This is guaranteed to happen before the call to
+ * usb_ep_dequeue() returns.
  *
- * note that some hardware can't clear out write fifos (to unlink the request
- * at the head of the queue) except as part of disconnecting from usb.  such
+ * Note that some hardware can't clear out write fifos (to unlink the request
+ * at the head of the queue) except as part of disconnecting from usb. Such
  * restrictions prevent drivers from supporting configuration changes,
  * even to configuration zero (a "chapter 9" requirement).
  */
@@ -451,7 +551,20 @@ static inline void usb_ep_fifo_flush(struct usb_ep *ep)
 		ep->ops->fifo_flush(ep);
 }
 
+/**
+ * usb_gsi_ep_op - performs operation on GSI accelerated EP based on EP op code
+ *
+ * Operations such as EP configuration, TRB allocation, StartXfer etc.
+ * See gsi_ep_op for more details.
+ */
+static inline int usb_gsi_ep_op(struct usb_ep *ep,
+		struct usb_gsi_request *req, enum gsi_ep_op op)
+{
+	if (ep->ops->gsi_ep_op)
+		return ep->ops->gsi_ep_op(ep, req, op);
 
+	return -EOPNOTSUPP;
+}
 /*-------------------------------------------------------------------------*/
 
 struct usb_dcd_config_params {
@@ -476,6 +589,7 @@ struct usb_gadget_ops {
 	int	(*vbus_session) (struct usb_gadget *, int is_active);
 	int	(*vbus_draw) (struct usb_gadget *, unsigned mA);
 	int	(*pullup) (struct usb_gadget *, int is_on);
+	int	(*restart)(struct usb_gadget *);
 	int	(*ioctl)(struct usb_gadget *,
 				unsigned code, unsigned long param);
 	void	(*get_config_params)(struct usb_dcd_config_params *);
@@ -496,6 +610,11 @@ struct usb_gadget_ops {
  * @max_speed: Maximal speed the UDC can handle.  UDC must support this
  *      and all slower speeds.
  * @state: the state we are now (attached, suspended, configured, etc)
+ * @name: Identifies the controller hardware type.  Used in diagnostics
+ *	and sometimes configuration.
+ * @dev: Driver model state for this abstract device.
+ * @out_epnum: last used out ep number
+ * @in_epnum: last used in ep number
  * @sg_supported: true if we can handle scatter-gather
  * @is_otg: True if the USB device port uses a Mini-AB jack, so that the
  *	gadget driver must provide a USB OTG descriptor.
@@ -508,18 +627,15 @@ struct usb_gadget_ops {
  *	only supports HNP on a different root port.
  * @b_hnp_enable: OTG device feature flag, indicating that the A-Host
  *	enabled HNP support.
- * @host_request: A flag set by user when wishes to take up host role.
- * @otg_srp_reqd: OTG test mode feature to initiate SRP after the end of
- * current session.
- * @name: Identifies the controller hardware type.  Used in diagnostics
- *	and sometimes configuration.
- * @dev: Driver model state for this abstract device.
- * @out_epnum: last used out ep number
- * @in_epnum: last used in ep number
+ * @quirk_ep_out_aligned_size: epout requires buffer size to be aligned to
+ *	MaxPacketSize.
+ * @xfer_isr_count: UI (transfer complete) interrupts count
  * @usb_core_id: Identifies the usb core controlled by this usb_gadget.
  *		 Used in case of more then one core operates concurrently.
- * @streaming_enabled: Enable streaming mode with usb core.
- * @xfer_isr_count: UI (transfer complete) interrupts count
+ * @bam2bam_func_enabled; Indicates function using bam2bam is enabled or not.
+ * @extra_buf_alloc: Extra allocation size for AXI prefetch so that out of
+ * boundary access is protected.
+ * @interrupt_num: Interrupt number for the underlying platform device.
  *
  * Gadgets have a mostly-portable "gadget driver" implementing device
  * functions, handling all usb configurations and interfaces.  Gadget
@@ -548,24 +664,25 @@ struct usb_gadget {
 	enum usb_device_speed		speed;
 	enum usb_device_speed		max_speed;
 	enum usb_device_state		state;
+	const char			*name;
+	struct device			dev;
+	unsigned			out_epnum;
+	unsigned			in_epnum;
+
 	unsigned			sg_supported:1;
 	unsigned			is_otg:1;
 	unsigned			is_a_peripheral:1;
 	unsigned			b_hnp_enable:1;
 	unsigned			a_hnp_support:1;
 	unsigned			a_alt_hnp_support:1;
-	unsigned			host_request:1;
-	unsigned			otg_srp_reqd:1;
-	const char			*name;
-	struct device			dev;
-	unsigned			out_epnum;
-	unsigned			in_epnum;
-	bool				l1_supported;
-	u8				usb_core_id;
-	bool				streaming_enabled;
+	unsigned			quirk_ep_out_aligned_size:1;
 	bool				remote_wakeup;
-	void				*private;
 	u32				xfer_isr_count;
+	u8				usb_core_id;
+	bool				l1_supported;
+	bool				bam2bam_func_enabled;
+	u32				extra_buf_alloc;
+	int				interrupt_num;
 };
 #define work_to_gadget(w)	(container_of((w), struct usb_gadget, work))
 
@@ -582,6 +699,24 @@ static inline struct usb_gadget *dev_to_usb_gadget(struct device *dev)
 #define gadget_for_each_ep(tmp, gadget) \
 	list_for_each_entry(tmp, &(gadget)->ep_list, ep_list)
 
+
+/**
+ * usb_ep_align_maybe - returns @len aligned to ep's maxpacketsize if gadget
+ *	requires quirk_ep_out_aligned_size, otherwise reguens len.
+ * @g: controller to check for quirk
+ * @ep: the endpoint whose maxpacketsize is used to align @len
+ * @len: buffer size's length to align to @ep's maxpacketsize
+ *
+ * This helper is used in case it's required for any reason to check and maybe
+ * align buffer's size to an ep's maxpacketsize.
+ */
+static inline size_t
+usb_ep_align_maybe(struct usb_gadget *g, struct usb_ep *ep, size_t len)
+{
+	return !g->quirk_ep_out_aligned_size ? len :
+			max_t(size_t, 512,
+			round_up(len, (size_t)ep->desc->wMaxPacketSize));
+}
 
 /**
  * gadget_is_dualspeed - return true iff the hardware handles high speed
@@ -799,6 +934,141 @@ static inline int usb_gadget_disconnect(struct usb_gadget *gadget)
 	return gadget->ops->pullup(gadget, 0);
 }
 
+/**
+ * usb_gadget_restart - software-controlled reset of USB peripheral connection
+ * @gadget:the peripheral being reset
+ *
+ * Informs controller driver for Vbus LOW followed by Vbus HIGH notification.
+ * This performs full hardware reset and re-initialization.
+  */
+static inline int usb_gadget_restart(struct usb_gadget *gadget)
+{
+	if (!gadget->ops->restart)
+		return -EOPNOTSUPP;
+	return gadget->ops->restart(gadget);
+}
+
+/**
+ * usb_gadget_autopm_get - increment PM-usage counter of usb gadget's parent
+ * device.
+ * @gadget: usb gadget whose parent device counter is incremented
+ *
+ * This routine should be called by function driver when it wants to use
+ * gadget's parent device and needs to guarantee that it is not suspended. In
+ * addition, the routine prevents subsequent autosuspends of gadget's parent
+ * device. However if the autoresume fails then the counter is re-decremented.
+ *
+ * This routine can run only in process context.
+ */
+static inline int usb_gadget_autopm_get(struct usb_gadget *gadget)
+{
+	int status = -ENODEV;
+
+	if (!gadget || !gadget->dev.parent)
+		return status;
+
+	status = pm_runtime_get_sync(gadget->dev.parent);
+	if (status < 0)
+		pm_runtime_put_sync(gadget->dev.parent);
+
+	if (status > 0)
+		status = 0;
+	return status;
+}
+
+/**
+ * usb_gadget_autopm_get_async - increment PM-usage counter of usb gadget's
+ * parent device.
+ * @gadget: usb gadget whose parent device counter is incremented
+ *
+ * This routine increments @gadget parent device PM usage counter and queue an
+ * autoresume request if the device is suspended. It does not autoresume device
+ * directly (it only queues a request). After a successful call, the device may
+ * not yet be resumed.
+ *
+ * This routine can run in atomic context.
+ */
+static inline int usb_gadget_autopm_get_async(struct usb_gadget *gadget)
+{
+	int status = -ENODEV;
+
+	if (!gadget || !gadget->dev.parent)
+		return status;
+
+	status = pm_runtime_get(gadget->dev.parent);
+	if (status < 0 && status != -EINPROGRESS)
+		pm_runtime_put_noidle(gadget->dev.parent);
+
+	if (status > 0 || status == -EINPROGRESS)
+		status = 0;
+	return status;
+}
+
+/**
+ * usb_gadget_autopm_get_noresume - increment PM-usage counter of usb gadget's
+ * parent device.
+ * @gadget: usb gadget whose parent device counter is incremented
+ *
+ * This routine increments PM-usage count of @gadget parent device but does not
+ * carry out an autoresume.
+ *
+ * This routine can run in atomic context.
+ */
+static inline void usb_gadget_autopm_get_noresume(struct usb_gadget *gadget)
+{
+	if (gadget && gadget->dev.parent)
+		pm_runtime_get_noresume(gadget->dev.parent);
+}
+
+/**
+ * usb_gadget_autopm_put - decrement PM-usage counter of usb gadget's parent
+ * device.
+ * @gadget: usb gadget whose parent device counter is decremented.
+ *
+ * This routine should be called by function driver when it is finished using
+ * @gadget parent device and wants to allow it to autosuspend. It decrements
+ * PM-usage counter of @gadget parent device, when the counter reaches 0, a
+ * delayed autosuspend request is attempted.
+ *
+ * This routine can run only in process context.
+ */
+static inline void usb_gadget_autopm_put(struct usb_gadget *gadget)
+{
+	if (gadget && gadget->dev.parent)
+		pm_runtime_put_sync(gadget->dev.parent);
+}
+
+/**
+ * usb_gadget_autopm_put_async - decrement PM-usage counter of usb gadget's
+ * parent device.
+ * @gadget: usb gadget whose parent device counter is decremented.
+ *
+ * This routine decrements PM-usage counter of @gadget parent device and
+ * schedules a delayed autosuspend request if the counter is <= 0.
+ *
+ * This routine can run in atomic context.
+ */
+static inline void usb_gadget_autopm_put_async(struct usb_gadget *gadget)
+{
+	if (gadget && gadget->dev.parent)
+		pm_runtime_put(gadget->dev.parent);
+}
+
+/**
+ * usb_gadget_autopm_put_no_suspend - decrement PM-usage counter of usb gadget's
+ * parent device.
+ * @gadget: usb gadget whose parent device counter is decremented.
+ *
+ * This routine decrements PM-usage counter of @gadget parent device but does
+ * not carry out an autosuspend.
+ *
+ * This routine can run in atomic context.
+ */
+static inline void usb_gadget_autopm_put_no_suspend(struct usb_gadget *gadget)
+{
+	if (gadget && gadget->dev.parent)
+		pm_runtime_put_noidle(gadget->dev.parent);
+}
 
 /*-------------------------------------------------------------------------*/
 
@@ -822,6 +1092,8 @@ static inline int usb_gadget_disconnect(struct usb_gadget *gadget)
  *	Called in a context that permits sleeping.
  * @suspend: Invoked on USB suspend.  May be called in_interrupt.
  * @resume: Invoked on USB resume.  May be called in_interrupt.
+ * @reset: Invoked on USB bus reset. It is mandatory for all gadget drivers
+ *	and should be called in_interrupt.
  * @driver: Driver model state for this driver.
  * @usb_core_id: Identifies the usb core controlled by this usb_gadget_driver.
  *               Used in case of more then one core operates concurrently.
@@ -881,6 +1153,7 @@ struct usb_gadget_driver {
 	void			(*disconnect)(struct usb_gadget *);
 	void			(*suspend)(struct usb_gadget *);
 	void			(*resume)(struct usb_gadget *);
+	void			(*reset)(struct usb_gadget *);
 
 	/* FIXME support safe rmmod */
 	struct device_driver	driver;
@@ -976,11 +1249,6 @@ int usb_gadget_get_string(struct usb_gadget_strings *table, int id, u8 *buf);
 
 /* utility to simplify managing config descriptors */
 
-/* Find and fill the requested descriptor into buffer */
-int
-usb_find_descriptor_fillbuf(void *, unsigned,
-		const struct usb_descriptor_header **, u8);
-
 /* write vector of descriptors into buffer */
 int usb_descriptor_fillbuf(void *, unsigned,
 		const struct usb_descriptor_header **);
@@ -1046,6 +1314,20 @@ extern void usb_gadget_set_state(struct usb_gadget *gadget,
 
 /*-------------------------------------------------------------------------*/
 
+/* utility to tell udc core that the bus reset occurs */
+extern void usb_gadget_udc_reset(struct usb_gadget *gadget,
+		struct usb_gadget_driver *driver);
+
+/*-------------------------------------------------------------------------*/
+
+/* utility to give requests back to the gadget layer */
+
+extern void usb_gadget_giveback_request(struct usb_ep *ep,
+		struct usb_request *req);
+
+
+/*-------------------------------------------------------------------------*/
+
 /* utility wrapping a simple endpoint selection policy */
 
 extern struct usb_ep *usb_ep_autoconfig(struct usb_gadget *,
@@ -1057,5 +1339,8 @@ extern struct usb_ep *usb_ep_autoconfig_ss(struct usb_gadget *,
 			struct usb_ss_ep_comp_descriptor *);
 
 extern void usb_ep_autoconfig_reset(struct usb_gadget *);
+extern struct usb_ep *usb_ep_autoconfig_by_name(struct usb_gadget *,
+			struct usb_endpoint_descriptor *,
+			const char *ep_name);
 
 #endif /* __LINUX_USB_GADGET_H */

@@ -35,6 +35,7 @@
 #include <linux/compiler.h>
 #include <linux/pstore_ram.h>
 #include <linux/of.h>
+#include <linux/htc_debug_tools.h>
 
 #define RAMOOPS_KERNMSG_HDR "===="
 #define MIN_MEM_SIZE 4096UL
@@ -150,6 +151,27 @@ ramoops_get_next_prz(struct persistent_ram_zone *przs[], uint *c, uint max,
 	return prz;
 }
 
+static void ramoops_read_kmsg_hdr(char *buffer, struct timespec *time,
+				  bool *compressed)
+{
+	char data_type;
+
+	if (sscanf(buffer, RAMOOPS_KERNMSG_HDR "%lu.%lu-%c\n",
+			&time->tv_sec, &time->tv_nsec, &data_type) == 3) {
+		if (data_type == 'C')
+			*compressed = true;
+		else
+			*compressed = false;
+	} else if (sscanf(buffer, RAMOOPS_KERNMSG_HDR "%lu.%lu\n",
+			&time->tv_sec, &time->tv_nsec) == 2) {
+			*compressed = false;
+	} else {
+		time->tv_sec = 0;
+		time->tv_nsec = 0;
+		*compressed = false;
+	}
+}
+
 static bool prz_ok(struct persistent_ram_zone *prz)
 {
 	return !!prz && !!(persistent_ram_old_size(prz) +
@@ -158,7 +180,8 @@ static bool prz_ok(struct persistent_ram_zone *prz)
 
 static ssize_t ramoops_pstore_read(u64 *id, enum pstore_type_id *type,
 				   int *count, struct timespec *time,
-				   char **buf, struct pstore_info *psi)
+				   char **buf, bool *compressed,
+				   struct pstore_info *psi)
 {
 	ssize_t size;
 	ssize_t ecc_notice_size;
@@ -180,10 +203,6 @@ static ssize_t ramoops_pstore_read(u64 *id, enum pstore_type_id *type,
 	if (!prz_ok(prz))
 		return 0;
 
-	/* TODO(kees): Bogus time for the moment. */
-	time->tv_sec = 0;
-	time->tv_nsec = 0;
-
 	size = persistent_ram_old_size(prz);
 
 	/* ECC correction notice */
@@ -194,12 +213,14 @@ static ssize_t ramoops_pstore_read(u64 *id, enum pstore_type_id *type,
 		return -ENOMEM;
 
 	memcpy(*buf, persistent_ram_old(prz), size);
+	ramoops_read_kmsg_hdr(*buf, time, compressed);
 	persistent_ram_ecc_string(prz, *buf + size, ecc_notice_size + 1);
 
 	return size + ecc_notice_size;
 }
 
-static size_t ramoops_write_kmsg_hdr(struct persistent_ram_zone *prz)
+static size_t ramoops_write_kmsg_hdr(struct persistent_ram_zone *prz,
+				     bool compressed)
 {
 	char *hdr;
 	struct timespec timestamp;
@@ -210,8 +231,9 @@ static size_t ramoops_write_kmsg_hdr(struct persistent_ram_zone *prz)
 		timestamp.tv_sec = 0;
 		timestamp.tv_nsec = 0;
 	}
-	hdr = kasprintf(GFP_ATOMIC, RAMOOPS_KERNMSG_HDR "%lu.%lu\n",
-		(long)timestamp.tv_sec, (long)(timestamp.tv_nsec / 1000));
+	hdr = kasprintf(GFP_ATOMIC, RAMOOPS_KERNMSG_HDR "%lu.%lu-%c\n",
+		(long)timestamp.tv_sec, (long)(timestamp.tv_nsec / 1000),
+		compressed ? 'C' : 'D');
 	WARN_ON_ONCE(!hdr);
 	len = hdr ? strlen(hdr) : 0;
 	persistent_ram_write(prz, hdr, len);
@@ -223,7 +245,8 @@ static size_t ramoops_write_kmsg_hdr(struct persistent_ram_zone *prz)
 static int notrace ramoops_pstore_write_buf(enum pstore_type_id type,
 					    enum kmsg_dump_reason reason,
 					    u64 *id, unsigned int part,
-					    const char *buf, size_t size,
+					    const char *buf,
+					    bool compressed, size_t size,
 					    struct pstore_info *psi)
 {
 	struct ramoops_context *cxt = psi->data;
@@ -274,7 +297,7 @@ static int notrace ramoops_pstore_write_buf(enum pstore_type_id type,
 
 	prz = cxt->przs[cxt->dump_write_cnt];
 
-	hlen = ramoops_write_kmsg_hdr(prz);
+	hlen = ramoops_write_kmsg_hdr(prz, compressed);
 	if (size + hlen > prz->buffer_size)
 		size = prz->buffer_size - hlen;
 	persistent_ram_write(prz, buf, size);
@@ -282,6 +305,24 @@ static int notrace ramoops_pstore_write_buf(enum pstore_type_id type,
 	cxt->dump_write_cnt = (cxt->dump_write_cnt + 1) % cxt->max_dump_cnt;
 
 	return 0;
+}
+
+static int notrace ramoops_pstore_write_buf_user(enum pstore_type_id type,
+						 enum kmsg_dump_reason reason,
+						 u64 *id, unsigned int part,
+						 const char __user *buf,
+						 bool compressed, size_t size,
+						 struct pstore_info *psi)
+{
+	if (type == PSTORE_TYPE_PMSG) {
+		struct ramoops_context *cxt = psi->data;
+
+		if (!cxt->mprz)
+			return -ENOMEM;
+		return persistent_ram_write_user(cxt->mprz, buf, size);
+	}
+
+	return -EINVAL;
 }
 
 static int ramoops_pstore_erase(enum pstore_type_id type, u64 id, int count,
@@ -322,6 +363,7 @@ static struct ramoops_context oops_cxt = {
 		.open	= ramoops_pstore_open,
 		.read	= ramoops_pstore_read,
 		.write_buf	= ramoops_pstore_write_buf,
+		.write_buf_user	= ramoops_pstore_write_buf_user,
 		.erase	= ramoops_pstore_erase,
 	},
 };
@@ -330,6 +372,7 @@ static void ramoops_free_przs(struct ramoops_context *cxt)
 {
 	int i;
 
+	cxt->max_dump_cnt = 0;
 	if (!cxt->przs)
 		return;
 
@@ -360,7 +403,7 @@ static int ramoops_init_przs(struct device *dev, struct ramoops_context *cxt,
 			     GFP_KERNEL);
 	if (!cxt->przs) {
 		dev_err(dev, "failed to initialize a prz array for dumps\n");
-		return -ENOMEM;
+		goto fail_prz;
 	}
 
 	for (i = 0; i < cxt->max_dump_cnt; i++) {
@@ -432,9 +475,8 @@ static void  ramoops_of_init(struct platform_device *pdev)
 	const struct device *dev = &pdev->dev;
 	struct ramoops_platform_data *pdata;
 	struct device_node *np = pdev->dev.of_node;
-	uint32_t ecc_info[4] = {0,};
 	u32 start = 0, size = 0, console = 0, pmsg = 0;
-	u32 record = 0, oops = 0, ftrace = 0;
+	u32 record = 0, oops = 0;
 	int ret;
 
 	pdata = dev_get_drvdata(dev);
@@ -472,26 +514,12 @@ static void  ramoops_of_init(struct platform_device *pdev)
 	if (ret)
 		pr_info("oops not configured");
 
-	ret = of_property_read_u32(np, "android,ramoops-ftrace-size",
-				&ftrace);
-	if (ret)
-		pr_info("ftrace not configured");
-
-	ret = of_property_read_u32_array(np, "android,ramoops-ecc-info", ecc_info, 4);
-	if (ret)
-		pr_info("ecc_info not configured");
-
 	pdata->mem_address = start;
 	pdata->mem_size = size;
 	pdata->console_size = console;
 	pdata->pmsg_size = pmsg;
 	pdata->record_size = record;
-	pdata->ftrace_size = ftrace;
 	pdata->dump_oops = (int)oops;
-	pdata->ecc_info.block_size = ecc_info[0];
-	pdata->ecc_info.ecc_size = ecc_info[1];
-	pdata->ecc_info.symsize = ecc_info[2];
-	pdata->ecc_info.poly = ecc_info[3];
 }
 #else
 static inline void ramoops_of_init(struct platform_device *pdev)
@@ -515,9 +543,7 @@ static int ramoops_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	err = dev_set_drvdata(dev, pdata);
-	if (err)
-		goto fail_out;
+	dev_set_drvdata(dev, pdata);
 
 	if (pdev->dev.of_node)
 		ramoops_of_init(pdev);
@@ -543,9 +569,6 @@ static int ramoops_probe(struct platform_device *pdev)
 		pdata->ftrace_size = rounddown_pow_of_two(pdata->ftrace_size);
 	if (pdata->pmsg_size && !is_power_of_2(pdata->pmsg_size))
 		pdata->pmsg_size = rounddown_pow_of_two(pdata->pmsg_size);
-	/* If ecc is not defined in pdata, check module param */
-	if (!pdata->ecc_info.ecc_size)
-		pdata->ecc_info.ecc_size = ramoops_ecc == 1 ? 16 : ramoops_ecc;
 
 	cxt->size = pdata->mem_size;
 	cxt->phys_addr = pdata->mem_address;
@@ -619,6 +642,13 @@ static int ramoops_probe(struct platform_device *pdev)
 		cxt->size, (unsigned long long)cxt->phys_addr,
 		cxt->ecc_info.ecc_size, cxt->ecc_info.block_size);
 
+#if defined(CONFIG_HTC_DEBUG_BOOTLOADER_LOG)
+	if (cxt->console_size)
+	{
+		bldr_log_init();
+	}
+#endif
+
 	return 0;
 
 fail_buf:
@@ -652,6 +682,9 @@ static int __exit ramoops_remove(struct platform_device *pdev)
 	/* TODO(kees): When pstore supports unregistering, call it here. */
 	kfree(cxt->pstore.buf);
 	cxt->pstore.bufsize = 0;
+#if defined(CONFIG_HTC_DEBUG_BOOTLOADER_LOG)
+	bldr_log_release();
+#endif
 
 	return 0;
 #endif

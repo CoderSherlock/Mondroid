@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 TRUSTONIC LIMITED
+ * Copyright (c) 2013-2015 TRUSTONIC LIMITED
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -13,33 +13,32 @@
  */
 #ifndef _MC_DEBUG_H_
 #define _MC_DEBUG_H_
-/* Found in main.c */
-extern struct device *mcd;
 
-#define MCDRV_DBG_ERROR(dev, txt, ...) \
-	dev_err(dev, "MobiCore %s() ### ERROR: " txt "\n", \
+#include "main.h"	/* g_ctx */
+
+#define MCDRV_ERROR(txt, ...) \
+	dev_err(g_ctx.mcd, "%s() ### ERROR: " txt "\n", \
 		__func__, \
 		##__VA_ARGS__)
 
 /* dummy function helper macro. */
 #define DUMMY_FUNCTION()	do {} while (0)
 
-#if defined(DEBUG)
+#ifdef DEBUG
 
-/* #define DEBUG_VERBOSE */
-#if defined(DEBUG_VERBOSE)
+#ifdef DEBUG_VERBOSE
 #define MCDRV_DBG_VERBOSE	MCDRV_DBG
 #else
 #define MCDRV_DBG_VERBOSE(...)	DUMMY_FUNCTION()
 #endif
 
-#define MCDRV_DBG(dev, txt, ...) \
-	dev_info(dev, "MobiCore %s(): " txt "\n", \
+#define MCDRV_DBG(txt, ...) \
+	dev_info(g_ctx.mcd, "%s(): " txt "\n", \
 		 __func__, \
 		 ##__VA_ARGS__)
 
-#define MCDRV_DBG_WARN(dev, txt, ...) \
-	dev_warn(dev, "MobiCore %s() WARNING: " txt "\n", \
+#define MCDRV_DBG_WARN(txt, ...) \
+	dev_warn(g_ctx.mcd, "%s() WARNING: " txt "\n", \
 		 __func__, \
 		 ##__VA_ARGS__)
 
@@ -51,7 +50,7 @@ extern struct device *mcd;
 		} \
 	} while (0)
 
-#else
+#else /* DEBUG */
 
 #define MCDRV_DBG_VERBOSE(...)	DUMMY_FUNCTION()
 #define MCDRV_DBG(...)		DUMMY_FUNCTION()
@@ -59,6 +58,6 @@ extern struct device *mcd;
 
 #define MCDRV_ASSERT(...)	DUMMY_FUNCTION()
 
-#endif /* [not] defined(DEBUG) */
+#endif /* !DEBUG */
 
 #endif /* _MC_DEBUG_H_ */

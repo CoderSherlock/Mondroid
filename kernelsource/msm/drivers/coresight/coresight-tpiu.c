@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -836,12 +836,20 @@ static DEVICE_ATTR(out_mode, S_IRUGO | S_IWUSR, tpiu_show_out_mode,
 static ssize_t tpiu_show_available_out_modes(struct device *dev,
 				      struct device_attribute *attr, char *buf)
 {
+	struct tpiu_drvdata *drvdata = dev_get_drvdata(dev->parent);
 	int i;
 	ssize_t len = 0;
 
-	for (i = 0; i < ARRAY_SIZE(str_tpiu_out_mode); i++)
+	for (i = 0; i < ARRAY_SIZE(str_tpiu_out_mode); i++) {
+		if ((i == TPIU_OUT_MODE_SDC_SWDTRC && !drvdata->nidnt_swdtrc)
+		 || (i == TPIU_OUT_MODE_SDC_SWDUART && !drvdata->nidnt_swduart)
+		 || (i == TPIU_OUT_MODE_SDC_JTAG && !drvdata->nidnt_jtag)
+		 || (i == TPIU_OUT_MODE_SDC_SPMI && !drvdata->nidnt_spmi))
+			continue;
+
 		len += scnprintf(buf + len, PAGE_SIZE - len, "%s ",
 					str_tpiu_out_mode[i]);
+	}
 
 	len += scnprintf(buf + len, PAGE_SIZE - len, "\n");
 	return len;
@@ -1072,15 +1080,10 @@ static int tpiu_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct coresight_desc *desc;
 
-	if (coresight_fuse_access_disabled())
-		return -EPERM;
-
-	if (pdev->dev.of_node) {
-		pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
-		if (IS_ERR(pdata))
-			return PTR_ERR(pdata);
-		pdev->dev.platform_data = pdata;
-	}
+	pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
+	if (IS_ERR(pdata))
+		return PTR_ERR(pdata);
+	pdev->dev.platform_data = pdata;
 
 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
 	if (!drvdata)
@@ -1110,16 +1113,19 @@ static int tpiu_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	if (!coresight_authstatus_enabled(drvdata->base)) {
+		clk_disable_unprepare(drvdata->clk);
+		return -EPERM;
+	}
+
 	/* Disable tpiu to support older targets that need this */
 	__tpiu_disable(drvdata);
 
 	clk_disable_unprepare(drvdata->clk);
 
-	if (pdev->dev.of_node) {
-		ret = tpiu_parse_of_data(pdev, drvdata);
-		if (ret)
-			return ret;
-	}
+	ret = tpiu_parse_of_data(pdev, drvdata);
+	if (ret)
+		return ret;
 
 	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
 	if (!desc)

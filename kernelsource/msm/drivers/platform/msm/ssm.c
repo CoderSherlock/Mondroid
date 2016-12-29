@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, 2016 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,7 +10,7 @@
  * GNU General Public License for more details.
  */
 /*
- * Qualcomm Secure Service Module(SSM) driver
+ * QTI Secure Service Module(SSM) driver
  */
 
 #include <linux/kernel.h>
@@ -30,7 +30,7 @@
 #include <soc/qcom/scm.h>
 #include <soc/qcom/smd.h>
 
-#include "qseecom_kernel.h"
+#include "../../misc/qseecom_kernel.h"
 #include "ssm.h"
 
 /* Macros */
@@ -281,16 +281,15 @@ static int ssm_probe(struct platform_device *pdev)
 
 	drv = devm_kzalloc(&pdev->dev, sizeof(struct ssm_driver),
 								GFP_KERNEL);
-	if (!drv) {
-		dev_err(&pdev->dev, "Unable to allocate memory\n");
+	if (!drv)
 		return -ENOMEM;
-	}
 
 	/* Allocate response buffer */
 	drv->resp = devm_kzalloc(&pdev->dev,
 			sizeof(struct tzapp_get_mode_info_rsp),
 			GFP_KERNEL);
 	if (!drv->resp) {
+		devm_kfree(&pdev->dev, drv);
 		rc = -ENOMEM;
 		goto exit;
 	}
@@ -308,6 +307,8 @@ static int ssm_probe(struct platform_device *pdev)
 	drv->smd_buffer = devm_kzalloc(&pdev->dev,
 			(sizeof(char) * ATOM_MSG_LEN), GFP_KERNEL);
 	if (!drv->smd_buffer) {
+		devm_kfree(&pdev->dev, drv->resp);
+		devm_kfree(&pdev->dev, drv);
 		rc = -ENOMEM;
 		goto exit;
 	}
@@ -344,6 +345,12 @@ static int ssm_remove(struct platform_device *pdev)
 	/* Shutdown tzapp */
 	dev_dbg(&pdev->dev, "Shutting down TZapp\n");
 	qseecom_shutdown_app(&ssm_drv->qseecom_handle);
+
+	/* freeing the memory allocations
+	for the driver and the buffer */
+	devm_kfree(&pdev->dev, ssm_drv->smd_buffer);
+	devm_kfree(&pdev->dev, ssm_drv->resp);
+	devm_kfree(&pdev->dev, ssm_drv);
 
 	return 0;
 }
@@ -503,8 +510,7 @@ unlock:
 	mutex_unlock(&ssm_drv->mutex);
 	return rc;
 }
-EXPORT_SYMBOL_GPL(ssm_oem_driver_intf);
 
 MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("Qualcomm Secure Service Module");
+MODULE_DESCRIPTION("QTI Secure Service Module");
 

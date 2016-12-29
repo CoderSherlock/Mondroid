@@ -37,7 +37,6 @@ struct synaptics_rmi4_capacitance_button_map {
  * @y_flip: y flip flag
  * @i2c_pull_up: pull up i2c bus with regulator
  * @power_down_enable: enable complete regulator shutdown in suspend
- * @check_build: check the build information for firmware
  * @irq_gpio: attention interrupt gpio
  * @irq_flags: flags used by the irq
  * @reset_flags: flags used by reset line
@@ -53,7 +52,6 @@ struct synaptics_rmi4_capacitance_button_map {
  * @panel_minx: touch panel minimum values on the x
  * @panel_miny: touch panel minimum values on the y
  * @reset_delay: reset delay
- * @pon_delay: power on delay
  * @gpio_config: pointer to gpio configuration function
  * @capacitance_button_map: pointer to 0d button map
  */
@@ -64,7 +62,6 @@ struct synaptics_rmi4_platform_data {
 	bool power_down_enable;
 	bool disable_gpios;
 	bool do_lockdown;
-	bool check_build;
 	bool detect_device;
 	bool modify_reso;
 	unsigned irq_gpio;
@@ -80,10 +77,6 @@ struct synaptics_rmi4_platform_data {
 	unsigned disp_maxx;
 	unsigned disp_maxy;
 	unsigned reset_delay;
-	unsigned pon_delay;
-	unsigned num_of_tx;
-	unsigned num_of_rx;
-	unsigned num_of_fingers;
 	const char *fw_image_name;
 	unsigned int package_id;
 	int (*gpio_config)(unsigned gpio, bool configure);

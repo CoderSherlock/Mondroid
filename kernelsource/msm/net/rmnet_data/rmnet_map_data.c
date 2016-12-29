@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -55,6 +55,8 @@ struct agg_work {
 	struct rmnet_phys_ep_conf_s *config;
 };
 
+#define RMNET_MAP_DEAGGR_SPACING  64
+#define RMNET_MAP_DEAGGR_HEADROOM (RMNET_MAP_DEAGGR_SPACING/2)
 /******************************************************************************/
 
 /**
@@ -62,6 +64,8 @@ struct agg_work {
  * @skb:        Socket buffer ("packet") to modify
  * @hdrlen:     Number of bytes of header data which should not be included in
  *              MAP length field
+ * @pad:        Specify if padding the MAP packet to make it 4 byte aligned is
+ *              necessary
  *
  * Padding is calculated and set appropriately in MAP header. Mux ID is
  * initialized to 0.
@@ -74,7 +78,7 @@ struct agg_work {
  * todo: Parameterize skb alignment
  */
 struct rmnet_map_header_s *rmnet_map_add_map_header(struct sk_buff *skb,
-						    int hdrlen)
+						    int hdrlen, int pad)
 {
 	uint32_t padding, map_datalen;
 	uint8_t *padbytes;
@@ -88,7 +92,15 @@ struct rmnet_map_header_s *rmnet_map_add_map_header(struct sk_buff *skb,
 			skb_push(skb, sizeof(struct rmnet_map_header_s));
 	memset(map_header, 0, sizeof(struct rmnet_map_header_s));
 
+	if (pad == RMNET_MAP_NO_PAD_BYTES) {
+		map_header->pkt_len = htons(map_datalen);
+		return map_header;
+	}
+
 	padding = ALIGN(map_datalen, 4) - map_datalen;
+
+	if (padding == 0)
+		goto done;
 
 	if (skb_tailroom(skb) < padding)
 		return 0;
@@ -97,6 +109,7 @@ struct rmnet_map_header_s *rmnet_map_add_map_header(struct sk_buff *skb,
 	LOGD("pad: %d", padding);
 	memset(padbytes, 0, padding);
 
+done:
 	map_header->pkt_len = htons(map_datalen + padding);
 	map_header->pad_len = padding&0x3F;
 
@@ -108,10 +121,10 @@ struct rmnet_map_header_s *rmnet_map_add_map_header(struct sk_buff *skb,
  * @skb:        Source socket buffer containing multiple MAP frames
  * @config:     Physical endpoint configuration of the ingress device
  *
- * Source skb is cloned with skb_clone(). The new skb data and tail pointers are
- * modified to contain a single MAP frame. Clone happens with GFP_ATOMIC flags
- * set. User should keep calling deaggregate() on the source skb until 0 is
- * returned, indicating that there are no more packets to deaggregate.
+ * A whole new buffer is allocated for each portion of an aggregated frame.
+ * Caller should keep calling deaggregate() on the source skb until 0 is
+ * returned, indicating that there are no more packets to deaggregate. Caller
+ * is responsible for freeing the original skb.
  *
  * Return:
  *     - Pointer to new skb
@@ -123,7 +136,6 @@ struct sk_buff *rmnet_map_deaggregate(struct sk_buff *skb,
 	struct sk_buff *skbn;
 	struct rmnet_map_header_s *maph;
 	uint32_t packet_len;
-	uint8_t ip_byte;
 
 	if (skb->len == 0)
 		return 0;
@@ -131,33 +143,30 @@ struct sk_buff *rmnet_map_deaggregate(struct sk_buff *skb,
 	maph = (struct rmnet_map_header_s *) skb->data;
 	packet_len = ntohs(maph->pkt_len) + sizeof(struct rmnet_map_header_s);
 
+	if ((config->ingress_data_format & RMNET_INGRESS_FORMAT_MAP_CKSUMV3) ||
+	    (config->ingress_data_format & RMNET_INGRESS_FORMAT_MAP_CKSUMV4))
+		packet_len += sizeof(struct rmnet_map_dl_checksum_trailer_s);
+
 	if ((((int)skb->len) - ((int)packet_len)) < 0) {
 		LOGM("%s", "Got malformed packet. Dropping");
 		return 0;
 	}
 
-	skbn = skb_clone(skb, GFP_ATOMIC);
+	skbn = alloc_skb(packet_len + RMNET_MAP_DEAGGR_SPACING, GFP_ATOMIC);
 	if (!skbn)
 		return 0;
 
-	LOGD("Trimming to %d bytes", packet_len);
-	LOGD("before skbn->len = %d", skbn->len);
-	skb_trim(skbn, packet_len);
+	skbn->dev = skb->dev;
+	skb_reserve(skbn, RMNET_MAP_DEAGGR_HEADROOM);
+	skb_put(skbn, packet_len);
+	memcpy(skbn->data, skb->data, packet_len);
 	skb_pull(skb, packet_len);
-	LOGD("after skbn->len = %d", skbn->len);
+
 
 	/* Some hardware can send us empty frames. Catch them */
 	if (ntohs(maph->pkt_len) == 0) {
 		LOGD("Dropping empty MAP frame");
 		rmnet_kfree_skb(skbn, RMNET_STATS_SKBFREE_DEAGG_DATA_LEN_0);
-		return 0;
-	}
-
-	/* Sanity check */
-	ip_byte = (skbn->data[4]) & 0xF0;
-	if (ip_byte != 0x40 && ip_byte != 0x60) {
-		LOGM("Unknown IP type: 0x%02X", ip_byte);
-		rmnet_kfree_skb(skbn, RMNET_STATS_SKBFREE_DEAGG_UNKOWN_IP_TYP);
 		return 0;
 	}
 
@@ -313,8 +322,7 @@ new_packet:
 
 schedule:
 	if (config->agg_state != RMNET_MAP_TXFER_SCHEDULED) {
-		work = (struct agg_work *)
-			kmalloc(sizeof(struct agg_work), GFP_ATOMIC);
+		work = kmalloc(sizeof(*work), GFP_ATOMIC);
 		if (!work) {
 			LOGE("Failed to allocate work item for packet %s",
 			     "transfer. DATA PATH LIKELY BROKEN!");
@@ -621,8 +629,7 @@ static void rmnet_map_fill_ipv4_packet_ul_checksum_header(void *iphdr,
 
 	ul_header->checksum_start_offset = htons((unsigned short)
 		(skb_transport_header(skb) - (unsigned char *)iphdr));
-	ul_header->checksum_insert_offset = skb->csum_offset + (unsigned short)
-		(skb_transport_header(skb) - (unsigned char *)iphdr);
+	ul_header->checksum_insert_offset = skb->csum_offset;
 	ul_header->cks_en = 1;
 	if (ip4h->protocol == IPPROTO_UDP)
 		ul_header->udp_ip4_ind = 1;
@@ -641,14 +648,44 @@ static void rmnet_map_fill_ipv6_packet_ul_checksum_header(void *iphdr,
 
 	ul_header->checksum_start_offset = htons((unsigned short)
 		(skb_transport_header(skb) - (unsigned char *)iphdr));
-	ul_header->checksum_insert_offset = skb->csum_offset + (unsigned short)
-		(skb_transport_header(skb) - (unsigned char *)iphdr);
+	ul_header->checksum_insert_offset = skb->csum_offset;
 	ul_header->cks_en = 1;
 	ul_header->udp_ip4_ind = 0;
 	/* Changing checksum_insert_offset to network order */
 	hdr++;
 	*hdr = htons(*hdr);
 	skb->ip_summed = CHECKSUM_NONE;
+}
+
+static void rmnet_map_complement_ipv4_txporthdr_csum_field(void *iphdr)
+{
+	struct iphdr *ip4h = (struct iphdr *)iphdr;
+	void *txporthdr;
+	uint16_t *csum;
+
+	txporthdr = iphdr + ip4h->ihl*4;
+
+	if ((ip4h->protocol == IPPROTO_TCP) ||
+	    (ip4h->protocol == IPPROTO_UDP)) {
+		csum = (uint16_t *)rmnet_map_get_checksum_field(ip4h->protocol,
+								txporthdr);
+		*csum = ~(*csum);
+	}
+}
+
+static void rmnet_map_complement_ipv6_txporthdr_csum_field(void *ip6hdr)
+{
+	struct ipv6hdr *ip6h = (struct ipv6hdr *)ip6hdr;
+	void *txporthdr;
+	uint16_t *csum;
+
+	txporthdr = ip6hdr + sizeof(struct ipv6hdr);
+
+	if ((ip6h->nexthdr == IPPROTO_TCP) || (ip6h->nexthdr == IPPROTO_UDP)) {
+		csum = (uint16_t *)rmnet_map_get_checksum_field(ip6h->nexthdr,
+								txporthdr);
+		*csum = ~(*csum);
+	}
 }
 
 /**
@@ -665,7 +702,7 @@ static void rmnet_map_fill_ipv6_packet_ul_checksum_header(void *iphdr,
  *   - RMNET_MAP_CHECKSUM_SW: Unsupported packet for UL checksum offload.
  */
 int rmnet_map_checksum_uplink_packet(struct sk_buff *skb,
-	struct net_device *orig_dev)
+	struct net_device *orig_dev, uint32_t egress_data_format)
 {
 	unsigned char ip_version;
 	struct rmnet_map_ul_checksum_header_s *ul_header;
@@ -688,10 +725,18 @@ int rmnet_map_checksum_uplink_packet(struct sk_buff *skb,
 		if (ip_version == 0x04) {
 			rmnet_map_fill_ipv4_packet_ul_checksum_header(iphdr,
 				ul_header, skb);
+			if (egress_data_format &
+			    RMNET_EGRESS_FORMAT_MAP_CKSUMV4)
+				rmnet_map_complement_ipv4_txporthdr_csum_field(
+					iphdr);
 			return RMNET_MAP_CHECKSUM_OK;
 		} else if (ip_version == 0x06) {
 			rmnet_map_fill_ipv6_packet_ul_checksum_header(iphdr,
 				ul_header, skb);
+			if (egress_data_format &
+			    RMNET_EGRESS_FORMAT_MAP_CKSUMV4)
+				rmnet_map_complement_ipv6_txporthdr_csum_field(
+					iphdr);
 			return RMNET_MAP_CHECKSUM_OK;
 		} else {
 			ret = RMNET_MAP_CHECKSUM_ERR_UNKNOWN_IP_VERSION;

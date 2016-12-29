@@ -92,6 +92,7 @@ extern int process_wma_set_command(int sessid, int paramid,
 #include "wlan_hdd_trace.h"
 #include "vos_types.h"
 #include "vos_trace.h"
+#include "adf_trace.h"
 #include "wlan_hdd_cfg.h"
 #include <wlan_hdd_wowl.h>
 #include "wlan_hdd_tsf.h"
@@ -118,6 +119,8 @@ extern int process_wma_set_command(int sessid, int paramid,
 
 /* EID byte + length byte + four byte WiFi OUI */
 #define DOT11F_EID_HEADER_LEN (6)
+
+#define DUMP_DP_TRACE       0
 
 /*---------------------------------------------------------------------------
  *   Function definitions
@@ -267,11 +270,11 @@ static int __hdd_hostapd_open(struct net_device *dev)
        goto done;
    }
 
-   //Turn ON carrier state
-   netif_carrier_on(dev);
    //Enable all Tx queues
    hddLog(LOG1, FL("Enabling queues"));
-   netif_tx_start_all_queues(dev);
+   wlan_hdd_netif_queue_control(pAdapter,
+        WLAN_START_ALL_NETIF_QUEUE_N_CARRIER,
+        WLAN_CONTROL_PATH);
 done:
    EXIT();
    return 0;
@@ -307,12 +310,11 @@ static int __hdd_hostapd_stop(struct net_device *dev)
    ENTER();
 
    if (NULL != dev) {
+       hdd_adapter_t *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
        //Stop all tx queues
        hddLog(LOG1, FL("Disabling queues"));
-       netif_tx_disable(dev);
-
-       //Turn OFF carrier state
-       netif_carrier_off(dev);
+       wlan_hdd_netif_queue_control(adapter, WLAN_NETIF_TX_DISABLE_N_CARRIER,
+            WLAN_CONTROL_PATH);
    }
 
    EXIT();
@@ -2038,12 +2040,6 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
         case eSAP_REMAIN_CHAN_READY:
            hdd_remainChanReadyHandler( pHostapdAdapter );
            return VOS_STATUS_SUCCESS;
-        case eSAP_SEND_ACTION_CNF:
-           hdd_sendActionCnf( pHostapdAdapter,
-                              ( eSAP_STATUS_SUCCESS ==
-                                pSapEvent->sapevt.sapActionCnf.actionSendSuccess ) ?
-                                TRUE : FALSE );
-           return VOS_STATUS_SUCCESS;
         case eSAP_UNKNOWN_STA_JOIN:
             snprintf(unknownSTAEvent, IW_CUSTOM_MAX, "JOIN_UNKNOWN_STA-%02x:%02x:%02x:%02x:%02x:%02x",
                 pSapEvent->sapevt.sapUnknownSTAJoin.macaddr.bytes[0],
@@ -2580,6 +2576,14 @@ static int __iw_softap_set_two_ints_getnone(struct net_device *dev,
                                            value[1], value[2], GEN_CMD);
         break;
 #endif
+    case QCSAP_IOCTL_DUMP_DP_TRACE_LEVEL:
+        hddLog(LOG1, "WE_DUMP_DP_TRACE: %d %d",
+            value[1], value[2]);
+        if (value[1] == DUMP_DP_TRACE)
+            adf_dp_trace_dump_all(value[2]);
+        else
+            hddLog(LOGE, "unexpected value for dump_dp_trace");
+        break;
     default:
         hddLog(LOGE, "%s: Invalid IOCTL command %d", __func__, sub_cmd);
         break;
@@ -3429,18 +3433,22 @@ static __iw_softap_setparam(struct net_device *dev,
             {
                 hdd_context_t *hdd_ctx = WLAN_HDD_GET_CTX(pHostapdAdapter);
 
-                hddLog(LOG1, "QCASAP_CLEAR_STATS val %d", set_value);
+                hddLog(LOG1, FL("QCASAP_CLEAR_STATS val %d"), set_value);
 
-                if (set_value == WLAN_HDD_STATS) {
+                switch (set_value) {
+                case WLAN_HDD_STATS:
                     memset(&pHostapdAdapter->stats, 0,
                                  sizeof(pHostapdAdapter->stats));
                     memset(&pHostapdAdapter->hdd_stats, 0,
                                  sizeof(pHostapdAdapter->hdd_stats));
-                } else {
+                    break;
+                case WLAN_HDD_NETIF_OPER_HISTORY:
+                    wlan_hdd_clear_netif_queue_history(hdd_ctx);
+                    break;
+                default:
                     WLANTL_clear_datapath_stats(hdd_ctx->pvosContext,
                                                              set_value);
                 }
-
                 break;
             }
 
@@ -4927,45 +4935,6 @@ static int __iw_set_ap_mlme(struct net_device *dev,
 			    union iwreq_data *wrqu,
 			    char *extra)
 {
-#if 0
-    hdd_adapter_t *pAdapter = (netdev_priv(dev));
-    struct iw_mlme *mlme = (struct iw_mlme *)extra;
-
-    ENTER();
-
-    //reason_code is unused. By default it is set to eCSR_DISCONNECT_REASON_UNSPECIFIED
-    switch (mlme->cmd) {
-        case IW_MLME_DISASSOC:
-        case IW_MLME_DEAUTH:
-            hddLog(LOG1, "Station disassociate");
-            if( pAdapter->conn_info.connState == eConnectionState_Associated )
-            {
-                eCsrRoamDisconnectReason reason = eCSR_DISCONNECT_REASON_UNSPECIFIED;
-
-                if( mlme->reason_code == HDD_REASON_MICHAEL_MIC_FAILURE )
-                    reason = eCSR_DISCONNECT_REASON_MIC_ERROR;
-
-                status = sme_RoamDisconnect( pAdapter->hHal,pAdapter->sessionId, reason);
-
-                //clear all the reason codes
-                if (status != 0)
-                {
-                    hddLog(LOGE,"%s %d Command Disassociate/Deauthenticate : csrRoamDisconnect failure returned %d", __func__, (int)mlme->cmd, (int)status );
-                }
-
-               netif_stop_queue(dev);
-               netif_carrier_off(dev);
-            }
-            else
-            {
-                hddLog(LOGE,"%s %d Command Disassociate/Deauthenticate called but station is not in associated state", __func__, (int)mlme->cmd );
-            }
-        default:
-            hddLog(LOGE,"%s %d Command should be Disassociate/Deauthenticate", __func__, (int)mlme->cmd );
-            return -EINVAL;
-    }//end of switch
-    EXIT();
-#endif
     return 0;
 //    return status;
 }
@@ -6306,7 +6275,7 @@ static const struct iw_priv_args hostapd_private_args[] = {
   { QCSAP_IOCTL_STOPBSS,
       IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_FIXED, 0, "stopbss" },
   { QCSAP_IOCTL_VERSION, 0,
-      IW_PRIV_TYPE_CHAR | QCSAP_MAX_WSC_IE, "version" },
+      IW_PRIV_TYPE_CHAR | WE_MAX_STR_LEN, "version" },
   { QCSAP_IOCTL_GET_STA_INFO, 0,
       IW_PRIV_TYPE_CHAR | WE_SAP_MAX_STA_INFO, "get_sta_info" },
   { QCSAP_IOCTL_GET_WPS_PBC_PROBE_REQ_IES,
@@ -6341,6 +6310,12 @@ static const struct iw_priv_args hostapd_private_args[] = {
        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3,
        0,
        "setsapchannels" },
+
+   /* handlers for sub-ioctl */
+   {  WE_SET_DP_TRACE,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3,
+      0,
+      "set_dp_trace" },
 
    /* handlers for main ioctl */
    {   QCSAP_IOCTL_PRIV_SET_VAR_INT_GET_NONE,
@@ -6459,6 +6434,11 @@ static const struct iw_priv_args hostapd_private_args[] = {
     {   QCASAP_SET_RADAR_DBG,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
         0,  "setRadarDbg" },
+
+    /* dump dp trace - descriptor or dp trace records */
+    {   QCSAP_IOCTL_DUMP_DP_TRACE_LEVEL,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2,
+        0, "dump_dp_trace" },
 };
 
 static const iw_handler hostapd_private[] = {
@@ -6729,6 +6709,11 @@ hdd_adapter_t* hdd_wlan_create_ap_dev( hdd_context_t *pHddCtx, tSirMacAddr macAd
                            pWlanHostapdDev->hard_header_len);
 
         SET_NETDEV_DEV(pWlanHostapdDev, pHddCtx->parent_dev);
+        spin_lock_init(&pHostapdAdapter->pause_map_lock);
+        pHostapdAdapter->last_tx_jiffies = jiffies;
+        pHostapdAdapter->bug_report_count = 0;
+        pHostapdAdapter->start_time =
+            pHostapdAdapter->last_time = vos_system_ticks();
     }
     return pHostapdAdapter;
 }

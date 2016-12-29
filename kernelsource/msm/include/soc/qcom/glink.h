@@ -43,15 +43,19 @@ enum {
 /**
  * Open configuration.
  *
- * priv:	Private data passed into user callbacks
- * options:	Open option flags
- * notify_rx:	Receive notification function (required)
- * notify_tx_done: Transmit-done notification function (required)
- * notify_state: State-change notification (required)
- * notify_rx_intent_req: Receive intent request (optional)
- * notify_rxv:	Receive notification function for vector buffers (required if
- *		notify_rx is not provided)
- * notify_sig:	Signal-change notification (optional)
+ * priv:			Private data passed into user callbacks
+ * options:			Open option flags
+ * rx_intent_req_timeout_ms:	Timeout for requesting an RX intent, in
+ *			milliseconds; if set to 0, timeout is infinite
+ * notify_rx:			Receive notification function (required)
+ * notify_tx_done:		Transmit-done notification function (required)
+ * notify_state:		State-change notification (required)
+ * notify_rx_intent_req:	Receive intent request (optional)
+ * notify_rxv:			Receive notification function for vector buffers
+ *			(required if notify_rx is not provided)
+ * notify_sig:			Signal-change notification (optional)
+ * notify_rx_tracer_pkt:	Receive notification for tracer packet
+ * notify_remote_rx_intent:	Receive notification for remote-queued RX intent
  *
  * This structure is passed into the glink_open() call to setup
  * configuration handles.  All unused fields should be set to 0.
@@ -65,6 +69,7 @@ struct glink_open_config {
 	const char *transport;
 	const char *edge;
 	const char *name;
+	unsigned int rx_intent_req_timeout_ms;
 
 	void (*notify_rx)(void *handle, const void *priv, const void *pkt_priv,
 			const void *ptr, size_t size);
@@ -85,6 +90,10 @@ struct glink_open_config {
 			const void *pkt_priv);
 	void (*notify_tx_abort)(void *handle, const void *priv,
 			const void *pkt_priv);
+	void (*notify_rx_tracer_pkt)(void *handle, const void *priv,
+			const void *pkt_priv, const void *ptr, size_t size);
+	void (*notify_remote_rx_intent)(void *handle, const void *priv,
+					size_t size);
 };
 
 enum glink_link_state {
@@ -121,6 +130,8 @@ struct glink_link_info {
 enum tx_flags {
 	GLINK_TX_REQ_INTENT = 0x1,
 	GLINK_TX_SINGLE_THREADED = 0x2,
+	GLINK_TX_TRACER_PKT = 0x4,
+	GLINK_TX_ATOMIC = 0x8,
 };
 
 #ifdef CONFIG_MSM_GLINK
@@ -181,6 +192,17 @@ int glink_tx(void *handle, void *pkt_priv, void *data, size_t size,
 int glink_queue_rx_intent(void *handle, const void *pkt_priv, size_t size);
 
 /**
+ * glink_rx_intent_exists() - Check if an intent of size exists.
+ *
+ * @handle:	handle returned by glink_open()
+ * @size:	size of an intent to check or 0 for any intent
+ *
+ * Return:	TRUE if an intent exists with greater than or equal to the size
+ *		else FALSE
+ */
+bool glink_rx_intent_exists(void *handle, size_t size);
+
+/**
  * glink_rx_done() - Return receive buffer to remote side.
  *
  * @handle:	handle returned by glink_open()
@@ -230,19 +252,21 @@ int glink_sigs_set(void *handle, uint32_t sigs);
  * glink_sigs_local_get() - Get the local signals for the GLINK channel
  *
  * handle:	handle returned by glink_open()
+ * sigs:	Pointer to hold the signals
  *
- * Return: Local signal value or standard Linux error code for failure case
+ * Return: 0 for success; standard Linux error code for failure case
  */
-int glink_sigs_local_get(void *handle);
+int glink_sigs_local_get(void *handle, uint32_t *sigs);
 
 /**
  * glink_sigs_remote_get() - Get the Remote signals for the GLINK channel
  *
  * handle:	handle returned by glink_open()
+ * sigs:	Pointer to hold the signals
  *
- * Return: Remote signal value or standard Linux error code for failure case
+ * Return: 0 for success; standard Linux error code for failure case
  */
-int glink_sigs_remote_get(void *handle);
+int glink_sigs_remote_get(void *handle, uint32_t *sigs);
 
 /**
  * glink_register_link_state_cb() - Register for link state notification
@@ -267,6 +291,54 @@ void *glink_register_link_state_cb(struct glink_link_info *link_info,
  */
 void glink_unregister_link_state_cb(void *notif_handle);
 
+/**
+ * glink_qos_latency() - Register the latency QoS requirement
+ * @handle:	Channel handle in which the latency is required.
+ * @latency_us:	Latency requirement in units of micro-seconds.
+ * @pkt_size:	Worst case packet size for which the latency is required.
+ *
+ * This function is used to register the latency requirement for a channel
+ * and ensures that the latency requirement for this channel is met without
+ * impacting the existing latency requirements of other channels.
+ *
+ * Return: 0 if QoS request is achievable, standard Linux error codes on error
+ */
+int glink_qos_latency(void *handle, unsigned long latency_us, size_t pkt_size);
+
+/**
+ * glink_qos_cancel() - Cancel or unregister the QoS request
+ * @handle:	Channel handle for which the QoS request is cancelled.
+ *
+ * This function is used to cancel/unregister the QoS requests for a channel.
+ *
+ * Return: 0 on success, standard Linux error codes on failure
+ */
+int glink_qos_cancel(void *handle);
+
+/**
+ * glink_qos_start() - Start of the transmission requiring QoS
+ * @handle:	Channel handle in which the transmit activity is performed.
+ *
+ * This function is called by the clients to indicate G-Link regarding the
+ * start of the transmission which requires a certain QoS. The clients
+ * must account for the QoS ramp time to ensure meeting the QoS.
+ *
+ * Return: 0 on success, standard Linux error codes on failure
+ */
+int glink_qos_start(void *handle);
+
+/**
+ * glink_qos_get_ramp_time() - Get the QoS ramp time
+ * @handle:	Channel handle for which the QoS ramp time is required.
+ * @pkt_size:	Worst case packet size.
+ *
+ * This function is called by the clients to obtain the ramp time required
+ * to meet the QoS requirements.
+ *
+ * Return: QoS ramp time is returned in units of micro-seconds
+ */
+unsigned long glink_qos_get_ramp_time(void *handle, size_t pkt_size);
+
 #else /* CONFIG_MSM_GLINK */
 static inline void *glink_open(const struct glink_open_config *cfg_ptr)
 {
@@ -290,6 +362,11 @@ static inline int glink_queue_rx_intent(void *handle, const void *pkt_priv,
 	return -ENODEV;
 }
 
+static inline bool glink_rx_intent_exists(void *handle, size_t size)
+{
+	return -ENODEV;
+}
+
 static inline int glink_rx_done(void *handle, const void *ptr, bool reuse)
 {
 	return -ENODEV;
@@ -309,12 +386,12 @@ static inline int glink_sigs_set(void *handle, uint32_t sigs)
 	return -ENODEV;
 }
 
-static inline int glink_sigs_local_get(void *handle)
+static inline int glink_sigs_local_get(void *handle, uint32_t *sigs)
 {
 	return -ENODEV;
 }
 
-static inline int glink_sigs_remote_get(void *handle)
+static inline int glink_sigs_remote_get(void *handle, uint32_t *sigs)
 {
 	return -ENODEV;
 }
@@ -327,6 +404,28 @@ static inline void *glink_register_link_state_cb(
 
 static inline void glink_unregister_link_state_cb(void *notif_handle)
 {
+}
+
+static inline int glink_qos_latency(void *handle, unsigned long latency_us,
+				    size_t pkt_size)
+{
+	return -ENODEV;
+}
+
+static inline int glink_qos_cancel(void *handle)
+{
+	return -ENODEV;
+}
+
+static inline int glink_qos_start(void *handle)
+{
+	return -ENODEV;
+}
+
+static inline unsigned long glink_qos_get_ramp_time(void *handle,
+						    size_t pkt_size)
+{
+	return 0;
 }
 #endif /* CONFIG_MSM_GLINK */
 #endif /* _SOC_QCOM_GLINK_H_ */

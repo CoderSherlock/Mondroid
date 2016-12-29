@@ -67,10 +67,49 @@ enum wlan_op_mode {
 #define OL_TXQ_PAUSE_REASON_MCC_VDEV_START    (1 << 5)
 #define OL_TXQ_PAUSE_REASON_THROTTLE          (1 << 6)
 
+/**
+ * enum netif_action_type - Type of actions on netif queues
+ * @WLAN_STOP_ALL_NETIF_QUEUE: stop all netif queues
+ * @WLAN_START_ALL_NETIF_QUEUE: start all netif queues
+ * @WLAN_WAKE_ALL_NETIF_QUEUE: wake all netif queues
+ * @WLAN_STOP_ALL_NETIF_QUEUE_N_CARRIER: stop all queues and off carrier
+ * @WLAN_START_ALL_NETIF_QUEUE_N_CARRIER: start all queues and on carrier
+ * @WLAN_NETIF_TX_DISABLE: disable tx
+ * @WLAN_NETIF_TX_DISABLE_N_CARRIER: disable tx and off carrier
+ * @WLAN_NETIF_CARRIER_ON: on carrier
+ * @WLAN_NETIF_CARRIER_OFF: off carrier
+ */
+enum netif_action_type {
+	WLAN_STOP_ALL_NETIF_QUEUE = 1,
+	WLAN_START_ALL_NETIF_QUEUE,
+	WLAN_WAKE_ALL_NETIF_QUEUE,
+	WLAN_STOP_ALL_NETIF_QUEUE_N_CARRIER,
+	WLAN_START_ALL_NETIF_QUEUE_N_CARRIER,
+	WLAN_NETIF_TX_DISABLE,
+	WLAN_NETIF_TX_DISABLE_N_CARRIER,
+	WLAN_NETIF_CARRIER_ON,
+	WLAN_NETIF_CARRIER_OFF,
+	WLAN_NETIF_ACTION_TYPE_MAX,
+};
+
+/**
+ * enum netif_reason_type - reason for netif queue action
+ * @WLAN_CONTROL_PATH: action from control path
+ * @WLAN_DATA_FLOW_CONTROL: because of flow control
+ * @WLAN_REASON_TYPE_MAX: max netif reason
+ */
+enum netif_reason_type {
+	WLAN_CONTROL_PATH = 1,
+	WLAN_DATA_FLOW_CONTROL,
+	WLAN_REASON_TYPE_MAX,
+};
+
 /* command options for dumpStats*/
 #define WLAN_HDD_STATS               0
 #define WLAN_TXRX_STATS              1
 #define WLAN_TXRX_HIST_STATS         2
+#define WLAN_TXRX_DESC_STATS         3
+#define WLAN_HDD_NETIF_OPER_HISTORY  4
 #ifdef CONFIG_HL_SUPPORT
 #define WLAN_SCHEDULER_STATS        21
 #define WLAN_TX_QUEUE_STATS         22
@@ -726,6 +765,19 @@ ol_txrx_set_curchan(
 int
 ol_txrx_get_tx_pending(
     ol_txrx_pdev_handle pdev);
+
+/**
+ * ol_txrx_get_queue_status() - Get the status of tx queues.
+ * @pdev: the data physical device object
+ *
+ * This api is used while trying to go in suspend mode.
+ *
+ * Return - status: A_OK - if all queues are empty
+ *                  A_ERROR - if any queue is not empty
+ */
+A_STATUS
+ol_txrx_get_queue_status(
+	ol_txrx_pdev_handle pdev);
 
 void ol_txrx_dump_tx_desc(ol_txrx_pdev_handle pdev);
 
@@ -1401,5 +1453,6 @@ void ol_txrx_clear_stats(struct ol_txrx_pdev_t *pdev, uint16_t bitmap);
 void ol_rx_reset_pn_replay_counter(struct ol_txrx_pdev_t *pdev);
 uint32_t ol_rx_get_tkip_replay_counter(struct ol_txrx_pdev_t *pdev);
 uint32_t ol_rx_get_ccmp_replay_counter(struct ol_txrx_pdev_t *pdev);
+void ol_tx_mark_first_wakeup_packet(uint8_t value);
 
 #endif /* _OL_TXRX_CTRL_API__H_ */

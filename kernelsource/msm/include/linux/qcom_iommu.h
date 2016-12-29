@@ -17,10 +17,13 @@
 #include <linux/clk.h>
 #include <linux/list.h>
 #include <linux/regulator/consumer.h>
+#include <linux/platform_device.h>
+#include <linux/idr.h>
 #include <soc/qcom/socinfo.h>
 
 extern pgprot_t     pgprot_kernel;
 extern struct bus_type msm_iommu_sec_bus_type;
+extern struct bus_type *msm_iommu_non_sec_bus_type;
 extern struct iommu_access_ops iommu_access_ops_v0;
 extern struct iommu_access_ops iommu_access_ops_v1;
 
@@ -114,6 +117,7 @@ struct msm_iommu_drvdata {
 	void __iomem *glb_base;
 	void __iomem *cb_base;
 	void __iomem *smmu_local_base;
+	void __iomem *vbif_base;
 	int ncb;
 	int ttbr_split;
 	struct clk *clk;
@@ -134,6 +138,7 @@ struct msm_iommu_drvdata {
 	int needs_rem_spinlock;
 	int powered_on;
 	unsigned int model;
+	struct idr asid_idr;
 };
 
 /**
@@ -180,6 +185,8 @@ void iommu_resume(const struct msm_iommu_drvdata *iommu_drvdata);
 			the secure environment, false otherwise
  * @asid		ASID used with this context.
  * @attach_count	Number of time this context has been attached.
+ * @report_error_on_fault - true if error is returned back to master
+ * @dynamic		true if any dynamic domain is ever attached to this CB
  *
  * A msm_iommu_ctx_drvdata holds the driver data for a single context bank
  * within each IOMMU hardware instance
@@ -197,6 +204,9 @@ struct msm_iommu_ctx_drvdata {
 	int attach_count;
 	u32 sid_mask[MAX_NUM_SMR];
 	unsigned int n_sid_mask;
+	bool report_error_on_fault;
+	unsigned int prefetch_depth;
+	bool dynamic;
 };
 
 enum dump_reg {
@@ -326,10 +336,22 @@ void msm_iommu_remote_p0_spin_unlock(unsigned int need_lock);
  * their platform devices.
  */
 struct device *msm_iommu_get_ctx(const char *ctx_name);
+struct bus_type *msm_iommu_get_bus(struct device *dev);
+int msm_iommu_bus_register(void);
+void msm_access_control(void);
 #else
 static inline struct device *msm_iommu_get_ctx(const char *ctx_name)
 {
 	return NULL;
+}
+
+static inline struct bus_type *msm_iommu_get_bus(struct device *dev)
+{
+	return &platform_bus_type;
+}
+
+static inline void msm_access_control(void)
+{
 }
 #endif
 

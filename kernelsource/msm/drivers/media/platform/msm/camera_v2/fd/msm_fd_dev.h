@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -16,16 +16,24 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-fh.h>
 #include <media/v4l2-ctrls.h>
+#include <linux/msm-bus.h>
 #include <media/msm_fd.h>
+#include <linux/dma-buf.h>
+#include <linux/msm_ion.h>
+#include "cam_soc_api.h"
+#include "cam_hw_ops.h"
+#include "msm_cpp.h"
 
 /* Maximum number of result buffers */
 #define MSM_FD_MAX_RESULT_BUFS 5
 /* Max number of clocks defined in device tree */
-#define MSM_FD_MAX_CLK_NUM 10
+#define MSM_FD_MAX_CLK_NUM 15
 /* Max number of clock rates defined in device tree */
 #define MSM_FD_MAX_CLK_RATES 5
 /* Max number of faces which can be detected in one hw processing */
 #define MSM_FD_MAX_FACES_DETECTED 32
+/* Max number of regulators defined in device tree */
+#define MSM_FD_MAX_REGULATOR_NUM 3
 
 /*
  * struct msm_fd_size - Structure contain FD size related values.
@@ -81,8 +89,6 @@ struct msm_fd_format {
  */
 struct msm_fd_mem_pool {
 	struct msm_fd_device *fd_device;
-	struct ion_client *client;
-	int domain_num;
 };
 
 /*
@@ -96,8 +102,7 @@ struct msm_fd_mem_pool {
 struct msm_fd_buf_handle {
 	int fd;
 	struct msm_fd_mem_pool *pool;
-	void *handle;
-	unsigned long size;
+	size_t size;
 	ion_phys_addr_t addr;
 };
 
@@ -196,11 +201,12 @@ enum msm_fd_mem_resources {
  * @clk_num: Number of clocks attached to the device.
  * @clk: Array of clock resources used by fd device.
  * @clk_rates: Array of clock rates set.
+ * @bus_vectors: Pointer to bus vectors array.
+ * @bus_paths: Pointer to bus paths array.
+ * @bus_scale_data: Memory access bus scale data.
  * @bus_client: Memory access bus client.
- * @iommu_domain: Pointer to FD device iommu domain handler.
- * @iommu_domain_num: FD device iommu domain number.
  * @iommu_attached_cnt: Iommu attached devices reference count.
- * @iommu_dev: Pointer to Ion iommu device.
+ * @iommu_hdl: reference for iommu context.
  * @dev: Pointer to device struct.
  * @v4l2_dev: V4l2 device.
  * @video: Video device.
@@ -209,33 +215,34 @@ enum msm_fd_mem_resources {
  * @work_queue: Pointer to FD device IRQ bottom half workqueue.
  * @work: IRQ bottom half work struct.
  * @hw_halt_completion: Completes when face detection hw halt completes.
+ * @recovery_mode: Indicates if FD is in recovery mode
  */
 struct msm_fd_device {
 	u32 hw_revision;
 
 	struct mutex lock;
 	spinlock_t slock;
+	struct mutex recovery_lock;
 	int ref_count;
 
 	int irq_num;
-	struct resource *res_mem[MSM_FD_IOMEM_LAST];
 	void __iomem *iomem_base[MSM_FD_IOMEM_LAST];
-	struct resource *ioarea[MSM_FD_IOMEM_LAST];
-	struct regulator *vdd;
+	struct msm_cam_clk_info *clk_info;
+	struct msm_cam_regulator *vdd_info;
+	int num_reg;
+	struct resource *irq;
 
-	unsigned int clk_num;
-	struct clk *clk[MSM_FD_MAX_CLK_NUM];
-	unsigned int clk_rates_num;
-	unsigned int clk_rates[MSM_FD_MAX_CLK_RATES][MSM_FD_MAX_CLK_NUM];
-
+	size_t clk_num;
+	size_t clk_rates_num;
+	struct clk **clk;
+	uint32_t **clk_rates;
 	uint32_t bus_client;
 
-	struct iommu_domain *iommu_domain;
-	int iommu_domain_num;
 	unsigned int iommu_attached_cnt;
 
-	struct device *iommu_dev;
+	int iommu_hdl;
 	struct device *dev;
+	struct platform_device *pdev;
 	struct v4l2_device v4l2_dev;
 	struct video_device video;
 
@@ -244,6 +251,8 @@ struct msm_fd_device {
 	struct workqueue_struct *work_queue;
 	struct work_struct work;
 	struct completion hw_halt_completion;
+	int recovery_mode;
+	uint32_t clk_rate_idx;
 };
 
 #endif /* __MSM_FD_DEV_H__ */

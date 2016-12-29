@@ -22,6 +22,7 @@
 
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/irqchip/arm-gic-v3.h>
 
 #include <asm/assembler.h>
 #include <asm/ptrace.h>
@@ -35,37 +36,31 @@
 #include <asm/page.h>
 #include <asm/virt.h>
 
-/*
- * swapper_pg_dir is the virtual address of the initial page table. We place
- * the page tables 3 * PAGE_SIZE below KERNEL_RAM_VADDR. The idmap_pg_dir has
- * 2 pages and is placed below swapper_pg_dir.
- */
 #define KERNEL_RAM_VADDR	(PAGE_OFFSET + TEXT_OFFSET)
 
-#if (KERNEL_RAM_VADDR & 0xfffff) != 0x80000
-#error KERNEL_RAM_VADDR must start at 0xXXX80000
+#if (TEXT_OFFSET & 0xfff) != 0
+#error TEXT_OFFSET must be at least 4KB aligned
+#elif (PAGE_OFFSET & 0x1fffff) != 0
+#error PAGE_OFFSET must be at least 2MB aligned
+#elif TEXT_OFFSET > 0x1fffff
+#error TEXT_OFFSET must be less than 2MB
 #endif
 
-#define SWAPPER_DIR_SIZE	(3 * PAGE_SIZE)
-#define IDMAP_DIR_SIZE		(2 * PAGE_SIZE)
-
-	.globl	swapper_pg_dir
-	.equ	swapper_pg_dir, KERNEL_RAM_VADDR - SWAPPER_DIR_SIZE
-
-	.globl	idmap_pg_dir
-	.equ	idmap_pg_dir, swapper_pg_dir - IDMAP_DIR_SIZE
-
-	.macro	pgtbl, ttb0, ttb1, phys
-	add	\ttb1, \phys, #TEXT_OFFSET - SWAPPER_DIR_SIZE
-	sub	\ttb0, \ttb1, #IDMAP_DIR_SIZE
+	.macro	pgtbl, ttb0, ttb1, virt_to_phys
+	ldr	\ttb1, =swapper_pg_dir
+	ldr	\ttb0, =idmap_pg_dir
+	add	\ttb1, \ttb1, \virt_to_phys
+	add	\ttb0, \ttb0, \virt_to_phys
 	.endm
 
 #ifdef CONFIG_ARM64_64K_PAGES
 #define BLOCK_SHIFT	PAGE_SHIFT
 #define BLOCK_SIZE	PAGE_SIZE
+#define TABLE_SHIFT	PMD_SHIFT
 #else
 #define BLOCK_SHIFT	SECTION_SHIFT
 #define BLOCK_SIZE	SECTION_SIZE
+#define TABLE_SHIFT	PUD_SHIFT
 #endif
 
 #define KERNEL_START	KERNEL_RAM_VADDR
@@ -137,6 +132,8 @@ efi_head:
 #endif
 
 #ifdef CONFIG_EFI
+	.globl	stext_offset
+	.set	stext_offset, stext - efi_head
 	.align 3
 pe_header:
 	.ascii	"PE"
@@ -156,16 +153,16 @@ optional_header:
 	.short	0x20b				// PE32+ format
 	.byte	0x02				// MajorLinkerVersion
 	.byte	0x14				// MinorLinkerVersion
-	.long	_edata - stext			// SizeOfCode
+	.long	_end - stext			// SizeOfCode
 	.long	0				// SizeOfInitializedData
 	.long	0				// SizeOfUninitializedData
 	.long	efi_stub_entry - efi_head	// AddressOfEntryPoint
-	.long	stext - efi_head		// BaseOfCode
+	.long	stext_offset			// BaseOfCode
 
 extra_header_fields:
 	.quad	0				// ImageBase
-	.long	0x20				// SectionAlignment
-	.long	0x8				// FileAlignment
+	.long	0x1000				// SectionAlignment
+	.long	PECOFF_FILE_ALIGNMENT		// FileAlignment
 	.short	0				// MajorOperatingSystemVersion
 	.short	0				// MinorOperatingSystemVersion
 	.short	0				// MajorImageVersion
@@ -174,10 +171,10 @@ extra_header_fields:
 	.short	0				// MinorSubsystemVersion
 	.long	0				// Win32VersionValue
 
-	.long	_edata - efi_head		// SizeOfImage
+	.long	_end - efi_head			// SizeOfImage
 
 	// Everything before the kernel image is considered part of the header
-	.long	stext - efi_head		// SizeOfHeaders
+	.long	stext_offset			// SizeOfHeaders
 	.long	0				// CheckSum
 	.short	0xa				// Subsystem (EFI application)
 	.short	0				// DllCharacteristics
@@ -221,17 +218,25 @@ section_table:
 	.byte	0
 	.byte	0
 	.byte	0        		// end of 0 padding of section name
-	.long	_edata - stext		// VirtualSize
-	.long	stext - efi_head	// VirtualAddress
+	.long	_end - stext		// VirtualSize
+	.long	stext_offset		// VirtualAddress
 	.long	_edata - stext		// SizeOfRawData
-	.long	stext - efi_head	// PointerToRawData
+	.long	stext_offset		// PointerToRawData
 
 	.long	0		// PointerToRelocations (0 for executables)
 	.long	0		// PointerToLineNumbers (0 for executables)
 	.short	0		// NumberOfRelocations  (0 for executables)
 	.short	0		// NumberOfLineNumbers  (0 for executables)
 	.long	0xe0500020	// Characteristics (section flags)
-	.align 5
+
+	/*
+	 * EFI will load stext onwards at the 4k section alignment
+	 * described in the PE/COFF header. To ensure that instruction
+	 * sequences using an adrp and a :lo12: immediate will function
+	 * correctly at this alignment, we must ensure that stext is
+	 * placed at a 4k boundary in the Image to begin with.
+	 */
+	.align 12
 #endif
 
 ENTRY(stext)
@@ -243,11 +248,15 @@ ENTRY(stext)
 	mov	x0, x22
 	bl	lookup_processor_type
 	mov	x23, x0				// x23=current cpu_table
-	cbz	x23, __h_error_p		// invalid processor (x23=0)?
+	/*
+	 * __error_p may end up out of range for cbz if text areas are
+	 * aligned up to section sizes.
+	 */
+	cbnz	x23, 1f				// invalid processor (x23=0)?
+	b	__error_p
+1:
 	bl	__vet_fdt
 	bl	__create_page_tables		// x25=TTBR0, x26=TTBR1
-
-
 	/*
 	 * The following calls CPU specific code in a position independent
 	 * manner. See arch/arm64/mm/proc.S for details. x23 = base of
@@ -257,38 +266,12 @@ ENTRY(stext)
 	 */
 	ldr	x27, __switch_data		// address to jump to after
 						// MMU has been enabled
-	adr	lr, __h_enable_mmu		// return (PIC) address
+	adrp	lr, __enable_mmu		// return (PIC) address
+	add	lr, lr, #:lo12:__enable_mmu
 	ldr	x12, [x23, #CPU_INFO_SETUP]
 	add	x12, x12, x28			// __virt_to_phys
 	br	x12				// initialise processor
 ENDPROC(stext)
-
-__h_error_p:
-ENDPROC(__h_error_p)
-
-__h_error:
-1:	nop
-	b	1b
-ENDPROC(__h_error)
-
-	.align	6
-__h_enable_mmu:
-	ldr	x5, =vectors
-	msr	vbar_el1, x5
-	msr	ttbr0_el1, x25			// load TTBR0
-	msr	ttbr1_el1, x26			// load TTBR1
-	isb
-	b	__h_turn_mmu_on
-ENDPROC(__h_enable_mmu)
-
-
-
-__h_turn_mmu_on:
-	msr	sctlr_el1, x0
-	isb
-	br	x27
-ENDPROC(__h_turn_mmu_on)
-
 
 /*
  * Determine validity of the x21 FDT pointer.
@@ -308,54 +291,39 @@ __vet_fdt:
 	mov	x21, #0
 	ret
 ENDPROC(__vet_fdt)
-
-	.align	3
-	.type	__switch_data, %object
-__switch_data:
-	.quad	__mmap_switched
-	.quad	__bss_start			// x6
-	.quad	_end				// x7
-	.quad	processor_id			// x4
-	.quad	__fdt_pointer			// x5
-	.quad	memstart_addr			// x6
-	.quad	init_thread_union + THREAD_START_SP // sp
-
 /*
- * The following fragment of code is executed with the MMU on in MMU mode, and
- * uses absolute addresses; this is not position independent.
- */
-__mmap_switched:
-	adr	x3, __switch_data + 8
-
-	ldp	x6, x7, [x3], #16
-1:	cmp	x6, x7
-	b.hs	2f
-	str	xzr, [x6], #8			// Clear BSS
-	b	1b
-2:
-	ldp	x4, x5, [x3], #16
-	ldr	x6, [x3], #8
-	ldr	x16, [x3]
-	mov	sp, x16
-	str	x22, [x4]			// Save processor ID
-	str	x21, [x5]			// Save FDT pointer
-	str	x24, [x6]			// Save PHYS_OFFSET
-	mov	x29, #0
-	b	start_kernel
-ENDPROC(__mmap_switched)
-
-/*
- * Macro to populate the PGD for the corresponding block entry in the next
- * level (tbl) for the given virtual address.
+ * Macro to create a table entry to the next page.
  *
- * Preserves:	pgd, tbl, virt
+ *	tbl:	page table address
+ *	virt:	virtual address
+ *	shift:	#imm page table shift
+ *	ptrs:	#imm pointers per table page
+ *
+ * Preserves:	virt
+ * Corrupts:	tmp1, tmp2
+ * Returns:	tbl -> next level table page address
+ */
+	.macro	create_table_entry, tbl, virt, shift, ptrs, tmp1, tmp2
+	lsr	\tmp1, \virt, #\shift
+	and	\tmp1, \tmp1, #\ptrs - 1	// table index
+	add	\tmp2, \tbl, #PAGE_SIZE
+	orr	\tmp2, \tmp2, #PMD_TYPE_TABLE	// address of next table and entry type
+	str	\tmp2, [\tbl, \tmp1, lsl #3]
+	add	\tbl, \tbl, #PAGE_SIZE		// next level table page
+	.endm
+
+/*
+ * Macro to populate the PGD (and possibily PUD) for the corresponding
+ * block entry in the next level (tbl) for the given virtual address.
+ *
+ * Preserves:	tbl, next, virt
  * Corrupts:	tmp1, tmp2
  */
-	.macro	create_pgd_entry, pgd, tbl, virt, tmp1, tmp2
-	lsr	\tmp1, \virt, #PGDIR_SHIFT
-	and	\tmp1, \tmp1, #PTRS_PER_PGD - 1	// PGD index
-	orr	\tmp2, \tbl, #3			// PGD entry table type
-	str	\tmp2, [\pgd, \tmp1, lsl #3]
+	.macro	create_pgd_entry, tbl, virt, tmp1, tmp2
+	create_table_entry \tbl, \virt, PGDIR_SHIFT, PTRS_PER_PGD, \tmp1, \tmp2
+#if SWAPPER_PGTABLE_LEVELS == 3
+	create_table_entry \tbl, \virt, TABLE_SHIFT, PTRS_PER_PTE, \tmp1, \tmp2
+#endif
 	.endm
 
 /*
@@ -365,26 +333,18 @@ ENDPROC(__mmap_switched)
  * Preserves:	tbl, flags
  * Corrupts:	phys, start, end, pstate
  */
-	.macro	create_block_map, tbl, flags, phys, start, end, idmap=0
+	.macro	create_block_map, tbl, flags, phys, start, end
 	lsr	\phys, \phys, #BLOCK_SHIFT
-	.if	\idmap
-	and	\start, \phys, #PTRS_PER_PTE - 1	// table index
-	.else
 	lsr	\start, \start, #BLOCK_SHIFT
 	and	\start, \start, #PTRS_PER_PTE - 1	// table index
-	.endif
 	orr	\phys, \flags, \phys, lsl #BLOCK_SHIFT	// table entry
-	.ifnc	\start,\end
 	lsr	\end, \end, #BLOCK_SHIFT
 	and	\end, \end, #PTRS_PER_PTE - 1		// table end index
-	.endif
 9999:	str	\phys, [\tbl, \start, lsl #3]		// store the entry
-	.ifnc	\start,\end
 	add	\start, \start, #1			// next entry
 	add	\phys, \phys, #BLOCK_SIZE		// next block
 	cmp	\start, \end
 	b.ls	9999b
-	.endif
 	.endm
 
 /*
@@ -396,7 +356,7 @@ ENDPROC(__mmap_switched)
  *   - pgd entry for fixed mappings (TTBR1)
  */
 __create_page_tables:
-	pgtbl	x25, x26, x24			// idmap_pg_dir and swapper_pg_dir addresses
+	pgtbl	x25, x26, x28			// idmap_pg_dir and swapper_pg_dir addresses
 	mov	x27, lr
 
 	/*
@@ -424,25 +384,22 @@ __create_page_tables:
 	/*
 	 * Create the identity mapping.
 	 */
-	add	x0, x25, #PAGE_SIZE		// section table address
-	adr	x3, __h_turn_mmu_on		// virtual/physical address
-	create_pgd_entry x25, x0, x3, x5, x6
-	create_block_map x0, x7, x3, x5, x5, idmap=1
-
-	/*
-	 * adrp is fine here, we don't really care about the lower order bits
-	 */
-	adrp	x3, cpu_resume_mmu
-	create_pgd_entry x25, x0, x3, x5, x6
-	create_block_map x0, x7, x3, x5, x5, idmap=1
+	mov	x0, x25				// idmap_pg_dir
+	ldr	x3, =KERNEL_START
+	add	x3, x3, x28			// __pa(KERNEL_START)
+	create_pgd_entry x0, x3, x5, x6
+	ldr	x6, =KERNEL_END
+	mov	x5, x3				// __pa(KERNEL_START)
+	add	x6, x6, x28			// __pa(KERNEL_END)
+	create_block_map x0, x7, x3, x5, x6
 
 	/*
 	 * Map the kernel image (starting with PHYS_OFFSET).
 	 */
-	add	x0, x26, #PAGE_SIZE		// section table address
+	mov	x0, x26				// swapper_pg_dir
 	mov	x5, #PAGE_OFFSET
-	create_pgd_entry x26, x0, x5, x3, x6
-	ldr	x6, =KERNEL_END - 1
+	create_pgd_entry x0, x5, x3, x6
+	ldr	x6, =KERNEL_END
 	mov	x3, x24				// phys offset
 	create_block_map x0, x7, x3, x5, x6
 
@@ -463,13 +420,6 @@ __create_page_tables:
 	create_block_map x0, x7, x3, x5, x6
 1:
 	/*
-	 * Create the pgd entry for the fixed mappings.
-	 */
-	ldr	x5, =FIXADDR_TOP		// Fixed mapping virtual address
-	add	x0, x26, #2 * PAGE_SIZE		// section table address
-	create_pgd_entry x26, x0, x5, x6, x7
-
-	/*
 	 * Since the page tables have been populated with non-cacheable
 	 * accesses (MMU disabled), invalidate the idmap and swapper page
 	 * tables again to remove any speculatively loaded cache lines.
@@ -483,8 +433,49 @@ __create_page_tables:
 ENDPROC(__create_page_tables)
 	.ltorg
 
+	.align	3
+	.type	__switch_data, %object
+__switch_data:
+	.quad	__mmap_switched
+	.quad	__bss_start			// x6
+	.quad	__bss_stop			// x7
+	.quad	processor_id			// x4
+	.quad	__fdt_pointer			// x5
+	.quad	memstart_addr			// x6
+	.quad	init_thread_union + THREAD_START_SP // sp
 
-	.section ".latehead.text","ax"
+/*
+ * The following fragment of code is executed with the MMU on in MMU mode, and
+ * uses absolute addresses; this is not position independent.
+ */
+__mmap_switched:
+	adr	x3, __switch_data + 8
+
+	ldp	x6, x7, [x3], #16
+1:	cmp	x6, x7
+	b.hs	2f
+	str	xzr, [x6], #8			// Clear BSS
+	b	1b
+2:
+	ldp	x4, x5, [x3], #16
+	ldr	x6, [x3], #8
+	ldr	x16, [x3]
+	mov	sp, x16
+	str	x22, [x4]			// Save processor ID
+	str	x21, [x5]			// Save FDT pointer
+	str	x24, [x6]			// Save PHYS_OFFSET
+	mov	x29, #0
+#ifdef CONFIG_KASAN
+	bl	kasan_early_init
+#endif
+	b	start_kernel
+ENDPROC(__mmap_switched)
+
+/*
+ * end early head section, begin head code that is also used for
+ * hotplug and needs to have the same protections as the text region
+ */
+	.section ".text","ax"
 /*
  * If we're fortunate enough to boot at EL2, ensure that the world is
  * sane before dropping to EL1.
@@ -519,6 +510,23 @@ CPU_LE(	bic	x0, x0, #(3 << 24)	)	// Clear the EE and E0E bits for EL1
 	msr	cnthctl_el2, x0
 	msr	cntvoff_el2, xzr		// Clear virtual offset
 
+#ifdef CONFIG_ARM_GIC_V3
+	/* GICv3 system register access */
+	mrs	x0, id_aa64pfr0_el1
+	ubfx	x0, x0, #24, #4
+	cmp	x0, #1
+	b.ne	3f
+
+	mrs_s	x0, ICC_SRE_EL2
+	orr	x0, x0, #ICC_SRE_EL2_SRE	// Set ICC_SRE_EL2.SRE==1
+	orr	x0, x0, #ICC_SRE_EL2_ENABLE	// Set ICC_SRE_EL2.Enable==1
+	msr_s	ICC_SRE_EL2, x0
+	isb					// Make sure SRE is now set
+	msr_s	ICH_HCR_EL2, xzr		// Reset ICC_HCR_EL2 to defaults
+
+3:
+#endif
+
 	/* Populate ID registers. */
 	mrs	x0, midr_el1
 	mrs	x1, mpidr_el1
@@ -539,15 +547,17 @@ CPU_LE(	movk	x0, #0x30d0, lsl #16	)	// Clear EE and E0E on LE systems
 	msr	hstr_el2, xzr			// Disable CP15 traps to EL2
 #endif
 
+	/* EL2 debug */
+	mrs	x0, pmcr_el0			// Disable debug access traps
+	ubfx	x0, x0, #11, #5			// to EL2 and allow access to
+	msr	mdcr_el2, x0			// all PMU counters from EL1
+
 	/* Stage-2 translation */
 	msr	vttbr_el2, xzr
 
 	/* Hypervisor stub */
-#ifndef CONFIG_STRICT_MEMORY_RWX
-	adr	x0, __hyp_stub_vectors
-#else
-	ldr	x0, =__hyp_stub_vectors
-#endif
+	adrp	x0, __hyp_stub_vectors
+	add	x0, x0, #:lo12:__hyp_stub_vectors
 	msr	vbar_el2, x0
 
 	/* spsr */
@@ -588,10 +598,6 @@ ENTRY(__boot_cpu_mode)
 	.long	BOOT_CPU_MODE_EL2
 	.long	0
 	.popsection
-
-	.align	3
-2:	.quad	.
-	.quad	PAGE_OFFSET
 
 #ifdef CONFIG_SMP
 	.align	3
@@ -640,7 +646,7 @@ ENTRY(secondary_startup)
 	mov	x23, x0				// x23=current cpu_table
 	cbz	x23, __error_p			// invalid processor (x23=0)?
 
-	pgtbl	x25, x26, x24			// x25=TTBR0, x26=TTBR1
+	pgtbl	x25, x26, x28			// x25=TTBR0, x26=TTBR1
 	ldr	x12, [x23, #CPU_INFO_SETUP]
 	add	x12, x12, x28			// __virt_to_phys
 	blr	x12				// initialise processor
@@ -657,29 +663,6 @@ ENTRY(__secondary_switched)
 	b	secondary_start_kernel
 ENDPROC(__secondary_switched)
 #endif	/* CONFIG_SMP */
-
-	.align 3
-ENTRY(cpu_resume_mmu)
-	ldr	x3, =cpu_resume_after_mmu
-	msr	sctlr_el1, x0		// restore sctlr_el1
-	isb
-	br	x3			// global jump to virtual address
-ENDPROC(cpu_resume_mmu)
-
-/*
- * x0 must contain the sctlr value retrieved from restored context
- */
-cpu_resume_after_mmu:
-	mov	x0, #0			// return zero on success
-	ldp	x19, x20, [sp, #16]
-	ldp	x21, x22, [sp, #32]
-	ldp	x23, x24, [sp, #48]
-	ldp	x25, x26, [sp, #64]
-	ldp	x27, x28, [sp, #80]
-	ldp	x29, lr, [sp], #96
-	ret
-ENDPROC(cpu_resume_after_mmu)
-
 
 /*
  * Setup common bits before finally enabling the MMU. Essentially this is just
@@ -705,8 +688,13 @@ ENDPROC(__enable_mmu)
  *  x27 = *virtual* address to jump to upon completion
  *
  * other registers depend on the function called upon completion
+ *
+ * We align the entire function to the smallest power of two larger than it to
+ * ensure it fits within a single block map entry. Otherwise were PHYS_OFFSET
+ * close to the end of a 512MB or 1GB block we might require an additional
+ * table to map the entire function.
  */
-	.align	6
+	.align	4
 __turn_mmu_on:
 	msr	sctlr_el1, x0
 	isb
@@ -727,7 +715,6 @@ ENDPROC(__calc_phys_offset)
 	.align 3
 1:	.quad	.
 	.quad	PAGE_OFFSET
-
 
 /*
  * Exception handling. Something went wrong and we can't proceed. We ought to
@@ -776,4 +763,3 @@ __lookup_processor_type_data:
 	.quad	.
 	.quad	cpu_table
 	.size	__lookup_processor_type_data, . - __lookup_processor_type_data
-

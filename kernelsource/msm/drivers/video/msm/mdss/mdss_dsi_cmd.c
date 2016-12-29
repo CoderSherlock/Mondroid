@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,10 +21,9 @@
 #include <linux/iopoll.h>
 #include <linux/kthread.h>
 
-#include <linux/msm_iommu_domains.h>
-
 #include "mdss_dsi_cmd.h"
 #include "mdss_dsi.h"
+#include "mdss_smmu.h"
 
 /*
  * mipi dsi buf mechanism
@@ -72,8 +71,8 @@ char *mdss_dsi_buf_init(struct dsi_buf *dp)
 
 int mdss_dsi_buf_alloc(struct device *ctrl_dev, struct dsi_buf *dp, int size)
 {
-	dp->start = dma_alloc_writecombine(ctrl_dev, size, &dp->dmap,
-					   GFP_KERNEL);
+	dp->start = mdss_smmu_dsi_alloc_buf(ctrl_dev, size, &dp->dmap,
+			GFP_KERNEL);
 	if (dp->start == NULL) {
 		pr_err("%s:%u\n", __func__, __LINE__);
 		return -ENOMEM;
@@ -380,6 +379,50 @@ static int mdss_dsi_cm_on(struct dsi_buf *dp, struct dsi_cmd_desc *cm)
 	return DSI_HOST_HDR_SIZE; /* 4 bytes */
 }
 
+static int mdss_dsi_dsc_pps(struct dsi_buf *dp, struct dsi_cmd_desc *cm)
+{
+	struct dsi_ctrl_hdr *dchdr;
+	char *bp;
+	u32 *hp;
+	int i, len = 0;
+
+	dchdr = &cm->dchdr;
+	bp = mdss_dsi_buf_reserve_hdr(dp, DSI_HOST_HDR_SIZE);
+
+	/*
+	 * fill up payload
+	 * dcs command byte (first byte) followed by payload
+	 */
+	if (cm->payload) {
+		len = dchdr->dlen;
+		len += 3;
+		len &= ~0x03;	/* multipled by 4 */
+		for (i = 0; i < dchdr->dlen; i++)
+			*bp++ = cm->payload[i];
+
+		/* append 0xff to the end */
+		for (; i < len; i++)
+			*bp++ = 0xff;
+
+		dp->len += len;
+	}
+
+	/* fill up header */
+	hp = dp->hdr;
+	*hp = 0;
+	*hp = DSI_HDR_WC(dchdr->dlen);
+	*hp |= DSI_HDR_VC(dchdr->vc);
+	*hp |= DSI_HDR_LONG_PKT;
+	*hp |= DSI_HDR_DTYPE(DTYPE_PPS);
+	if (dchdr->last)
+		*hp |= DSI_HDR_LAST;
+
+	mdss_dsi_buf_push(dp, DSI_HOST_HDR_SIZE);
+
+	len += DSI_HOST_HDR_SIZE;
+	return len;
+}
+
 static int mdss_dsi_cm_off(struct dsi_buf *dp, struct dsi_cmd_desc *cm)
 {
 	struct dsi_ctrl_hdr *dchdr;
@@ -450,6 +493,33 @@ static int mdss_dsi_set_max_pktsize(struct dsi_buf *dp, struct dsi_cmd_desc *cm)
 	*hp = 0;
 	*hp |= DSI_HDR_VC(dchdr->vc);
 	*hp |= DSI_HDR_DTYPE(DTYPE_MAX_PKTSIZE);
+	if (dchdr->last)
+		*hp |= DSI_HDR_LAST;
+
+	*hp |= DSI_HDR_DATA1(cm->payload[0]);
+	*hp |= DSI_HDR_DATA2(cm->payload[1]);
+
+	mdss_dsi_buf_push(dp, DSI_HOST_HDR_SIZE);
+	return DSI_HOST_HDR_SIZE; /* 4 bytes */
+}
+
+static int mdss_dsi_compression_mode(struct dsi_buf *dp,
+					struct dsi_cmd_desc *cm)
+{
+	struct dsi_ctrl_hdr *dchdr;
+	u32 *hp;
+
+	dchdr = &cm->dchdr;
+	if (cm->payload == 0) {
+		pr_err("%s: NO payload error\n", __func__);
+		return 0;
+	}
+
+	mdss_dsi_buf_reserve_hdr(dp, DSI_HOST_HDR_SIZE);
+	hp = dp->hdr;
+	*hp = 0;
+	*hp |= DSI_HDR_VC(dchdr->vc);
+	*hp |= DSI_HDR_DTYPE(DTYPE_COMPRESSION_MODE);
 	if (dchdr->last)
 		*hp |= DSI_HDR_LAST;
 
@@ -538,6 +608,12 @@ int mdss_dsi_cmd_dma_add(struct dsi_buf *dp, struct dsi_cmd_desc *cm)
 		break;
 	case DTYPE_MAX_PKTSIZE:
 		len = mdss_dsi_set_max_pktsize(dp, cm);
+		break;
+	case DTYPE_PPS:
+		len = mdss_dsi_dsc_pps(dp, cm);
+		break;
+	case DTYPE_COMPRESSION_MODE:
+		len = mdss_dsi_compression_mode(dp, cm);
 		break;
 	case DTYPE_NULL_PKT:
 		len = mdss_dsi_null_pkt(dp, cm);
@@ -648,20 +724,29 @@ void mdss_dsi_set_tear_off(struct mdss_dsi_ctrl_pdata *ctrl)
 /*
  * mdss_dsi_cmd_get: ctrl->cmd_mutex acquired by caller
  */
-struct dcs_cmd_req *mdss_dsi_cmdlist_get(struct mdss_dsi_ctrl_pdata *ctrl)
+struct dcs_cmd_req *mdss_dsi_cmdlist_get(struct mdss_dsi_ctrl_pdata *ctrl,
+				int from_mdp)
 {
 	struct dcs_cmd_list *clist;
 	struct dcs_cmd_req *req = NULL;
 
+	mutex_lock(&ctrl->cmdlist_mutex);
 	clist = &ctrl->cmdlist;
 	if (clist->get != clist->put) {
 		req = &clist->list[clist->get];
+		/*dont let commit thread steal ESD thread's
+		command*/
+		if (from_mdp && (req->flags & CMD_REQ_COMMIT)) {
+			mutex_unlock(&ctrl->cmdlist_mutex);
+			return NULL;
+		}
 		clist->get++;
 		clist->get %= CMD_REQ_MAX;
 		clist->tot--;
 		pr_debug("%s: tot=%d put=%d get=%d\n", __func__,
 		clist->tot, clist->put, clist->get);
 	}
+	mutex_unlock(&ctrl->cmdlist_mutex);
 	return req;
 }
 
@@ -673,9 +758,12 @@ int mdss_dsi_cmdlist_put(struct mdss_dsi_ctrl_pdata *ctrl,
 	int ret = 0;
 
 	mutex_lock(&ctrl->cmd_mutex);
+	mutex_lock(&ctrl->cmdlist_mutex);
 	clist = &ctrl->cmdlist;
 	req = &clist->list[clist->put];
 	*req = *cmdreq;
+	if (ctrl->dsi_cmd_hs)
+		req->flags |= CMD_REQ_HS_MODE;
 	clist->put++;
 	clist->put %= CMD_REQ_MAX;
 	clist->tot++;
@@ -690,6 +778,8 @@ int mdss_dsi_cmdlist_put(struct mdss_dsi_ctrl_pdata *ctrl,
 
 	pr_debug("%s: tot=%d put=%d get=%d\n", __func__,
 		clist->tot, clist->put, clist->get);
+
+	mutex_unlock(&ctrl->cmdlist_mutex);
 
 	if (req->flags & CMD_REQ_COMMIT) {
 		if (!ctrl->cmdlist_commit)

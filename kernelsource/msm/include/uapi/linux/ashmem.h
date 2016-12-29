@@ -3,6 +3,7 @@
 
 #include <linux/limits.h>
 #include <linux/ioctl.h>
+#include <linux/types.h>
 
 #define ASHMEM_NAME_LEN		256
 
@@ -36,5 +37,6 @@ struct ashmem_pin {
 #define ASHMEM_CACHE_FLUSH_RANGE	_IO(__ASHMEMIOC, 11)
 #define ASHMEM_CACHE_CLEAN_RANGE	_IO(__ASHMEMIOC, 12)
 #define ASHMEM_CACHE_INV_RANGE		_IO(__ASHMEMIOC, 13)
+
 
 #endif /* _UAPI_LINUX_ASHMEM_H */

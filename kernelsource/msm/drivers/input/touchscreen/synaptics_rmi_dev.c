@@ -101,10 +101,12 @@ static struct completion remove_complete;
 static ssize_t rmidev_sysfs_open_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
+	int ret;
 	unsigned int input;
 
-	if (sscanf(buf, "%u", &input) != 1)
-			return -EINVAL;
+	ret = kstrtouint(buf, 10, &input);
+	if (ret)
+		return ret;
 
 	if (input != 1)
 		return -EINVAL;
@@ -120,10 +122,12 @@ static ssize_t rmidev_sysfs_open_store(struct device *dev,
 static ssize_t rmidev_sysfs_release_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
+	int ret;
 	unsigned int input;
 
-	if (sscanf(buf, "%u", &input) != 1)
-			return -EINVAL;
+	ret = kstrtouint(buf, 10, &input);
+	if (ret)
+		return ret;
 
 	if (input != 1)
 		return -EINVAL;
@@ -139,10 +143,12 @@ static ssize_t rmidev_sysfs_release_store(struct device *dev,
 static ssize_t rmidev_sysfs_address_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
+	int ret;
 	unsigned int input;
 
-	if (sscanf(buf, "%u", &input) != 1)
-			return -EINVAL;
+	ret = kstrtouint(buf, 10, &input);
+	if (ret)
+		return ret;
 
 	if (input > REG_ADDR_LIMIT)
 		return -EINVAL;
@@ -155,10 +161,12 @@ static ssize_t rmidev_sysfs_address_store(struct device *dev,
 static ssize_t rmidev_sysfs_length_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
+	int ret;
 	unsigned int input;
 
-	if (sscanf(buf, "%u", &input) != 1)
-			return -EINVAL;
+	ret = kstrtouint(buf, 10, &input);
+	if (ret)
+		return ret;
 
 	if (input > REG_ADDR_LIMIT)
 		return -EINVAL;
@@ -291,7 +299,7 @@ static ssize_t rmidev_read(struct file *filp, char __user *buf,
 		size_t count, loff_t *f_pos)
 {
 	ssize_t retval;
-	unsigned char *tmpbuf;
+	unsigned char tmpbuf[count + 1];
 	struct rmidev_data *dev_data = filp->private_data;
 
 	if (IS_ERR(dev_data)) {
@@ -304,10 +312,6 @@ static ssize_t rmidev_read(struct file *filp, char __user *buf,
 
 	if (count > (REG_ADDR_LIMIT - *f_pos))
 		count = REG_ADDR_LIMIT - *f_pos;
-
-	tmpbuf = kzalloc(count + 1, GFP_KERNEL);
-	if (!tmpbuf)
-		return -ENOMEM;
 
 	mutex_lock(&(dev_data->file_mutex));
 
@@ -326,7 +330,6 @@ static ssize_t rmidev_read(struct file *filp, char __user *buf,
 clean_up:
 	mutex_unlock(&(dev_data->file_mutex));
 
-	kfree(tmpbuf);
 	return retval;
 }
 
@@ -342,7 +345,7 @@ static ssize_t rmidev_write(struct file *filp, const char __user *buf,
 		size_t count, loff_t *f_pos)
 {
 	ssize_t retval;
-	unsigned char *tmpbuf;
+	unsigned char tmpbuf[count + 1];
 	struct rmidev_data *dev_data = filp->private_data;
 
 	if (IS_ERR(dev_data)) {
@@ -356,14 +359,8 @@ static ssize_t rmidev_write(struct file *filp, const char __user *buf,
 	if (count > (REG_ADDR_LIMIT - *f_pos))
 		count = REG_ADDR_LIMIT - *f_pos;
 
-	tmpbuf = kzalloc(count + 1, GFP_KERNEL);
-	if (!tmpbuf)
-		return -ENOMEM;
-
-	if (copy_from_user(tmpbuf, buf, count)) {
-		kfree(tmpbuf);
+	if (copy_from_user(tmpbuf, buf, count))
 		return -EFAULT;
-	}
 
 	mutex_lock(&(dev_data->file_mutex));
 
@@ -375,7 +372,7 @@ static ssize_t rmidev_write(struct file *filp, const char __user *buf,
 		*f_pos += retval;
 
 	mutex_unlock(&(dev_data->file_mutex));
-	kfree(tmpbuf);
+
 	return retval;
 }
 
@@ -468,8 +465,6 @@ static void rmidev_device_cleanup(struct rmidev_data *dev_data)
 				"%s: rmidev device removed\n",
 				__func__);
 	}
-
-	return;
 }
 
 static char *rmi_char_devnode(struct device *dev, umode_t *mode)
@@ -507,18 +502,12 @@ static int rmidev_init_device(struct synaptics_rmi4_data *rmi4_data)
 
 	rmidev = kzalloc(sizeof(*rmidev), GFP_KERNEL);
 	if (!rmidev) {
-		dev_err(&rmi4_data->i2c_client->dev,
-				"%s: Failed to alloc mem for rmidev\n",
-				__func__);
 		retval = -ENOMEM;
 		goto err_rmidev;
 	}
 
 	rmidev->fn_ptr =  kzalloc(sizeof(*(rmidev->fn_ptr)), GFP_KERNEL);
 	if (!rmidev->fn_ptr) {
-		dev_err(&rmi4_data->i2c_client->dev,
-				"%s: Failed to alloc mem for fn_ptr\n",
-				__func__);
 		retval = -ENOMEM;
 		goto err_fn_ptr;
 	}
@@ -556,9 +545,6 @@ static int rmidev_init_device(struct synaptics_rmi4_data *rmi4_data)
 
 	dev_data = kzalloc(sizeof(*dev_data), GFP_KERNEL);
 	if (!dev_data) {
-		dev_err(&rmi4_data->i2c_client->dev,
-				"%s: Failed to alloc mem for dev_data\n",
-				__func__);
 		retval = -ENOMEM;
 		goto err_dev_data;
 	}
@@ -690,8 +676,6 @@ static void rmidev_remove_device(struct synaptics_rmi4_data *rmi4_data)
 	kfree(rmidev);
 
 	complete(&remove_complete);
-
-	return;
 }
 
 static int __init rmidev_module_init(void)
@@ -711,7 +695,6 @@ static void __exit rmidev_module_exit(void)
 			rmidev_remove_device,
 			NULL);
 	wait_for_completion(&remove_complete);
-	return;
 }
 
 module_init(rmidev_module_init);

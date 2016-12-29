@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -192,7 +192,7 @@ static bool  _next_v_mp_req(struct ota_async_req *areq)
 
 	p = areq->req.f8_v_mp_req.qce_f8_req.data_in;
 	p += areq->req.f8_v_mp_req.qce_f8_req.data_len;
-	p = (uint8_t *) ALIGN(((unsigned int)p), L1_CACHE_BYTES);
+	p = (uint8_t *) ALIGN(((uintptr_t)p), L1_CACHE_BYTES);
 
 	areq->req.f8_v_mp_req.qce_f8_req.data_out = p;
 	areq->req.f8_v_mp_req.qce_f8_req.data_in = p;
@@ -239,6 +239,10 @@ static void req_done(unsigned long data)
 		if (!list_empty(&podev->ready_commands)) {
 			new_req = container_of(podev->ready_commands.next,
 						struct ota_async_req, rlist);
+			if (NULL == new_req) {
+				pr_err("ota_crypto: req_done, new_req = NULL");
+				return;
+			}
 			list_del(&new_req->rlist);
 			pqce->active_command = new_req;
 			spin_unlock_irqrestore(&podev->lock, flags);
@@ -628,7 +632,7 @@ static long qcota_ioctl(struct file *file,
 				return -EFAULT;
 			}
 			p += areq.req.f8_v_mp_req.cipher_iov[i].size;
-			p = (uint8_t *) ALIGN(((unsigned int)p),
+			p = (uint8_t *) ALIGN(((uintptr_t)p),
 							L1_CACHE_BYTES);
 		}
 
@@ -655,7 +659,7 @@ static long qcota_ioctl(struct file *file,
 				return -EFAULT;
 			}
 			p += areq.req.f8_v_mp_req.cipher_iov[i].size;
-			p = (uint8_t *) ALIGN(((unsigned int)p),
+			p = (uint8_t *) ALIGN(((uintptr_t)p),
 							L1_CACHE_BYTES);
 		}
 		kfree(k_buf);

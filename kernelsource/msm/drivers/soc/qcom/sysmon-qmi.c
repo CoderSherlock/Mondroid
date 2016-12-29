@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -49,7 +49,7 @@
 #define SSCTL_SERVICE_ID			0x2B
 #define SSCTL_VER_2				2
 #define SERVER_TIMEOUT				500
-#define SHUTDOWN_TIMEOUT			5000
+#define SHUTDOWN_TIMEOUT			10000
 
 #define QMI_EOTI_DATA_TYPE	\
 {				\
@@ -76,6 +76,8 @@ struct sysmon_qmi_data {
 	struct completion ind_recv;
 	struct list_head list;
 };
+
+static struct workqueue_struct *sysmon_wq;
 
 static LIST_HEAD(sysmon_list);
 static DEFINE_MUTEX(sysmon_list_lock);
@@ -119,10 +121,10 @@ static int sysmon_svc_event_notify(struct notifier_block *this,
 
 	switch (code) {
 	case QMI_SERVER_ARRIVE:
-		schedule_work(&data->svc_arrive);
+		queue_work(sysmon_wq, &data->svc_arrive);
 		break;
 	case QMI_SERVER_EXIT:
-		schedule_work(&data->svc_exit);
+		queue_work(sysmon_wq, &data->svc_exit);
 		break;
 	default:
 		break;
@@ -414,7 +416,7 @@ int sysmon_send_shutdown(struct subsys_desc *dest_desc)
 	struct sysmon_qmi_data *data = NULL, *temp;
 	const char *dest_ss = dest_desc->name;
 	char req = 0;
-	int ret;
+	int ret, shutdown_ack_ret;
 
 	if (dest_ss == NULL)
 		return -EINVAL;
@@ -446,7 +448,7 @@ int sysmon_send_shutdown(struct subsys_desc *dest_desc)
 	resp_desc.max_msg_len = QMI_SSCTL_RESP_MSG_LENGTH;
 	resp_desc.ei_array = qmi_ssctl_shutdown_resp_msg_ei;
 
-	INIT_COMPLETION(data->ind_recv);
+	reinit_completion(&data->ind_recv);
 	mutex_lock(&sysmon_lock);
 	ret = qmi_send_req_wait(data->clnt_handle, &req_desc, &req,
 		sizeof(req), &resp_desc, &resp, sizeof(resp), SERVER_TIMEOUT);
@@ -462,6 +464,17 @@ int sysmon_send_shutdown(struct subsys_desc *dest_desc)
 		ret = -EREMOTEIO;
 		goto out;
 	}
+
+	shutdown_ack_ret = wait_for_shutdown_ack(dest_desc);
+	if (shutdown_ack_ret < 0) {
+		pr_err("shutdown_ack SMP2P bit for %s not set\n", data->name);
+		if (!&data->ind_recv.done) {
+			pr_err("QMI shutdown indication not received\n");
+			ret = shutdown_ack_ret;
+		}
+		goto out;
+	} else if (shutdown_ack_ret > 0)
+		goto out;
 
 	if (!wait_for_completion_timeout(&data->ind_recv,
 					msecs_to_jiffies(SHUTDOWN_TIMEOUT))) {
@@ -646,11 +659,24 @@ int sysmon_notifier_register(struct subsys_desc *desc)
 	data->clnt_handle = NULL;
 	data->legacy_version = false;
 
+	mutex_lock(&sysmon_list_lock);
 	if (data->instance_id <= 0) {
 		pr_debug("SSCTL instance id not defined\n");
 		goto add_list;
 	}
 
+	if (sysmon_wq)
+		goto notif_register;
+
+	sysmon_wq = create_singlethread_workqueue("sysmon_wq");
+	if (!sysmon_wq) {
+		mutex_unlock(&sysmon_list_lock);
+		pr_err("Could not create workqueue\n");
+		kfree(data);
+		return -ENOMEM;
+	}
+
+notif_register:
 	data->notifier.notifier_call = sysmon_svc_event_notify;
 	init_completion(&data->ind_recv);
 
@@ -663,7 +689,6 @@ int sysmon_notifier_register(struct subsys_desc *desc)
 	if (rc < 0)
 		pr_err("Notifier register failed for %s\n", data->name);
 add_list:
-	mutex_lock(&sysmon_list_lock);
 	INIT_LIST_HEAD(&data->list);
 	list_add_tail(&data->list, &sysmon_list);
 	mutex_unlock(&sysmon_list_lock);
@@ -690,14 +715,18 @@ void sysmon_notifier_unregister(struct subsys_desc *desc)
 			data = sysmon_data;
 			list_del(&data->list);
 		}
-	mutex_unlock(&sysmon_list_lock);
 
 	if (data == NULL)
-		return;
+		goto exit;
 
 	if (data->instance_id > 0)
 		qmi_svc_event_notifier_unregister(SSCTL_SERVICE_ID,
 			SSCTL_VER_2, data->instance_id, &data->notifier);
+
+	if (sysmon_wq && list_empty(&sysmon_list))
+		destroy_workqueue(sysmon_wq);
+exit:
+	mutex_unlock(&sysmon_list_lock);
 	kfree(data);
 }
 EXPORT_SYMBOL(sysmon_notifier_unregister);

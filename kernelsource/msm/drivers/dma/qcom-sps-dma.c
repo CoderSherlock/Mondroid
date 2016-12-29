@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -159,7 +159,7 @@ static void qbam_free_chan(struct dma_chan *chan)
 	mutex_lock(&qbam_chan->lock);
 	if (qbam_disconnect_chan(qbam_chan))
 		qbam_err(qbam_dev,
-			"error free_chan() faild to disconnect(pipe:%d)\n",
+			"error free_chan() failed to disconnect(pipe:%d)\n",
 			qbam_chan->bam_pipe.index);
 	qbam_chan->pending_desc.sgl = NULL;
 	qbam_chan->pending_desc.sg_len = 0;
@@ -207,8 +207,8 @@ static struct dma_chan *qbam_dma_xlate(struct of_phandle_args *dma_spec,
 	/* allocate a channel */
 	qbam_chan = kzalloc(sizeof(*qbam_chan), GFP_KERNEL);
 	if (!qbam_chan) {
-		qbam_err(qbam_dev, "error kmalloc(size:%lu) faild\n",
-			 sizeof(*qbam_chan));
+		qbam_err(qbam_dev, "error kmalloc(size:%llu) failed\n",
+			 (u64) sizeof(*qbam_chan));
 		return NULL;
 	}
 
@@ -245,7 +245,6 @@ static enum dma_status qbam_tx_status(struct dma_chan *chan,
 	struct qbam_channel *qbam_chan = DMA_TO_QBAM_CHAN(chan);
 	struct qbam_async_tx_descriptor	*qbam_desc = &qbam_chan->pending_desc;
 	enum dma_status ret;
-	struct scatterlist *sg;
 
 	mutex_lock(&qbam_chan->lock);
 
@@ -256,6 +255,7 @@ static enum dma_status qbam_tx_status(struct dma_chan *chan,
 
 	ret = dma_cookie_status(chan, cookie, state);
 	if (ret == DMA_IN_PROGRESS) {
+		struct scatterlist *sg;
 		int i;
 		u32 transfer_size = 0;
 
@@ -442,8 +442,8 @@ static int qbam_slave_cfg(struct qbam_channel *qbam_chan,
 						  GFP_KERNEL);
 	if (!pipe_cfg->desc.base) {
 		qbam_err(qbam_dev,
-			"error dma_alloc_coherent(desc-sz:%lu * n-descs:%d)\n",
-			sizeof(struct sps_iovec),
+			"error dma_alloc_coherent(desc-sz:%llu * n-descs:%d)\n",
+			(u64) sizeof(struct sps_iovec),
 			qbam_chan->bam_pipe.num_descriptors);
 		return -ENOMEM;
 	}
@@ -575,9 +575,13 @@ static void qbam_issue_pending(struct dma_chan *chan)
 
 	for_each_sg(qbam_desc->sgl, sg, qbam_desc->sg_len, i) {
 
+		/* Add BAM flags only on the last buffer */
+		bool is_last_buf = (i == ((qbam_desc->sg_len) - 1));
+
 		ret = sps_transfer_one(qbam_chan->bam_pipe.handle,
 					sg_dma_address(sg), sg_dma_len(sg),
-					qbam_desc, qbam_desc->flags);
+					qbam_desc,
+					(is_last_buf ? qbam_desc->flags : 0));
 		if (ret < 0) {
 			qbam_chan->error = ret;
 
@@ -635,8 +639,8 @@ static int qbam_probe(struct platform_device *pdev)
 
 	qbam_dev = devm_kzalloc(&pdev->dev, sizeof(*qbam_dev), GFP_KERNEL);
 	if (!qbam_dev) {
-		qbam_err(qbam_dev, "error kmalloc(size:%lu) faild",
-			 sizeof(*qbam_dev));
+		qbam_err(qbam_dev, "error kmalloc(size:%llu) failed",
+			(u64) sizeof(*qbam_dev));
 		return -ENOMEM;
 	}
 	qbam_dev->dma_dev.dev = &pdev->dev;

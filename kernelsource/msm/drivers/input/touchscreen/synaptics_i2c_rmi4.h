@@ -5,7 +5,7 @@
  *
  * Copyright (C) 2012 Alexandra Chin <alexandra.chin@tw.synaptics.com>
  * Copyright (C) 2012 Scott Lin <scott.lin@tw.synaptics.com>
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -187,7 +187,7 @@ struct synaptics_rmi4_device_info {
  * @det_work: work thread instance for expansion function detection
  * @det_workqueue: pointer to work queue for work thread instance
  * @early_suspend: instance to support early suspend power management
- * @current_page: current page in sensor to acess
+ * @current_page: current page in sensor to access
  * @button_0d_enabled: flag for 0d button support
  * @full_pm_cycle: flag for full power management cycle in early suspend stage
  * @num_of_intr_regs: number of interrupt registers
@@ -224,8 +224,6 @@ struct synaptics_rmi4_data {
 	struct mutex rmi4_io_ctrl_mutex;
 	struct delayed_work det_work;
 	struct workqueue_struct *det_workqueue;
-	struct work_struct recovery_work;
-	struct work_struct init_work;
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	struct early_suspend early_suspend;
 #endif
@@ -263,7 +261,6 @@ struct synaptics_rmi4_data {
 	wait_queue_head_t wait;
 	bool stay_awake;
 	bool staying_awake;
-	bool check_build;
 	int (*i2c_read)(struct synaptics_rmi4_data *pdata, unsigned short addr,
 			unsigned char *data, unsigned short length);
 	int (*i2c_write)(struct synaptics_rmi4_data *pdata, unsigned short addr,
@@ -290,7 +287,6 @@ struct synaptics_rmi4_data {
 	struct clk *core_clk;
 	struct clk *iface_clk;
 #endif
-	ktime_t timestamp;
 };
 
 enum exp_fn {

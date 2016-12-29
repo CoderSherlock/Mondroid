@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,13 +21,13 @@
 #include <linux/iommu.h>
 #include <linux/of_address.h>
 #include <linux/fb.h>
-#include <linux/mm.h>
-#include <asm/page.h>
+#include <linux/dma-buf.h>
 
 #include "mdss_fb.h"
 #include "mdss_mdp.h"
 #include "splash.h"
 #include "mdss_mdp_splash_logo.h"
+#include "mdss_smmu.h"
 
 #define INVALID_PIPE_INDEX 0xFFFF
 #define MAX_FRAME_DONE_COUNT_WAIT 2
@@ -39,6 +39,7 @@ static int mdss_mdp_splash_alloc_memory(struct msm_fb_data_type *mfd,
 	struct msm_fb_splash_info *sinfo;
 	unsigned long buf_size = size;
 	struct mdss_data_type *mdata;
+	struct ion_handle *handle;
 
 	if (!mfd || !size)
 		return -EINVAL;
@@ -49,37 +50,70 @@ static int mdss_mdp_splash_alloc_memory(struct msm_fb_data_type *mfd,
 	if (!mdata || !mdata->iclient || sinfo->splash_buffer)
 		return -EINVAL;
 
-	sinfo->ion_handle = ion_alloc(mdata->iclient, size, SZ_4K,
+	handle = ion_alloc(mdata->iclient, size, SZ_4K,
 				ION_HEAP(ION_SYSTEM_HEAP_ID), 0);
-	if (IS_ERR_OR_NULL(sinfo->ion_handle)) {
+	if (IS_ERR_OR_NULL(handle)) {
 		pr_err("ion memory allocation failed\n");
-		rc = PTR_RET(sinfo->ion_handle);
+		rc = PTR_RET(handle);
 		goto end;
 	}
 
-	rc = ion_map_iommu(mdata->iclient, sinfo->ion_handle,
-			mdss_get_iommu_domain(MDSS_IOMMU_DOMAIN_UNSECURE),
-			0, SZ_4K, 0, &sinfo->iova, &buf_size, 0, 0);
-	if (rc) {
-		pr_err("ion memory map failed\n");
+	sinfo->size = size;
+	sinfo->dma_buf = ion_share_dma_buf(mdata->iclient, handle);
+	if (IS_ERR(sinfo->dma_buf)) {
+		rc = PTR_ERR(sinfo->dma_buf);
 		goto imap_err;
 	}
 
-	sinfo->splash_buffer = ion_map_kernel(mdata->iclient,
-						sinfo->ion_handle);
-	if (IS_ERR_OR_NULL(sinfo->splash_buffer)) {
+	sinfo->attachment = mdss_smmu_dma_buf_attach(sinfo->dma_buf,
+			&mfd->pdev->dev, MDSS_IOMMU_DOMAIN_UNSECURE);
+	if (IS_ERR(sinfo->attachment)) {
+		rc = PTR_ERR(sinfo->attachment);
+		goto err_put;
+	}
+
+	sinfo->table = dma_buf_map_attachment(sinfo->attachment,
+			DMA_BIDIRECTIONAL);
+	if (IS_ERR(sinfo->table)) {
+		rc = PTR_ERR(sinfo->table);
+		goto err_detach;
+	}
+
+	rc = mdss_smmu_map_dma_buf(sinfo->dma_buf, sinfo->table,
+			MDSS_IOMMU_DOMAIN_UNSECURE, &sinfo->iova,
+			&buf_size, DMA_BIDIRECTIONAL);
+	if (rc) {
+		pr_err("mdss smmu map dma buf failed!\n");
+		goto err_unmap;
+	}
+	sinfo->size = buf_size;
+
+	dma_buf_begin_cpu_access(sinfo->dma_buf, 0, size, DMA_BIDIRECTIONAL);
+	sinfo->splash_buffer = dma_buf_kmap(sinfo->dma_buf, 0);
+	if (IS_ERR(sinfo->splash_buffer)) {
 		pr_err("ion kernel memory mapping failed\n");
 		rc = IS_ERR(sinfo->splash_buffer);
 		goto kmap_err;
 	}
 
-	return rc;
+	/**
+	 * dma_buf has the reference
+	 */
+	ion_free(mdata->iclient, handle);
 
+	return rc;
 kmap_err:
-	ion_unmap_iommu(mdata->iclient, sinfo->ion_handle,
-			mdss_get_iommu_domain(MDSS_IOMMU_DOMAIN_UNSECURE), 0);
+	mdss_smmu_unmap_dma_buf(sinfo->table, MDSS_IOMMU_DOMAIN_UNSECURE,
+			DMA_BIDIRECTIONAL, sinfo->dma_buf);
+err_unmap:
+	dma_buf_unmap_attachment(sinfo->attachment, sinfo->table,
+			DMA_BIDIRECTIONAL);
+err_detach:
+	dma_buf_detach(sinfo->dma_buf, sinfo->attachment);
+err_put:
+	dma_buf_put(sinfo->dma_buf);
 imap_err:
-	ion_free(mdata->iclient, sinfo->ion_handle);
+	ion_free(mdata->iclient, handle);
 end:
 	return rc;
 }
@@ -95,21 +129,25 @@ static void mdss_mdp_splash_free_memory(struct msm_fb_data_type *mfd)
 	sinfo = &mfd->splash_info;
 	mdata = mfd_to_mdata(mfd);
 
-	if (!mdata || !mdata->iclient || !sinfo->ion_handle)
+	if (!mdata || !mdata->iclient || !sinfo->dma_buf)
 		return;
 
-	ion_unmap_kernel(mdata->iclient, sinfo->ion_handle);
+	dma_buf_end_cpu_access(sinfo->dma_buf, 0, sinfo->size,
+			       DMA_BIDIRECTIONAL);
+	dma_buf_kunmap(sinfo->dma_buf, 0, sinfo->splash_buffer);
 
-	ion_unmap_iommu(mdata->iclient, sinfo->ion_handle,
-			mdss_get_iommu_domain(MDSS_IOMMU_DOMAIN_UNSECURE), 0);
+	mdss_smmu_unmap_dma_buf(sinfo->table, MDSS_IOMMU_DOMAIN_UNSECURE, 0,
+				sinfo->dma_buf);
+	dma_buf_unmap_attachment(sinfo->attachment, sinfo->table,
+			DMA_BIDIRECTIONAL);
+	dma_buf_detach(sinfo->dma_buf, sinfo->attachment);
+	dma_buf_put(sinfo->dma_buf);
 
-	ion_free(mdata->iclient, sinfo->ion_handle);
 	sinfo->splash_buffer = NULL;
 }
 
 static int mdss_mdp_splash_iommu_attach(struct msm_fb_data_type *mfd)
 {
-	struct iommu_domain *domain;
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
 	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
 	int rc, ret;
@@ -129,24 +167,20 @@ static int mdss_mdp_splash_iommu_attach(struct msm_fb_data_type *mfd)
 		return -EPERM;
 	}
 
-	domain = msm_get_iommu_domain(mdss_get_iommu_domain(
-						MDSS_IOMMU_DOMAIN_UNSECURE));
-	if (!domain) {
-		pr_debug("mdss iommu domain get failed\n");
-		return -EINVAL;
-	}
-
-	rc = iommu_map(domain, mdp5_data->splash_mem_addr,
+	rc = mdss_smmu_map(MDSS_IOMMU_DOMAIN_UNSECURE,
 				mdp5_data->splash_mem_addr,
-				mdp5_data->splash_mem_size, IOMMU_READ);
+				mdp5_data->splash_mem_addr,
+				mdp5_data->splash_mem_size,
+				IOMMU_READ | IOMMU_NOEXEC);
 	if (rc) {
 		pr_debug("iommu memory mapping failed rc=%d\n", rc);
 	} else {
 		ret = mdss_iommu_ctrl(1);
 		if (IS_ERR_VALUE(ret)) {
 			pr_err("mdss iommu attach failed\n");
-			iommu_unmap(domain, mdp5_data->splash_mem_addr,
-						mdp5_data->splash_mem_size);
+			mdss_smmu_unmap(MDSS_IOMMU_DOMAIN_UNSECURE,
+					mdp5_data->splash_mem_addr,
+					mdp5_data->splash_mem_size);
 		} else {
 			mfd->splash_info.iommu_dynamic_attached = true;
 		}
@@ -157,19 +191,13 @@ static int mdss_mdp_splash_iommu_attach(struct msm_fb_data_type *mfd)
 
 static void mdss_mdp_splash_unmap_splash_mem(struct msm_fb_data_type *mfd)
 {
-	struct iommu_domain *domain;
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
 
 	if (mfd->splash_info.iommu_dynamic_attached) {
-		domain = msm_get_iommu_domain(mdss_get_iommu_domain(
-						MDSS_IOMMU_DOMAIN_UNSECURE));
-		if (!domain) {
-			pr_err("mdss iommu domain get failed\n");
-			return;
-		}
 
-		iommu_unmap(domain, mdp5_data->splash_mem_addr,
-						mdp5_data->splash_mem_size);
+		mdss_smmu_unmap(MDSS_IOMMU_DOMAIN_UNSECURE,
+				mdp5_data->splash_mem_addr,
+				mdp5_data->splash_mem_size);
 		mdss_iommu_ctrl(0);
 
 		mfd->splash_info.iommu_dynamic_attached = false;
@@ -226,11 +254,24 @@ int mdss_mdp_splash_cleanup(struct msm_fb_data_type *mfd,
 	if (!ctl)
 		return -EINVAL;
 
-	if (mfd->splash_info.iommu_dynamic_attached ||
-			!mfd->panel_info->cont_splash_enabled)
+	if (!mfd->panel_info->cont_splash_enabled ||
+		(mfd->splash_info.iommu_dynamic_attached && !use_borderfill)) {
+		if (mfd->splash_info.iommu_dynamic_attached &&
+			use_borderfill) {
+			mdss_mdp_splash_unmap_splash_mem(mfd);
+			memblock_free(mdp5_data->splash_mem_addr,
+					mdp5_data->splash_mem_size);
+			mdss_free_bootmem(mdp5_data->splash_mem_addr,
+					mdp5_data->splash_mem_size);
+		}
 		goto end;
+	}
 
-	if (use_borderfill && mdp5_data->handoff) {
+	/* 1-to-1 mapping */
+	mdss_mdp_splash_iommu_attach(mfd);
+
+	if (use_borderfill && mdp5_data->handoff &&
+		!mfd->splash_info.iommu_dynamic_attached) {
 		/*
 		 * Set up border-fill on the handed off pipes.
 		 * This is needed to ensure that there are no memory
@@ -266,7 +307,8 @@ int mdss_mdp_splash_cleanup(struct msm_fb_data_type *mfd,
 
 	mdss_mdp_ctl_splash_finish(ctl, mdp5_data->handoff);
 
-	if (mdp5_data->splash_mem_addr) {
+	if (mdp5_data->splash_mem_addr &&
+		!mfd->splash_info.iommu_dynamic_attached) {
 		/* Give back the reserved memory to the system */
 		memblock_free(mdp5_data->splash_mem_addr,
 					mdp5_data->splash_mem_size);
@@ -286,6 +328,7 @@ static struct mdss_mdp_pipe *mdss_mdp_splash_get_pipe(
 	struct mdss_mdp_pipe *pipe;
 	int ret;
 	struct mdss_mdp_data *buf;
+	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
 	uint32_t image_size = SPLASH_IMAGE_WIDTH * SPLASH_IMAGE_HEIGHT
 						* SPLASH_IMAGE_BPP;
 
@@ -298,12 +341,15 @@ static struct mdss_mdp_pipe *mdss_mdp_splash_get_pipe(
 		return NULL;
 	}
 
+	mutex_lock(&mdp5_data->list_lock);
 	buf = mdss_mdp_overlay_buf_alloc(mfd, pipe);
 	if (!buf) {
 		pr_err("unable to allocate memory for splash buffer\n");
 		mdss_mdp_pipe_unmap(pipe);
+		mutex_unlock(&mdp5_data->list_lock);
 		return NULL;
 	}
+	mutex_unlock(&mdp5_data->list_lock);
 
 	buf->p[0].addr = mfd->splash_info.iova;
 	buf->p[0].len = image_size;
@@ -319,7 +365,7 @@ static int mdss_mdp_splash_kickoff(struct msm_fb_data_type *mfd,
 {
 	struct mdss_mdp_pipe *pipe;
 	struct fb_info *fbi;
-	struct mdp_overlay req;
+	struct mdp_overlay *req = NULL;
 	struct mdss_overlay_private *mdp5_data;
 	struct mdss_data_type *mdata;
 	struct mdss_mdp_mixer *mixer;
@@ -354,7 +400,10 @@ static int mdss_mdp_splash_kickoff(struct msm_fb_data_type *mfd,
 		goto end;
 	}
 
-	memset(&req, 0, sizeof(struct mdp_overlay));
+	req = kzalloc(sizeof(struct mdp_overlay), GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
 	/*
 	 * use single pipe for
 	 * 1. split display disabled
@@ -373,23 +422,23 @@ static int mdss_mdp_splash_kickoff(struct msm_fb_data_type *mfd,
 		dest_rect->w < min_t(u16, mixer->width,
 					mdss_mdp_line_buffer_width()));
 
-	req.src.width = src_rect->w;
+	req->src.width = src_rect->w;
 	if (use_single_pipe)
-		req.src_rect.w = src_rect->w;
+		req->src_rect.w = src_rect->w;
 	else
-		req.src_rect.w = min_t(u16, mixer->width, src_rect->w >> 1);
-	req.dst_rect.w = req.src_rect.w;
-	req.src.height = req.dst_rect.h = req.src_rect.h =
+		req->src_rect.w = min_t(u16, mixer->width, src_rect->w >> 1);
+	req->dst_rect.w = req->src_rect.w;
+	req->src.height = req->dst_rect.h = req->src_rect.h =
 			src_rect->h;
-	req.src.format = SPLASH_IMAGE_FORMAT;
-	req.id = MSMFB_NEW_REQUEST;
-	req.z_order = MDSS_MDP_STAGE_0;
-	req.alpha = 0xff;
-	req.transp_mask = MDP_TRANSP_NOP;
-	req.dst_rect.x = dest_rect->x;
-	req.dst_rect.y = dest_rect->y;
+	req->src.format = SPLASH_IMAGE_FORMAT;
+	req->id = MSMFB_NEW_REQUEST;
+	req->z_order = MDSS_MDP_STAGE_0;
+	req->alpha = 0xff;
+	req->transp_mask = MDP_TRANSP_NOP;
+	req->dst_rect.x = dest_rect->x;
+	req->dst_rect.y = dest_rect->y;
 
-	pipe = mdss_mdp_splash_get_pipe(mfd, &req);
+	pipe = mdss_mdp_splash_get_pipe(mfd, req);
 	if (!pipe) {
 		pr_err("unable to allocate base pipe\n");
 		ret = -EINVAL;
@@ -399,11 +448,11 @@ static int mdss_mdp_splash_kickoff(struct msm_fb_data_type *mfd,
 	sinfo->pipe_ndx[0] = pipe->ndx;
 
 	if (!use_single_pipe) {
-		req.id = MSMFB_NEW_REQUEST;
-		req.src_rect.x = src_rect->x + min_t(u16, mixer->width,
-					src_rect->w - req.src_rect.w);
-		req.dst_rect.x = mixer->width;
-		pipe = mdss_mdp_splash_get_pipe(mfd, &req);
+		req->id = MSMFB_NEW_REQUEST;
+		req->src_rect.x = src_rect->x + min_t(u16, mixer->width,
+					src_rect->w - req->src_rect.w);
+		req->dst_rect.x = mixer->width;
+		pipe = mdss_mdp_splash_get_pipe(mfd, req);
 		if (!pipe) {
 			pr_err("unable to allocate right base pipe\n");
 			mdss_mdp_overlay_release(mfd, sinfo->pipe_ndx[0]);
@@ -421,8 +470,10 @@ static int mdss_mdp_splash_kickoff(struct msm_fb_data_type *mfd,
 					sinfo->pipe_ndx[1]);
 	}
 
+	kfree(req);
 	return ret;
 end:
+	kfree(req);
 	sinfo->pipe_ndx[0] = INVALID_PIPE_INDEX;
 	sinfo->pipe_ndx[1] = INVALID_PIPE_INDEX;
 	mutex_unlock(&mdp5_data->ov_lock);
@@ -542,7 +593,7 @@ static int mdss_mdp_splash_thread(void *data)
 	unlock_fb_info(mfd->fbi);
 
 	mutex_lock(&mfd->bl_lock);
-	mfd->bl_updated = true;
+	mfd->allow_bl_update = true;
 	mdss_fb_set_backlight(mfd, mfd->panel_info->bl_max >> 1);
 	mutex_unlock(&mfd->bl_lock);
 

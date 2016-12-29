@@ -418,9 +418,14 @@ static int snd_info_entry_release(struct inode *inode, struct file *file)
 			if (entry->c.text.write) {
 				entry->c.text.write(entry, data->wbuffer);
 				if (data->wbuffer->error) {
-					snd_printk(KERN_WARNING "data write error to %s (%i)\n",
-						entry->name,
-						data->wbuffer->error);
+					if (entry->card)
+						dev_warn(entry->card->dev, "info: data write error to %s (%i)\n",
+							 entry->name,
+							 data->wbuffer->error);
+					else
+						pr_warn("ALSA: info: data write error to %s (%i)\n",
+							entry->name,
+							data->wbuffer->error);
 				}
 			}
 			kfree(data->wbuffer->buffer);
@@ -540,7 +545,7 @@ int __init snd_info_init(void)
 		snd_oss_root = entry;
 	}
 #endif
-#if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
+#if IS_ENABLED(CONFIG_SND_SEQUENCER)
 	{
 		struct snd_info_entry *entry;
 		if ((entry = snd_info_create_module_entry(THIS_MODULE, "seq", NULL)) == NULL)
@@ -567,7 +572,7 @@ int __exit snd_info_done(void)
 	snd_minor_info_done();
 	snd_info_version_done();
 	if (snd_proc_root) {
-#if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
+#if IS_ENABLED(CONFIG_SND_SEQUENCER)
 		snd_info_free_entry(snd_seq_root);
 #endif
 #ifdef CONFIG_SND_OSSEMUL
@@ -674,6 +679,36 @@ int snd_info_card_free(struct snd_card *card)
 	return 0;
 }
 
+/*
+ * snd_register_module_info - create and register module
+ * @module: the module pointer
+ * @name: the module name
+ * @parent: the parent directory
+ *
+ * Creates and registers new module entry.
+ *
+ * Return: The pointer of the new instance, or NULL on failure.
+ */
+struct snd_info_entry *snd_register_module_info(struct module *module,
+						const char *name,
+						struct snd_info_entry *parent)
+{
+	struct snd_info_entry *entry;
+
+	entry = snd_info_create_module_entry(module, name, parent);
+	if (!entry)
+		return NULL;
+
+	entry->mode = S_IFDIR | S_IRUGO | S_IXUGO;
+
+	if (snd_info_register(entry) < 0) {
+		snd_info_free_entry(entry);
+		return NULL;
+	}
+
+	return entry;
+}
+EXPORT_SYMBOL(snd_register_module_info);
 
 /**
  * snd_info_get_line - read one line from the procfs buffer

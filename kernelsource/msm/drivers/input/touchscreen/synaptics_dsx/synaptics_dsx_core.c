@@ -5,7 +5,7 @@
  *
  * Copyright (C) 2012 Alexandra Chin <alexandra.chin@tw.synaptics.com>
  * Copyright (C) 2012 Scott Lin <scott.lin@tw.synaptics.com>
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -34,6 +34,13 @@
 #endif
 #if defined(CONFIG_SECURE_TOUCH)
 #include <linux/errno.h>
+#include <soc/qcom/scm.h>
+enum subsystem {
+	TZ = 1,
+	APSS = 3
+};
+
+#define TZ_BLSP_MODIFY_OWNERSHIP_ID 3
 #endif
 
 #define INPUT_PHYS_NAME "synaptics_dsx/input0"
@@ -91,6 +98,9 @@
 #define SYNA_F11_MAX		4096
 #define SYNA_F12_MAX		65536
 
+#define SYNA_S332U_PACKAGE_ID		332
+#define SYNA_S332U_PACKAGE_ID_REV		85
+
 static int synaptics_rmi4_f12_set_enables(struct synaptics_rmi4_data *rmi4_data,
 		unsigned short ctrl28);
 
@@ -105,6 +115,7 @@ static ssize_t synaptics_rmi4_full_pm_cycle_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count);
 
 #if defined(CONFIG_FB)
+static void fb_notify_resume_work(struct work_struct *work);
 static int fb_notifier_callback(struct notifier_block *self,
 				unsigned long event, void *data);
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
@@ -457,6 +468,28 @@ DEFINE_SIMPLE_ATTRIBUTE(debug_suspend_fops, synaptics_rmi4_debug_suspend_get,
 			synaptics_rmi4_debug_suspend_set, "%lld\n");
 
 #if defined(CONFIG_SECURE_TOUCH)
+static int synaptics_i2c_change_pipe_owner(
+	struct synaptics_rmi4_data *rmi4_data, enum subsystem subsystem)
+{
+	/*scm call descriptor */
+	struct scm_desc desc;
+	struct i2c_client *i2c = to_i2c_client(rmi4_data->pdev->dev.parent);
+	int ret = 0;
+
+	/* number of arguments */
+	desc.arginfo = SCM_ARGS(2);
+	/* BLSPID (1-12) */
+	desc.args[0] = i2c->adapter->nr - 1;
+	 /* Owner if TZ or APSS */
+	desc.args[1] = subsystem;
+	ret = scm_call2(SCM_SIP_FNID(SCM_SVC_TZ, TZ_BLSP_MODIFY_OWNERSHIP_ID),
+			&desc);
+	if (ret)
+		return ret;
+
+	return desc.ret[0];
+}
+
 static void synaptics_secure_touch_init(struct synaptics_rmi4_data *data)
 {
 	int ret = 0;
@@ -496,6 +529,7 @@ static irqreturn_t synaptics_filter_interrupt(
 {
 	if (atomic_read(&rmi4_data->st_enabled)) {
 		if (atomic_cmpxchg(&rmi4_data->st_pending_irqs, 0, 1) == 0) {
+			reinit_completion(&rmi4_data->st_irq_processed);
 			synaptics_secure_touch_notify(rmi4_data);
 			wait_for_completion_interruptible(
 				&rmi4_data->st_irq_processed);
@@ -580,6 +614,7 @@ static ssize_t synaptics_secure_touch_enable_store(struct device *dev,
 		if (atomic_read(&rmi4_data->st_enabled) == 0)
 			break;
 
+		synaptics_i2c_change_pipe_owner(rmi4_data, APSS);
 		synaptics_rmi4_bus_put(rmi4_data);
 		atomic_set(&rmi4_data->st_enabled, 0);
 		synaptics_secure_touch_notify(rmi4_data);
@@ -603,9 +638,9 @@ static ssize_t synaptics_secure_touch_enable_store(struct device *dev,
 			err = -EIO;
 			break;
 		}
-
-		INIT_COMPLETION(rmi4_data->st_powerdown);
-		INIT_COMPLETION(rmi4_data->st_irq_processed);
+		synaptics_i2c_change_pipe_owner(rmi4_data, TZ);
+		reinit_completion(&rmi4_data->st_powerdown);
+		reinit_completion(&rmi4_data->st_irq_processed);
 		atomic_set(&rmi4_data->st_enabled, 1);
 		atomic_set(&rmi4_data->st_pending_irqs,  0);
 		break;
@@ -1037,21 +1072,25 @@ static int synaptics_rmi4_f12_abs_report(struct synaptics_rmi4_data *rmi4_data,
 
 		/* Start checking from the highest bit */
 		temp = extra_data->data15_size - 1; /* Highest byte */
-		finger = (fingers_to_process - 1) % 8; /* Highest bit */
-		do {
-			if (extra_data->data15_data[temp] & (1 << finger))
-				break;
+		if ((temp >= 0) && (fingers_to_process > 0) &&
+		    (temp < ((F12_FINGERS_TO_SUPPORT + 7) / 8))) {
+			finger = (fingers_to_process - 1) % 8; /* Highest bit */
+			do {
+				if (extra_data->data15_data[temp]
+					& (1 << finger))
+					break;
 
-			if (finger) {
-				finger--;
-			} else {
-				temp--; /* Move to the next lower byte */
-				finger = 7;
-			}
+				if (finger) {
+					finger--;
+				} else {
+					/* Move to the next lower byte */
+					temp--;
+					finger = 7;
+				}
 
-			fingers_to_process--;
-		} while (fingers_to_process);
-
+				fingers_to_process--;
+			} while (fingers_to_process && (temp >= 0));
+		}
 		dev_dbg(rmi4_data->pdev->dev.parent,
 			"%s: Number of fingers to process = %d\n",
 			__func__, fingers_to_process);
@@ -2232,6 +2271,32 @@ static int synaptics_rmi4_alloc_fh(struct synaptics_rmi4_fn **fhandler,
 	return 0;
 }
 
+static int synaptics_rmi4_read_configid(struct synaptics_rmi4_data *rmi4_data,
+		unsigned char ctrl_base_addr)
+{
+	unsigned int device_config_id;
+
+	/*
+	 * We may get an error while trying to read config id if it is
+	 *  not provisioned by vendor
+	 */
+	if (synaptics_rmi4_reg_read(rmi4_data, ctrl_base_addr,
+			(unsigned char *)(&device_config_id),
+			 sizeof(device_config_id)) < 0)
+		dev_err(rmi4_data->pdev->dev.parent, "Failed to read device config ID from CTP\n");
+
+	if (rmi4_data->hw_if->board_data->config_id)
+		dev_info(rmi4_data->pdev->dev.parent,
+			"CTP Config ID=%pI4\tDT Config ID=%pI4\n",
+			&device_config_id,
+			&rmi4_data->hw_if->board_data->config_id);
+	else
+		dev_info(rmi4_data->pdev->dev.parent,
+			"CTP Config ID=%pI4\n", &device_config_id);
+
+	return 0;
+}
+
  /**
  * synaptics_rmi4_query_device()
  *
@@ -2260,7 +2325,6 @@ static int synaptics_rmi4_query_device(struct synaptics_rmi4_data *rmi4_data)
 	struct synaptics_rmi4_fn *fhandler;
 	struct synaptics_rmi4_device_info *rmi;
 	unsigned char pkg_id[PACKAGE_ID_SIZE];
-
 	rmi = &(rmi4_data->rmi4_mod_info);
 
 rescan_pdt:
@@ -2299,6 +2363,15 @@ rescan_pdt:
 					page_number);
 
 			switch (rmi_fd.fn_number) {
+			case SYNAPTICS_RMI4_F34:
+				/*
+				 * Though function F34 is an interrupt source,
+				 * but it is not a data source, hence do not
+				 * add its handler to support_fn_list
+				 */
+				synaptics_rmi4_read_configid(rmi4_data,
+						 rmi_fd.ctrl_base_addr);
+				break;
 			case SYNAPTICS_RMI4_F01:
 				if (rmi_fd.intr_src_count == 0)
 					break;
@@ -2730,7 +2803,9 @@ static int synaptics_rmi4_parse_dt_children(struct device *dev,
 				 */
 				continue;
 			} else if (of_property_read_bool(child,
-				"synaptics,bypass-sensor-coords-check")) {
+				"synaptics,bypass-sensor-coords-check") &&
+				of_find_property(child,
+					"synaptics,panel-coords", NULL)) {
 				/*
 				 * Some unprogrammed panels from touch vendor
 				 * and wrongly programmed panels from factory
@@ -2741,6 +2816,9 @@ static int synaptics_rmi4_parse_dt_children(struct device *dev,
 				 * of coordinate range read from sensor and read
 				 * from DT and continue normal operation.
 				 */
+				synaptics_dsx_get_dt_coords(dev,
+						"synaptics,panel-coords",
+						rmi4_pdata, child);
 				dev_info(dev,
 					"%s Synaptics package id matches %d %d,"
 					"but bypassing the comparison of sensor"
@@ -2778,6 +2856,10 @@ static int synaptics_rmi4_parse_dt_children(struct device *dev,
 						(rmi4_pdata->panel_maxy !=
 						rmi4_data->sensor_max_y))
 						continue;
+				} else {
+					dev_info(dev, "Smax_x Smax_y = %d:%d\n",
+						rmi4_data->sensor_max_x,
+						rmi4_data->sensor_max_y);
 				}
 			}
 		}
@@ -3051,8 +3133,10 @@ static int synaptics_dsx_gpio_configure(struct synaptics_rmi4_data *rmi4_data,
 					bool on)
 {
 	int retval = 0;
+	struct synaptics_rmi4_device_info *rmi;
 	const struct synaptics_dsx_board_data *bdata =
 			rmi4_data->hw_if->board_data;
+	rmi = &(rmi4_data->rmi4_mod_info);
 
 	if (on) {
 		if (gpio_is_valid(bdata->irq_gpio)) {
@@ -3113,12 +3197,22 @@ static int synaptics_dsx_gpio_configure(struct synaptics_rmi4_data *rmi4_data,
 				 * fails, only leakage current will be more but
 				 * functionality will not be affected.
 				 */
-				retval = gpio_direction_input(
-							bdata->reset_gpio);
-				if (retval) {
-					dev_err(rmi4_data->pdev->dev.parent,
-					"unable to set direction for gpio "
-					"[%d]\n", bdata->irq_gpio);
+				if (rmi->package_id ==
+						SYNA_S332U_PACKAGE_ID &&
+					rmi->package_id_rev ==
+						SYNA_S332U_PACKAGE_ID_REV) {
+					gpio_set_value(bdata->
+						reset_gpio,
+						0);
+				} else {
+					retval = gpio_direction_input(
+						bdata->reset_gpio);
+					if (retval) {
+						dev_err(rmi4_data->pdev->
+						dev.parent,
+						"unable to set direction for gpio [%d]\n",
+						bdata->irq_gpio);
+					}
 				}
 				gpio_free(bdata->reset_gpio);
 			}
@@ -3502,6 +3596,12 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
 	rmi4_data->fingers_on_2d = false;
 	rmi4_data->update_coords = true;
 
+	rmi4_data->write_buf = devm_kzalloc(&pdev->dev, I2C_WRITE_BUF_MAX_LEN,
+					GFP_KERNEL);
+	if (!rmi4_data->write_buf)
+		return -ENOMEM;
+	rmi4_data->write_buf_len = I2C_WRITE_BUF_MAX_LEN;
+
 	rmi4_data->irq_enable = synaptics_rmi4_irq_enable;
 	rmi4_data->reset_device = synaptics_rmi4_reset_device;
 
@@ -3576,6 +3676,7 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
 	}
 
 #ifdef CONFIG_FB
+	INIT_WORK(&rmi4_data->fb_notify_work, fb_notify_resume_work);
 	rmi4_data->fb_notif.notifier_call = fb_notifier_callback;
 
 	retval = fb_register_client(&rmi4_data->fb_notif);
@@ -3657,9 +3758,10 @@ err_create_debugfs_file:
 	debugfs_remove_recursive(rmi4_data->dir);
 err_create_debugfs_dir:
 	cancel_delayed_work_sync(&exp_data.work);
-	flush_workqueue(exp_data.workqueue);
-	destroy_workqueue(exp_data.workqueue);
-
+	if (exp_data.workqueue != NULL) {
+		flush_workqueue(exp_data.workqueue);
+		destroy_workqueue(exp_data.workqueue);
+	}
 	synaptics_rmi4_irq_enable(rmi4_data, false);
 	free_irq(rmi4_data->irq, rmi4_data);
 
@@ -3817,6 +3919,13 @@ static int synaptics_rmi4_remove(struct platform_device *pdev)
 }
 
 #if defined(CONFIG_FB)
+static void fb_notify_resume_work(struct work_struct *work)
+{
+	struct synaptics_rmi4_data *rmi4_data =
+		container_of(work, struct synaptics_rmi4_data, fb_notify_work);
+	synaptics_rmi4_resume(&(rmi4_data->input_dev->dev));
+}
+
 static int fb_notifier_callback(struct notifier_block *self,
 				unsigned long event, void *data)
 {
@@ -3826,16 +3935,31 @@ static int fb_notifier_callback(struct notifier_block *self,
 		container_of(self, struct synaptics_rmi4_data, fb_notif);
 
 	if (evdata && evdata->data && rmi4_data) {
-		if (event == FB_EARLY_EVENT_BLANK)
-			synaptics_secure_touch_stop(rmi4_data, 0);
-		else if (event == FB_EVENT_BLANK) {
-			blank = evdata->data;
-			if (*blank == FB_BLANK_UNBLANK)
-				synaptics_rmi4_resume(
-					&(rmi4_data->input_dev->dev));
-			else if (*blank == FB_BLANK_POWERDOWN)
-				synaptics_rmi4_suspend(
-					&(rmi4_data->input_dev->dev));
+		blank = evdata->data;
+		if (rmi4_data->hw_if->board_data->resume_in_workqueue) {
+			if (event == FB_EARLY_EVENT_BLANK) {
+				synaptics_secure_touch_stop(rmi4_data, 0);
+				if (*blank == FB_BLANK_UNBLANK)
+					schedule_work(
+						&(rmi4_data->fb_notify_work));
+			} else if (event == FB_EVENT_BLANK &&
+					*blank == FB_BLANK_POWERDOWN) {
+					flush_work(
+						&(rmi4_data->fb_notify_work));
+					synaptics_rmi4_suspend(
+						&(rmi4_data->input_dev->dev));
+			}
+		} else {
+			if (event == FB_EARLY_EVENT_BLANK) {
+				synaptics_secure_touch_stop(rmi4_data, 0);
+			} else if (event == FB_EVENT_BLANK) {
+				if (*blank == FB_BLANK_UNBLANK)
+					synaptics_rmi4_resume(
+						&(rmi4_data->input_dev->dev));
+				else if (*blank == FB_BLANK_POWERDOWN)
+					synaptics_rmi4_suspend(
+						&(rmi4_data->input_dev->dev));
+			}
 		}
 	}
 
@@ -4140,8 +4264,15 @@ static int synaptics_rmi4_resume(struct device *dev)
 	int retval;
 	struct synaptics_rmi4_exp_fhandler *exp_fhandler;
 	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+	struct synaptics_rmi4_device_info *rmi;
 	const struct synaptics_dsx_board_data *bdata =
 			rmi4_data->hw_if->board_data;
+
+	rmi = &(rmi4_data->rmi4_mod_info);
+	if (rmi->package_id == SYNA_S332U_PACKAGE_ID &&
+			rmi->package_id_rev == SYNA_S332U_PACKAGE_ID_REV) {
+		synaptics_rmi4_reset_device(rmi4_data);
+	}
 
 	if (rmi4_data->staying_awake)
 		return 0;

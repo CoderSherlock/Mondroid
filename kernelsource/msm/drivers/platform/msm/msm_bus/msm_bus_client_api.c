@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -68,6 +68,22 @@ int msm_bus_scale_client_update_request(uint32_t cl, unsigned int index)
 EXPORT_SYMBOL(msm_bus_scale_client_update_request);
 
 /**
+ * msm_bus_scale_client_update_context() - Update the context for a client
+ * cl: Handle to the client
+ * active_only: Bool to indicate dual context or active-only context.
+ * ctx_idx: Voting index to be used when switching contexts.
+ */
+int msm_bus_scale_client_update_context(uint32_t cl, bool active_only,
+							unsigned int ctx_idx)
+{
+	if (arb_ops.update_context)
+		return arb_ops.update_context(cl, active_only, ctx_idx);
+
+	return -EPROBE_DEFER;
+}
+EXPORT_SYMBOL(msm_bus_scale_client_update_context);
+
+/**
  * msm_bus_scale_unregister_client() - Unregister the client from the bus driver
  * @cl: Handle to the client
  */
@@ -85,8 +101,12 @@ EXPORT_SYMBOL(msm_bus_scale_unregister_client);
 /**
  * msm_bus_scale_register() - Register the clients with the msm bus
  * driver
- * @pdata: Platform data of the client, containing src, dest, ab, ib.
- * Return non-zero value in case of success, 0 in case of failure.
+ *
+ * @mas: Master ID
+ * @slv: Slave ID
+ * @name: descriptive name for this client
+ * @active_only: Whether or not this bandwidth vote should only be
+ *               effective while the application processor is active.
  *
  * Client data contains the vectors specifying arbitrated bandwidth (ab)
  * and instantaneous bandwidth (ib) requested between a particular
@@ -110,9 +130,9 @@ EXPORT_SYMBOL(msm_bus_scale_register);
  * msm_bus_scale_client_update_bw() - Update the request for bandwidth
  * from a particular client
  *
- * cl: Handle to the client
- * index: Index into the vector, to which the bw and clock values need to be
- * updated
+ * @cl: Handle to the client
+ * @ab: Arbitrated bandwidth being requested
+ * @ib: Instantaneous bandwidth being requested
  */
 int msm_bus_scale_update_bw(struct msm_bus_client_handle *cl, u64 ab, u64 ib)
 {
@@ -124,6 +144,28 @@ int msm_bus_scale_update_bw(struct msm_bus_client_handle *cl, u64 ab, u64 ib)
 	}
 }
 EXPORT_SYMBOL(msm_bus_scale_update_bw);
+
+/**
+ * msm_bus_scale_change_context() - Update the context for a particular client
+ * cl: Handle to the client
+ * act_ab: The average bandwidth(AB) in Bytes/s to be used in active context.
+ * act_ib: The instantaneous bandwidth(IB) in Bytes/s to be used in active
+ *         context.
+ * slp_ib: The average bandwidth(AB) in Bytes/s to be used in dual context.
+ * slp_ab: The instantaneous bandwidth(IB) in Bytes/s to be used in dual
+ *         context.
+ */
+int
+msm_bus_scale_update_bw_context(struct msm_bus_client_handle *cl, u64 act_ab,
+				u64 act_ib, u64 slp_ib, u64 slp_ab)
+{
+	if (arb_ops.update_context)
+		return arb_ops.update_bw_context(cl, act_ab, act_ib,
+							slp_ab, slp_ib);
+
+	return -EPROBE_DEFER;
+}
+EXPORT_SYMBOL(msm_bus_scale_update_bw_context);
 
 /**
  * msm_bus_scale_unregister() - Update the request for bandwidth

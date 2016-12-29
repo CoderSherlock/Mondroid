@@ -44,6 +44,13 @@
 #include <sound/compress_offload.h>
 #include <sound/compress_driver.h>
 
+/* struct snd_compr_codec_caps overflows the ioctl bit size for some
+ * architectures, so we need to disable the relevant ioctls.
+ */
+#if _IOC_SIZEBITS < 14
+#define COMPR_CODEC_CAPS_OVERFLOW
+#endif
+
 /* TODO:
  * - add substream support for multiple devices in case of
  *	SND_DYNAMIC_MINORS is not used
@@ -148,8 +155,7 @@ static int snd_compr_free(struct inode *inode, struct file *f)
 	case SNDRV_PCM_STATE_RUNNING:
 	case SNDRV_PCM_STATE_DRAINING:
 	case SNDRV_PCM_STATE_PAUSED:
-		data->stream.ops->trigger(&data->stream,
-					SNDRV_PCM_TRIGGER_STOP);
+		data->stream.ops->trigger(&data->stream, SNDRV_PCM_TRIGGER_STOP);
 		break;
 	default:
 		break;
@@ -392,8 +398,7 @@ static unsigned int snd_compr_poll(struct file *f, poll_table *wait)
 		return -EFAULT;
 
 	mutex_lock(&stream->device->lock);
-	if (stream->runtime->state == SNDRV_PCM_STATE_PAUSED ||
-			stream->runtime->state == SNDRV_PCM_STATE_OPEN) {
+	if (stream->runtime->state == SNDRV_PCM_STATE_OPEN) {
 		retval = -EBADFD;
 		goto out;
 	}
@@ -447,6 +452,7 @@ out:
 	return retval;
 }
 
+#ifndef COMPR_CODEC_CAPS_OVERFLOW
 static int
 snd_compr_get_codec_caps(struct snd_compr_stream *stream, unsigned long arg)
 {
@@ -470,6 +476,7 @@ out:
 	kfree(caps);
 	return retval;
 }
+#endif /* !COMPR_CODEC_CAPS_OVERFLOW */
 
 /* revisit this with snd_pcm_preallocate_xxx */
 static int snd_compr_allocate_buffer(struct snd_compr_stream *stream,
@@ -500,7 +507,7 @@ static int snd_compress_check_input(struct snd_compr_params *params)
 {
 	/* first let's check the buffer parameter's */
 	if (params->buffer.fragment_size == 0 ||
-			params->buffer.fragments > INT_MAX / params->buffer.fragment_size)
+	    params->buffer.fragments > U32_MAX / params->buffer.fragment_size)
 		return -EINVAL;
 
 	/* now codec parameters */
@@ -715,6 +722,7 @@ static int snd_compr_drain(struct snd_compr_stream *stream)
 		stream->runtime->state = SNDRV_PCM_STATE_DRAINING;
 		wake_up(&stream->runtime->sleep);
 	}
+
 ret:
 	mutex_unlock(&stream->device->lock);
 	return retval;
@@ -763,6 +771,76 @@ static int snd_compr_partial_drain(struct snd_compr_stream *stream)
 	return retval;
 }
 
+static int snd_compr_set_next_track_param(struct snd_compr_stream *stream,
+		unsigned long arg)
+{
+	union snd_codec_options codec_options;
+	int retval;
+
+	/* set next track params when stream is running or has been setup */
+	if (stream->runtime->state != SNDRV_PCM_STATE_SETUP &&
+			stream->runtime->state != SNDRV_PCM_STATE_RUNNING)
+		return -EPERM;
+
+	if (copy_from_user(&codec_options, (void __user *)arg,
+				sizeof(codec_options)))
+		return -EFAULT;
+
+	retval = stream->ops->set_next_track_param(stream, &codec_options);
+	return retval;
+}
+
+//HTC_AUD_START
+static int snd_compr_effect(struct snd_compr_stream *stream, unsigned long arg)
+{
+   int rc = 0;
+   struct snd_compr_runtime *runtime = stream->runtime;
+   void *prtd = runtime->private_data;
+   struct dsp_effect_param q6_param;
+   void *payload;
+
+   pr_aud_info("compress_offload snd_compr_effect +++\n");
+   pr_aud_info("[%p] SNDRV_COMPRESS_ENABLE_EFFECT\n", __func__);
+   if (copy_from_user(&q6_param, (void *) arg,
+               sizeof(q6_param))) {
+       pr_err("[%p] %s: copy param from user failed\n",
+           prtd, __func__);
+       return -EFAULT;
+   }
+   if (q6_param.payload_size <= 0 ||
+       (q6_param.effect_type != 0 &&
+        q6_param.effect_type != 1)) {
+       pr_err("[%p] %s: unsupported param: %d, 0x%x, 0x%x, %d\n",
+           prtd, __func__, q6_param.effect_type,
+           q6_param.module_id, q6_param.param_id,
+           q6_param.payload_size);
+       return -EINVAL;
+   }
+   payload = kzalloc(q6_param.payload_size, GFP_KERNEL);
+   if (!payload) {
+       pr_err("[%p] %s: failed to allocate memory\n",
+           prtd, __func__);
+       return -ENOMEM;
+   }
+   if (copy_from_user(payload, (void *) (arg + sizeof(q6_param)),
+       q6_param.payload_size)) {
+       pr_err("[%p] %s: copy payload from user failed\n",
+           prtd, __func__);
+       kfree(payload);
+       return -EFAULT;
+   }
+   if (q6_param.effect_type == 0) { /* POPP */
+       rc = stream->ops->config_effect(stream, (void *)&q6_param, payload);
+       if (rc) {
+           pr_err("[%p] %s: config_effect error %d\n", prtd, __func__, rc);
+       }
+   }
+   pr_aud_info("compress_offload snd_compr_effect ---\n");
+   kfree(payload);
+   return 0;
+}
+//HTC_AUD_END
+
 static int snd_compress_simple_ioctls(struct file *file,
 				struct snd_compr_stream *stream,
 				unsigned int cmd, unsigned long arg)
@@ -779,10 +857,11 @@ static int snd_compress_simple_ioctls(struct file *file,
 		retval = snd_compr_get_caps(stream, arg);
 		break;
 
+#ifndef COMPR_CODEC_CAPS_OVERFLOW
 	case _IOC_NR(SNDRV_COMPRESS_GET_CODEC_CAPS):
 		retval = snd_compr_get_codec_caps(stream, arg);
 		break;
-
+#endif
 
 	case _IOC_NR(SNDRV_COMPRESS_TSTAMP):
 		retval = snd_compr_tstamp(stream, arg);
@@ -859,6 +938,16 @@ static long snd_compr_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		retval = snd_compr_next_track(stream);
 		break;
 
+	case _IOC_NR(SNDRV_COMPRESS_SET_NEXT_TRACK_PARAM):
+		retval = snd_compr_set_next_track_param(stream, arg);
+		break;
+
+//HTC_AUD_START
+	case _IOC_NR(SNDRV_COMPRESS_ENABLE_EFFECT):
+		retval = snd_compr_effect(stream, arg);
+		break;
+//HTC_AUD_END
+
 	default:
 		mutex_unlock(&stream->device->lock);
 		return snd_compress_simple_ioctls(f, stream, cmd, arg);
@@ -891,7 +980,7 @@ static int snd_compress_dev_register(struct snd_device *device)
 		return -EBADFD;
 	compr = device->device_data;
 
-	sprintf(str, "comprC%iD%i", compr->card->number, compr->device);
+	snprintf(str, sizeof(str), "comprC%iD%i", compr->card->number, compr->device);//HTC_AUD klocwork
 	pr_debug("reg %s for device %s, direction %d\n", str, compr->name,
 			compr->direction);
 	/* register compressed device */

@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -276,6 +276,10 @@ static int of_batterydata_load_battery_data(struct device_node *node,
 			"max-voltage-uv", node, rc, true);
 	OF_PROP_READ(batt_data->cutoff_uv, "v-cutoff-uv", node, rc, true);
 	OF_PROP_READ(batt_data->iterm_ua, "chg-term-ua", node, rc, true);
+	OF_PROP_READ(batt_data->fastchg_current_ma,
+			"fastchg-current-ma", node, rc, true);
+	OF_PROP_READ(batt_data->fg_cc_cv_threshold_mv,
+			"fg-cc-cv-threshold-mv", node, rc, true);
 
 	batt_data->batt_id_kohm = best_id_kohm;
 
@@ -306,6 +310,50 @@ static int64_t of_batterydata_convert_battery_id_kohm(int batt_id_uv,
 	return resistor_value_kohm;
 }
 
+#ifdef CONFIG_HTC_BATT
+struct device_node *of_batterydata_get_best_profile(
+		const struct device_node *batterydata_container_node,
+		const char *psy_name,  const char  *batt_type)
+{
+	struct device_node *cur_node = NULL;
+	struct power_supply *psy = NULL;
+	union power_supply_propval ret = {0, };
+	int rc = 0, id_raw_min = 0, id_raw_max = 0, htc_batt_id_ohm = 0;
+
+	psy = power_supply_get_by_name(psy_name);
+	if (!psy) {
+		pr_err("%s supply not found. defer\n", psy_name);
+		return ERR_PTR(-EPROBE_DEFER);
+	}
+
+	rc = psy->get_property(psy, POWER_SUPPLY_PROP_RESISTANCE_ID, &ret);
+	if (rc) {
+		pr_err("failed to retrieve resistance value rc=%d\n", rc);
+		return ERR_PTR(-ENOSYS);
+	}
+
+	htc_batt_id_ohm = ret.intval;
+
+	for_each_child_of_node(batterydata_container_node, cur_node) {
+		rc = of_property_read_u32(cur_node, "htc,id_raw_min", &id_raw_min);
+		if (rc)
+			pr_err("htc,id_raw_min missing in dt: %s\n", cur_node->name);
+
+		rc = of_property_read_u32(cur_node, "htc,id_raw_max", &id_raw_max);
+		if (rc)
+			pr_err("htc,id_raw_max missing in dt: %s\n", cur_node->name);
+
+		pr_info("Find batterydata path: %s, id_ohm=%d, raw_min=%d, raw_max=%d.\n",
+					cur_node->name, htc_batt_id_ohm, id_raw_min, id_raw_max);
+		if (!rc) {
+			if ((id_raw_min <= htc_batt_id_ohm) && (htc_batt_id_ohm <= id_raw_max)) {
+				return cur_node;
+			}
+		}
+	}
+	return NULL;
+}
+#else
 struct device_node *of_batterydata_get_best_profile(
 		const struct device_node *batterydata_container_node,
 		const char *psy_name,  const char  *batt_type)
@@ -405,7 +453,7 @@ struct device_node *of_batterydata_get_best_profile(
 
 	return best_node;
 }
-
+#endif /* CONFIG_HTC_BATT */
 int of_batterydata_read_data(struct device_node *batterydata_container_node,
 				struct bms_battery_data *batt_data,
 				int batt_id_uv)

@@ -39,6 +39,9 @@ Parent node optional properties:
 - qcom,cool-bat-decidegc:		Cool battery temperature in decidegC.
 - qcom,hot-bat-decidegc:		Hot battery temperature in decidegC.
 - qcom,cold-bat-decidegc:		Cold battery temperature in decidegC.
+- qcom,cold-hot-jeita-hysteresis:	A tuple of 2. Index[0] is cold
+					hysteresis and index[1] is hot
+					hysterisis(in decidegC).
 - qcom,ext-sense-type:			Current sense channel used by the FG.
 					Set this to use external rsense.
 - qcom,thermal-coefficients:		Byte array of thermal coefficients for
@@ -58,6 +61,10 @@ Parent node optional properties:
 					in milliAmpere.
 - qcom,use-otp-profile:			Specify this flag to avoid RAM loading
 					any battery profile.
+- qcom,sw-rbias-control:		Boolean property which defines whether
+					the Rbias needs to be controlled by
+					software. If this is not set, it will
+					be controlled by hardware (default).
 - qcom,fg-iterm-ma:			Battery current at which the fuel gauge
 					will try to scale 100% towards. When
 					the charge current goes above this, the
@@ -95,10 +102,6 @@ Parent node optional properties:
 					above 3-4, some period workarounds may
 					not function well, so it's best to
 					leave this at 1 or 2%.
-- qcom,fg-soc-max:			The percent SoC threshold at which the
-					HIGH_SOC interrupt will be asserted.
-- qcom,fg-soc-min:			The percent SoC threshold at which the
-					LOW_SOC interrupt will be asserted.
 - qcom,fg-vbatt-low-threshold:		Voltage (in mV) which upon set will be
 					used for configuring the low battery
 					voltage threshold. Interrupt will be
@@ -106,6 +109,10 @@ Parent node optional properties:
 					this. If this property is not specified,
 					low battery voltage threshold will be
 					configured to 4200 mV.
+- qcom,fg-rconn-mohm:			Battery connector resistance (Rconn) in
+					milliohms. If Rconn is specified, then
+					Rslow values will be updated to account
+					it for an accurate ESR.
 - qcom,cycle-counter-en:		Boolean property which enables the cycle
 					counter feature. If this property is
 					present, then the following properties
@@ -140,6 +147,14 @@ Parent node optional properties:
 					battery voltage shadow and the current
 					predicted voltage in uV to initiate
 					capacity learning.
+- qcom,cl-max-limit-deciperc:		The maximum percent that the capacity
+					cannot go above during any capacity
+					learning cycle. This property is in the
+					unit of .1% increments.
+- qcom,cl-min-limit-deciperc:		The minimum percent that the capacity
+					cannot go below during any capacity
+					learning cycle. This property is in the
+					unit of .1% increments.
 - qcom,capacity-estimation-on:		A boolean property to have the fuel
 					gauge driver attempt to estimate the
 					battery capacity using battery
@@ -159,6 +174,105 @@ Parent node optional properties:
 					if "qcom,autoadjust-vfloat" property is
 					specified in the charger driver to
 					ensure a proper operation.
+- qcom,bad-battery-detection-enable:	A boolean property to enable the fuel
+					gauge driver to detect the damaged battery
+					when the safety-timer expires by using the
+					coulomb count.
+- qcom,fg-therm-delay-us:		The time in microseconds to delay battery
+					thermistor biasing.
+- qcom,esr-pulse-tuning-en:		A boolean property to enable ESR pulse
+					tuning feature. If this is enabled,
+					ESR pulse extraction will be disabled
+					when state of charge (SOC) is less than
+					2%. It will be enabled back when SOC
+					gets above 2%. In addition, for SOC
+					between 2% and 5%, ESR pulse timing
+					settings will be different from default.
+					Once SOC crosses 5%, ESR pulse timings
+					will be restored back to default.
+- qcom,fg-control-slope-limiter:	A boolean property to specify if SOC
+					slope limiter coefficients needs to
+					be modified based on charging status
+					and battery temperature threshold.
+- qcom,fg-slope-limit-temp-threshold:	Temperature threshold in decidegC used
+					for applying the slope coefficient based
+					on charging status and battery
+					temperature. If this property is not
+					specified, a default value of 100 (10C)
+					will be applied by default.
+- qcom,fg-slope-limit-low-temp-chg:	When the temperature goes below the
+					specified temperature threshold and
+					battery is charging, slope coefficient
+					specified with this property will be
+					applied. If this property is not
+					specified, a default value of 45 will be
+					applied.
+- qcom,fg-slope-limit-low-temp-dischg:	Same as "qcom,fg-slope-limit-low-temp-chg"
+					except this is when the battery is
+					discharging.
+- qcom,fg-slope-limit-high-temp-chg:	When the temperature goes above the
+					specified temperature threshold and
+					battery is charging, slope coefficient
+					specified with this property will be
+					applied. If this property is not
+					specified, a default value of 2 will be
+					applied.
+- qcom,fg-slope-limit-high-temp-dischg:	Same as "qcom,fg-slope-limit-high-temp-chg"
+					except this is when the battery is
+					discharging.
+- qcom,fg-dischg-voltage-gain-ctrl:	A boolean property to specify if the
+					voltage gain needs to be modified
+					during discharging based on monotonic
+					soc.
+- qcom,fg-dischg-voltage-gain-soc:	Array of monotonic SOC threshold values
+					to change the voltage gain settings
+					during discharge. This should be defined
+					in the ascending order and in the range
+					of 0-100. Array limit is set to 3.
+					If qcom,fg-dischg-voltage-gain-ctrl is
+					set, then this property should be
+					specified to apply the gain settings.
+- qcom,fg-dischg-med-voltage-gain:	Array of voltage gain values that needs
+					to be applied to medC voltage gain when
+					the monotonic SOC goes below the SOC
+					threshold specified under
+					qcom,fg-dischg-voltage-gain-soc. Array
+					limit is set to 3.
+					If qcom,fg-dischg-voltage-gain-ctrl is
+					set, then this property should be
+					specified to apply the gain setting.
+- qcom,fg-dischg-high-voltage-gain:	Array of voltage gain values that needs
+					to be applied to highC voltage gain when
+					the monotonic SOC goes below the SOC
+					threshold specified under
+					qcom,fg-dischg-voltage-gain-soc. Array
+					limit is set to 3.
+					If qcom,fg-dischg-voltage-gain-ctrl is
+					set, then this property should be
+					specified to apply the gain setting.
+- qcom,fg-use-vbat-low-empty-soc:	A boolean property to specify whether
+					vbatt-low interrupt is used to handle
+					empty battery condition. If this is
+					not specified, empty battery condition
+					is detected by empty-soc interrupt.
+- qcom,fg-batt-temp-low-limit:		Battery temperature (in decidegC) low
+					limit  which will be used to validate
+					the battery temperature reading from FG.
+					If the battery temperature goes below
+					this limit, last read good temperature
+					will be notified to userspace. If this
+					limit is not specified, then the
+					default limit would be -60C.
+- qcom,fg-batt-temp-high-limit:		Battery temperature (in decidegC) high
+					limit  which will be used to validate
+					the battery temperature reading from FG.
+					If the battery temperature goes above
+					this limit, last read good temperature
+					will be notified to userspace. If this
+					limit is not specified, then the
+					default limit would be 150C.
+- qcom,fg-cc-soc-limit-pct:		Percentage of CC_SOC before resetting
+					FG and restore the full CC_SOC value.
 
 qcom,fg-soc node required properties:
 - reg : offset and length of the PMIC peripheral register map.
@@ -174,7 +288,7 @@ qcom,fg-soc node required properties:
 		4: delta-soc
 		5: first-est-done
 		6: sw-fallbk-ocv
-		7: sw-fallbk-new-battrt-sts
+		7: sw-fallbk-new-batt
 
 qcom,fg-memif node required properties:
 - reg : offset and length of the PMIC peripheral register map.
@@ -212,8 +326,7 @@ pmi8994_fg: qcom,fg {
 					"delta-soc",
 					"first-est-done",
 					"sw-fallbk-ocv",
-					"sw-fallbk-new-battrt-sts",
-					"fg-soc-irq-count";
+					"sw-fallbk-new-batt";
 	};
 
 	qcom,fg-batt@4100 {
@@ -252,5 +365,7 @@ pmi8994_fg: qcom,fg {
 
 		interrupt-names =	"mem-avail",
 					"data-rcvry-sug";
+
+		qcom,cold-hot-jeita-hysteresis = <30 50>;
 	};
 };

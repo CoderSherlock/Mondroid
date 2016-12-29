@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -18,11 +18,15 @@
 #include <linux/workqueue.h>
 #include <linux/ratelimit.h>
 #include <linux/platform_device.h>
+#ifdef USB_QCOM_DIAG_BRIDGE
 #include <linux/smux.h>
+#endif
 #include "diag_mux.h"
 #include "diagfwd_bridge.h"
+#ifdef USB_QCOM_DIAG_BRIDGE
 #include "diagfwd_hsic.h"
 #include "diagfwd_smux.h"
+#endif
 #include "diagfwd_mhi.h"
 #include "diag_dci.h"
 
@@ -77,7 +81,8 @@ static int diagfwd_bridge_mux_connect(int id, int mode)
 {
 	if (id < 0 || id >= NUM_REMOTE_DEV)
 		return -EINVAL;
-	bridge_info[id].dev_ops->open(bridge_info[id].ctxt);
+	if (bridge_info[id].dev_ops && bridge_info[id].dev_ops->open)
+		bridge_info[id].dev_ops->open(bridge_info[id].ctxt);
 	return 0;
 }
 
@@ -85,7 +90,8 @@ static int diagfwd_bridge_mux_disconnect(int id, int mode)
 {
 	if (id < 0 || id >= NUM_REMOTE_DEV)
 		return -EINVAL;
-	bridge_info[id].dev_ops->close(bridge_info[id].ctxt);
+	if (bridge_info[id].dev_ops && bridge_info[id].dev_ops->close)
+		bridge_info[id].dev_ops->close(bridge_info[id].ctxt);
 	return 0;
 }
 
@@ -102,7 +108,8 @@ static int diagfwd_bridge_mux_write_done(unsigned char *buf, int len,
 	if (id < 0 || id >= NUM_REMOTE_DEV)
 		return -EINVAL;
 	ch = &bridge_info[id];
-	ch->dev_ops->fwd_complete(ch->ctxt, buf, len, 0);
+	if (ch->dev_ops && ch->dev_ops->fwd_complete)
+		ch->dev_ops->fwd_complete(ch->ctxt, buf, len, 0);
 	return 0;
 }
 
@@ -122,8 +129,10 @@ static void bridge_dci_read_work_fn(struct work_struct *work)
 		return;
 	diag_process_remote_dci_read_data(ch->id, ch->dci_read_buf,
 					  ch->dci_read_len);
-	ch->dev_ops->fwd_complete(ch->ctxt, ch->dci_read_ptr,
-				  ch->dci_read_len, 0);
+	if (ch->dev_ops && ch->dev_ops->fwd_complete) {
+		ch->dev_ops->fwd_complete(ch->ctxt, ch->dci_read_ptr,
+					  ch->dci_read_len, 0);
+	}
 }
 
 int diagfwd_bridge_register(int id, int ctxt, struct diag_remote_dev_ops *ops)
@@ -133,7 +142,7 @@ int diagfwd_bridge_register(int id, int ctxt, struct diag_remote_dev_ops *ops)
 	char wq_name[DIAG_BRIDGE_NAME_SZ + 10];
 
 	if (!ops) {
-		pr_err("diag: Invalid pointers ops: %p ctxt: %d\n", ops, ctxt);
+		pr_err("diag: Invalid pointers ops: %pK ctxt: %d\n", ops, ctxt);
 		return -EINVAL;
 	}
 
@@ -200,7 +209,8 @@ int diag_remote_dev_read_done(int id, unsigned char *buf, int len)
 	ch = &bridge_info[id];
 	if (ch->type == DIAG_DATA_TYPE) {
 		err = diag_mux_write(BRIDGE_TO_MUX(id), buf, len, id);
-		ch->dev_ops->queue_read(ch->ctxt);
+		if (ch->dev_ops && ch->dev_ops->queue_read)
+			ch->dev_ops->queue_read(ch->ctxt);
 		return err;
 	}
 	/*
@@ -227,9 +237,14 @@ int diag_remote_dev_write_done(int id, unsigned char *buf, int len, int ctxt)
 		return -EINVAL;
 
 	if (bridge_info[id].type == DIAG_DATA_TYPE) {
-		if (buf == driver->cb_buf)
-			driver->cb_buf_len = 0;
-		if (buf == driver->user_space_data_buf)
+		if (buf == driver->hdlc_encode_buf)
+			driver->hdlc_encode_buf_len = 0;
+		/*
+		 * For remote processor, the token offset is stripped from the
+		 * buffer. Account for the token offset while checking against
+		 * the original buffer
+		 */
+		if (buf == (driver->user_space_data_buf + sizeof(int)))
 			driver->user_space_data_busy = 0;
 		err = diag_mux_queue_read(BRIDGE_TO_MUX(id));
 	} else {
@@ -245,9 +260,11 @@ int diagfwd_bridge_init()
 	err = diag_mdm_init();
 	if (err)
 		goto fail;
+	#ifdef USB_QCOM_DIAG_BRIDGE
 	err = diag_smux_init();
 	if (err)
 		goto fail;
+	#endif
 	return 0;
 
 fail:
@@ -257,23 +274,30 @@ fail:
 
 void diagfwd_bridge_exit()
 {
+	#ifdef USB_QCOM_DIAG_BRIDGE
 	diag_hsic_exit();
 	diag_smux_exit();
+	#endif
 }
 
 int diagfwd_bridge_close(int id)
 {
 	if (id < 0 || id >= NUM_REMOTE_DEV)
 		return -EINVAL;
-	return bridge_info[id].dev_ops->close(bridge_info[id].ctxt);
+	if (bridge_info[id].dev_ops && bridge_info[id].dev_ops->close)
+		return bridge_info[id].dev_ops->close(bridge_info[id].ctxt);
+	return 0;
 }
 
 int diagfwd_bridge_write(int id, unsigned char *buf, int len)
 {
 	if (id < 0 || id >= NUM_REMOTE_DEV)
 		return -EINVAL;
-	return bridge_info[id].dev_ops->write(bridge_info[id].ctxt,
-					      buf, len, 0);
+	if (bridge_info[id].dev_ops && bridge_info[id].dev_ops->write) {
+		return bridge_info[id].dev_ops->write(bridge_info[id].ctxt,
+						      buf, len, 0);
+	}
+	return 0;
 }
 
 uint16_t diag_get_remote_device_mask()
@@ -282,9 +306,10 @@ uint16_t diag_get_remote_device_mask()
 	uint16_t remote_dev = 0;
 
 	for (i = 0; i < NUM_REMOTE_DEV; i++) {
-		if (bridge_info[i].inited)
+		if (bridge_info[i].inited &&
+		    bridge_info[i].type == DIAG_DATA_TYPE) {
 			remote_dev |= 1 << i;
-
+		}
 	}
 
 	return remote_dev;

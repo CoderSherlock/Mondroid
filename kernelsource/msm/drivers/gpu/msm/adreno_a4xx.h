@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,31 +14,49 @@
 #ifndef _ADRENO_A4XX_H_
 #define _ADRENO_A4XX_H_
 
-int a4xx_perfcounter_enable_vbif(struct adreno_device *adreno_dev,
-			unsigned int counter,
-			unsigned int countable);
+#include "a4xx_reg.h"
 
-void a4xx_perfcounter_disable_vbif(struct adreno_device *adreno_dev,
-			unsigned int counter);
+#define A4XX_IRQ_FLAGS \
+	{ BIT(A4XX_INT_RBBM_GPU_IDLE), "RBBM_GPU_IDLE" }, \
+	{ BIT(A4XX_INT_RBBM_REG_TIMEOUT), "RBBM_REG_TIMEOUT" }, \
+	{ BIT(A4XX_INT_RBBM_ME_MS_TIMEOUT), "RBBM_ME_MS_TIMEOUT" }, \
+	{ BIT(A4XX_INT_RBBM_PFP_MS_TIMEOUT), "RBBM_PFP_MS_TIMEOUT" }, \
+	{ BIT(A4XX_INT_RBBM_ETS_MS_TIMEOUT), "RBBM_ETS_MS_TIMEOUT" }, \
+	{ BIT(A4XX_INT_RBBM_ASYNC_OVERFLOW), "RBBM_ASYNC_OVERFLOW" }, \
+	{ BIT(A4XX_INT_RBBM_GPC_ERR), "RBBM_GPC_ERR" }, \
+	{ BIT(A4XX_INT_CP_SW), "CP_SW" }, \
+	{ BIT(A4XX_INT_CP_OPCODE_ERROR), "CP_OPCODE_ERROR" }, \
+	{ BIT(A4XX_INT_CP_RESERVED_BIT_ERROR), "CP_RESERVED_BIT_ERROR" }, \
+	{ BIT(A4XX_INT_CP_HW_FAULT), "CP_HW_FAULT" }, \
+	{ BIT(A4XX_INT_CP_DMA), "CP_DMA" }, \
+	{ BIT(A4XX_INT_CP_IB2_INT), "CP_IB2_INT" }, \
+	{ BIT(A4XX_INT_CP_IB1_INT), "CP_IB1_INT" }, \
+	{ BIT(A4XX_INT_CP_RB_INT), "CP_RB_INT" }, \
+	{ BIT(A4XX_INT_CP_REG_PROTECT_FAULT), "CP_REG_PROTECT_FAULT" }, \
+	{ BIT(A4XX_INT_CP_RB_DONE_TS), "CP_RB_DONE_TS" }, \
+	{ BIT(A4XX_INT_CP_VS_DONE_TS), "CP_VS_DONE_TS" }, \
+	{ BIT(A4XX_INT_CP_PS_DONE_TS), "CP_PS_DONE_TS" }, \
+	{ BIT(A4XX_INT_CACHE_FLUSH_TS), "CACHE_FLUSH_TS" }, \
+	{ BIT(A4XX_INT_CP_AHB_ERROR_HALT), "CP_AHB_ERROR_HALT" }, \
+	{ BIT(A4XX_INT_RBBM_ATB_BUS_OVERFLOW), "RBBM_ATB_BUS_OVERFLOW" }, \
+	{ BIT(A4XX_INT_MISC_HANG_DETECT), "MISC_HANG_DETECT" }, \
+	{ BIT(A4XX_INT_UCHE_OOB_ACCESS), "UCHE_OOB_ACCESS" }, \
+	{ BIT(A4XX_INT_RBBM_DPM_CALC_ERR), "RBBM_DPM_CALC_ERR" }, \
+	{ BIT(A4XX_INT_RBBM_DPM_EPOCH_ERR), "RBBM_DPM_CALC_ERR" }, \
+	{ BIT(A4XX_INT_RBBM_DPM_THERMAL_YELLOW_ERR), \
+		"RBBM_DPM_THERMAL_YELLOW_ERR" }, \
+	{ BIT(A4XX_INT_RBBM_DPM_THERMAL_RED_ERR), "RBBM_DPM_THERMAL_RED_ERR" }
 
-uint64_t a4xx_perfcounter_read_vbif(struct adreno_device *adreno_dev,
-			unsigned int counter);
+unsigned int a4xx_preemption_pre_ibsubmit(struct adreno_device *adreno_dev,
+			struct adreno_ringbuffer *rb,
+			unsigned int *cmds,
+			struct kgsl_context *context);
 
-int a4xx_perfcounter_enable_vbif_pwr(struct adreno_device *adreno_dev,
-			unsigned int counter);
+void a4xx_preemption_schedule(struct adreno_device *adreno_dev);
 
-void a4xx_perfcounter_disable_vbif_pwr(struct adreno_device *adreno_dev,
-			unsigned int counter);
-
-uint64_t a4xx_perfcounter_read_vbif_pwr(struct adreno_device *adreno_dev,
-			unsigned int counter);
-
-uint64_t a4xx_alwayson_counter_read(struct adreno_device *adreno_dev);
+int a4xx_preemption_init(struct adreno_device *adreno_dev);
 
 void a4xx_snapshot(struct adreno_device *adreno_dev,
 		struct kgsl_snapshot *snapshot);
-
-void a4xx_rbbm_debug_bus_read(struct kgsl_device *device,
-	unsigned int block_id, unsigned int index, unsigned int *val);
 
 #endif

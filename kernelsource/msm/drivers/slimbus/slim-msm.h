@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -71,9 +71,12 @@
 #define DEF_RETRY_MS	10
 #define MSM_CONCUR_MSG	8
 #define SAT_CONCUR_MSG	8
+
 #define DEF_WATERMARK	(8 << 1)
-#define DEF_ALIGN	0
+#define DEF_ALIGN_LSB	0
+#define DEF_ALIGN_MSB	(1 << 7)
 #define DEF_PACK	(1 << 6)
+#define DEF_NO_PACK	0
 #define ENABLE_PORT	1
 
 #define DEF_BLKSZ	0
@@ -91,6 +94,9 @@
 #define SLIMBUS_QMI_SVC_ID 0x0301
 #define SLIMBUS_QMI_SVC_V1 1
 #define SLIMBUS_QMI_INS_ID 0
+
+/* QMI response timeout of 500ms */
+#define SLIM_QMI_RESP_TOUT 1000
 
 #define PGD_THIS_EE(r, v) ((v) ? PGD_THIS_EE_V2(r) : PGD_THIS_EE_V1(r))
 #define PGD_PORT(r, p, v) ((v) ? PGD_PORT_V2(r, p) : PGD_PORT_V1(r, p))
@@ -194,6 +200,16 @@ struct msm_slim_sps_bam {
 	int			irq;
 };
 
+/*
+ * struct slim_pshpull_parm: Structure to store push pull protocol parameters
+ * @num_samples: Number of samples in a period
+ * @rpt_period: Repeat period value
+ */
+struct msm_slim_pshpull_parm {
+	int		num_samples;
+	int		rpt_period;
+};
+
 struct msm_slim_endp {
 	struct sps_pipe			*sps;
 	struct sps_connect		config;
@@ -201,6 +217,7 @@ struct msm_slim_endp {
 	struct sps_mem_buffer		buf;
 	bool				connected;
 	int				port_b;
+	struct msm_slim_pshpull_parm	psh_pull;
 };
 
 struct msm_slim_qmi {
@@ -225,6 +242,16 @@ struct msm_slim_ss {
 struct msm_slim_pdata {
 	u32 apps_pipes;
 	u32 eapc;
+};
+
+struct msm_slim_bulk_wr {
+	dma_addr_t	wr_dma;
+	void		*base;
+	int		size;
+	int		buf_sz;
+	int		(*cb)(void *ctx, int err);
+	void		*ctx;
+	bool		in_progress;
 };
 
 struct msm_slim_ctrl {
@@ -257,6 +284,7 @@ struct msm_slim_ctrl {
 	struct clk		*rclk;
 	struct clk		*hclk;
 	struct mutex		tx_lock;
+	struct mutex		ssr_lock;
 	spinlock_t		tx_buf_lock;
 	u8			pgdla;
 	enum msm_slim_msgq	use_rx_msgqs;
@@ -273,6 +301,7 @@ struct msm_slim_ctrl {
 	struct msm_slim_pdata	pdata;
 	struct msm_slim_ss	ext_mdm;
 	struct msm_slim_ss	dsp;
+	struct msm_slim_bulk_wr	bulk;
 	int			default_ipc_log_mask;
 	int			ipc_log_mask;
 	bool			sysfs_created;
@@ -371,7 +400,7 @@ void msm_slim_put_ctrl(struct msm_slim_ctrl *dev);
 irqreturn_t msm_slim_port_irq_handler(struct msm_slim_ctrl *dev, u32 pstat);
 int msm_slim_init_endpoint(struct msm_slim_ctrl *dev, struct msm_slim_endp *ep);
 void msm_slim_free_endpoint(struct msm_slim_endp *ep);
-void msm_hw_set_port(struct msm_slim_ctrl *dev, u8 pn);
+void msm_hw_set_port(struct msm_slim_ctrl *dev, u8 pipenum, u8 portnum);
 int msm_alloc_port(struct slim_controller *ctrl, u8 pn);
 void msm_dealloc_port(struct slim_controller *ctrl, u8 pn);
 int msm_slim_connect_pipe_port(struct msm_slim_ctrl *dev, u8 pn);
@@ -394,6 +423,10 @@ int msm_slim_connect_endp(struct msm_slim_ctrl *dev,
 void msm_slim_disconnect_endp(struct msm_slim_ctrl *dev,
 					struct msm_slim_endp *endpoint,
 					enum msm_slim_msgq *msgq_flag);
+void msm_slim_deinit_ep(struct msm_slim_ctrl *dev,
+				struct msm_slim_endp *endpoint,
+				enum msm_slim_msgq *msgq_flag);
+
 void msm_slim_qmi_exit(struct msm_slim_ctrl *dev);
 int msm_slim_qmi_init(struct msm_slim_ctrl *dev, bool apps_is_master);
 int msm_slim_qmi_power_request(struct msm_slim_ctrl *dev, bool active);

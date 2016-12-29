@@ -30,17 +30,9 @@ choice
 		help
 			Use this option if your HW has Transport Stream Packet Processor (TSPP) version1 support
 
-	config DVB_MPQ_TSPP2
-		bool "TSPPv2 plugin"
-		depends on TSPP2
+	config DVB_MPQ_SW
+		bool "Software plugin"
 		help
-			Use this option if your HW has Transport Stream Packet Processor (TSPP) version2 support.
-			TSPP2 performs the following operations in HW:
-			- TS packet analysis
-			- PID filtering
-			- PES assembly
-			- Indexing of video
-			- Crytographic operations
-
+			Use this option if your HW does not have any TSPP hardware support
 endchoice
 

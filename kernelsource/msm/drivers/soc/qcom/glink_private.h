@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -12,11 +12,23 @@
 #ifndef _SOC_QCOM_GLINK_PRIVATE_H_
 #define _SOC_QCOM_GLINK_PRIVATE_H_
 
+#include <linux/bug.h>
+#include <linux/completion.h>
+#include <linux/dcache.h>
 #include <linux/ipc_logging.h>
+#include <linux/kernel.h>
+#include <linux/kref.h>
+#include <linux/ratelimit.h>
+#include <linux/seq_file.h>
+#include <linux/spinlock.h>
+#include <linux/types.h>
+#include <linux/sched.h>
+#include <soc/qcom/glink.h>
 
-#ifdef INIT_COMPLETION
-#define reinit_completion(x) INIT_COMPLETION(*(x))
-#endif /* INIT_COMPLETION */
+struct glink_core_xprt_ctx;
+struct channel_ctx;
+enum transport_state_e;
+enum local_channel_state_e;
 
 /* Logging Macros */
 enum {
@@ -43,6 +55,8 @@ enum glink_dbgfs_xprt {
 	GLINK_DBGFS_SMD,
 	GLINK_DBGFS_XLLOOP,
 	GLINK_DBGFS_XMOCK,
+	GLINK_DBGFS_XMOCK_LOW,
+	GLINK_DBGFS_XMOCK_HIGH,
 	GLINK_DBGFS_MAX_NUM_XPRTS
 };
 
@@ -80,10 +94,15 @@ struct glink_ch_intent_info {
 	struct list_head *ri_list;
 };
 
-struct glink_core_xprt_ctx;
-struct channel_ctx;
-enum transport_state_e;
-enum local_channel_state_e;
+/* Tracer Packet Event IDs for G-Link */
+enum glink_tracer_pkt_events {
+	GLINK_CORE_TX = 1,
+	GLINK_QUEUE_TO_SCHEDULER = 2,
+	GLINK_SCHEDULER_TX = 3,
+	GLINK_XPRT_TX = 4,
+	GLINK_XPRT_RX = 5,
+	GLINK_CORE_RX = 6,
+};
 
 /**
  * glink_get_ss_enum_string() - get the name of the subsystem based on enum value
@@ -168,15 +187,36 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 			GLINK_IPC_LOG_STR("<PERF> " x);  \
 } while (0)
 
+#define GLINK_XPRT_IPC_LOG_STR(xprt, x...) do { \
+	if (glink_get_xprt_log_ctx(xprt)) \
+		ipc_log_string(glink_get_xprt_log_ctx(xprt), x); \
+} while (0)
+
+#define GLINK_XPRT_IF_INFO(xprt_if, x...) do { \
+	if (glink_get_debug_mask() & QCOM_GLINK_INFO) \
+		GLINK_XPRT_IPC_LOG_STR(xprt_if.glink_core_priv, "<XPRT> " x); \
+} while (0)
+
+#define GLINK_XPRT_IF_DBG(xprt_if, x...) do { \
+	if (glink_get_debug_mask() & QCOM_GLINK_DEBUG) \
+		GLINK_XPRT_IPC_LOG_STR(xprt_if.glink_core_priv, "<XPRT> " x); \
+} while (0)
+
+#define GLINK_XPRT_IF_ERR(xprt_if, x...) do { \
+	pr_err("<XPRT> " x); \
+	GLINK_XPRT_IPC_LOG_STR(xprt_if.glink_core_priv, "<XPRT> " x); \
+} while (0)
+
 #define GLINK_PERF_XPRT(xprt, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_PERF) \
-			GLINK_IPC_LOG_STR("<PERF> %s:%s " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(xprt, "<PERF> %s:%s " fmt, \
 					xprt->name, xprt->edge, args);  \
 } while (0)
 
 #define GLINK_PERF_CH(ctx, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_PERF) \
-			GLINK_IPC_LOG_STR("<PERF> %s:%s:%s[%u:%u] " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(ctx->transport_ptr, \
+					"<PERF> %s:%s:%s[%u:%u] " fmt, \
 					ctx->transport_ptr->name, \
 					ctx->transport_ptr->edge, \
 					ctx->name, \
@@ -186,7 +226,8 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 
 #define GLINK_PERF_CH_XPRT(ctx, xprt, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_PERF) \
-			GLINK_IPC_LOG_STR("<PERF> %s:%s:%s[%u:%u] " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(xprt, \
+					"<PERF> %s:%s:%s[%u:%u] " fmt, \
 					xprt->name, \
 					xprt->edge, \
 					ctx->name, \
@@ -196,13 +237,14 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 
 #define GLINK_INFO_PERF_XPRT(xprt, fmt, args...) do { \
 	if (glink_get_debug_mask() & (QCOM_GLINK_INFO | QCOM_GLINK_PERF)) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(xprt, "<CORE> %s:%s " fmt, \
 					xprt->name, xprt->edge, args);  \
 } while (0)
 
 #define GLINK_INFO_PERF_CH(ctx, fmt, args...) do { \
 	if (glink_get_debug_mask() & (QCOM_GLINK_INFO | QCOM_GLINK_PERF)) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s:%s[%u:%u] " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(ctx->transport_ptr, \
+					"<CORE> %s:%s:%s[%u:%u] " fmt, \
 					ctx->transport_ptr->name, \
 					ctx->transport_ptr->edge, \
 					ctx->name, \
@@ -212,7 +254,8 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 
 #define GLINK_INFO_PERF_CH_XPRT(ctx, xprt, fmt, args...) do { \
 	if (glink_get_debug_mask() & (QCOM_GLINK_INFO | QCOM_GLINK_PERF)) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s:%s[%u:%u] " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(xprt,\
+					"<CORE> %s:%s:%s[%u:%u] " fmt, \
 					xprt->name, \
 					xprt->edge, \
 					ctx->name, \
@@ -222,13 +265,14 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 
 #define GLINK_INFO_XPRT(xprt, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_INFO) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(xprt, "<CORE> %s:%s " fmt, \
 					xprt->name, xprt->edge, args);  \
 } while (0)
 
 #define GLINK_INFO_CH(ctx, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_INFO) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s:%s[%u:%u] " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(ctx->transport_ptr, \
+					"<CORE> %s:%s:%s[%u:%u] " fmt, \
 					ctx->transport_ptr->name, \
 					ctx->transport_ptr->edge, \
 					ctx->name, \
@@ -238,7 +282,8 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 
 #define GLINK_INFO_CH_XPRT(ctx, xprt, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_INFO) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s:%s[%u:%u] " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(xprt, \
+					"<CORE> %s:%s:%s[%u:%u] " fmt, \
 					xprt->name, \
 					xprt->edge, \
 					ctx->name, \
@@ -248,13 +293,14 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 
 #define GLINK_DBG_XPRT(xprt, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_DEBUG) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(xprt, "<CORE> %s:%s " fmt, \
 					xprt->name, xprt->edge, args);  \
 } while (0)
 
 #define GLINK_DBG_CH(ctx, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_DEBUG) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s:%s[%u:%u] " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(ctx->transport_ptr, \
+					"<CORE> %s:%s:%s[%u:%u] " fmt, \
 					ctx->transport_ptr->name, \
 					ctx->transport_ptr->edge, \
 					ctx->name, \
@@ -264,7 +310,8 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 
 #define GLINK_DBG_CH_XPRT(ctx, xprt, fmt, args...) do { \
 	if (glink_get_debug_mask() & QCOM_GLINK_DEBUG) \
-			GLINK_IPC_LOG_STR("<CORE> %s:%s:%s[%u:%u] " fmt, \
+			GLINK_XPRT_IPC_LOG_STR(xprt, \
+					"<CORE> %s:%s:%s[%u:%u] " fmt, \
 					xprt->name, \
 					xprt->edge, \
 					ctx->name, \
@@ -273,18 +320,18 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 } while (0)
 
 #define GLINK_ERR(x...) do {                              \
-	pr_err("<CORE> " x); \
+	pr_err_ratelimited("<CORE> " x); \
 	GLINK_IPC_LOG_STR("<CORE> " x);  \
 } while (0)
 
 #define GLINK_ERR_XPRT(xprt, fmt, args...) do { \
-	pr_err("<CORE> %s:%s " fmt, \
+	pr_err_ratelimited("<CORE> %s:%s " fmt, \
 		xprt->name, xprt->edge, args);  \
 	GLINK_INFO_XPRT(xprt, fmt, args); \
 } while (0)
 
 #define GLINK_ERR_CH(ctx, fmt, args...) do { \
-	pr_err("<CORE> %s:%s:%s[%u:%u] " fmt, \
+	pr_err_ratelimited("<CORE> %s:%s:%s[%u:%u] " fmt, \
 		ctx->transport_ptr->name, \
 		ctx->transport_ptr->edge, \
 		ctx->name, \
@@ -294,7 +341,7 @@ const char *glink_get_ch_state_string(enum local_channel_state_e enum_id);
 } while (0)
 
 #define GLINK_ERR_CH_XPRT(ctx, xprt, fmt, args...) do { \
-	pr_err("<CORE> %s:%s:%s[%u:%u] " fmt, \
+	pr_err_ratelimited("<CORE> %s:%s:%s[%u:%u] " fmt, \
 		xprt->name, \
 		xprt->edge, \
 		ctx->name, \
@@ -327,6 +374,13 @@ unsigned glink_get_debug_mask(void);
  * Return: Log context or NULL if none.
  */
 void *glink_get_log_ctx(void);
+
+/**
+ * glink_get_xprt_log_ctx() - Return log context for other GLINK modules.
+ *
+ * Return: Log context or NULL if none.
+ */
+void *glink_get_xprt_log_ctx(struct glink_core_xprt_ctx *xprt);
 
 /**
  * glink_get_channel_id_for_handle() - Get logical channel ID
@@ -629,30 +683,57 @@ enum ssr_command {
 };
 
 /**
+ * struct ssr_notify_data - Contains private data used for client notifications
+ *                          from G-Link.
+ * tx_done:		Indicates whether or not the tx_done notification has
+ *			been received.
+ * event:		The state notification event received.
+ * responded:		Indicates whether or not a cleanup_done response was
+ *			received.
+ * edge:		The G-Link edge name for the channel associated with
+ *			this callback data
+ * do_cleanup_data:	Structure containing the G-Link SSR do_cleanup message.
+ */
+struct ssr_notify_data {
+	bool tx_done;
+	unsigned event;
+	bool responded;
+	const char *edge;
+	struct do_cleanup_msg *do_cleanup_data;
+};
+
+/**
  * struct subsys_info - Subsystem info structure
- * ssr_name:	name of the subsystem recognized by the SSR framework
- * edge:	name of the G-Link edge
- * xprt:	name of the G-Link transport
- * handle:	glink_ssr channel used for this subsystem
- * link_info:	Transport info used in link state callback registration
- * cb_data:	Private callback data structure for notification functions
+ * ssr_name:		name of the subsystem recognized by the SSR framework
+ * edge:		name of the G-Link edge
+ * xprt:		name of the G-Link transport
+ * handle:		glink_ssr channel used for this subsystem
+ * link_state_handle:	link state handle for this edge, used to unregister
+ *			from receiving link state callbacks
+ * link_info:		Transport info used in link state callback registration
+ * cb_data:		Private callback data structure for notification
+ *			functions
  * subsystem_list_node:	used to chain this structure in a list of subsystem
  *			info structures
- * notify_list:	list of subsys_info_leaf structures, containing the subsystems
- *		to notify if this subsystem undergoes SSR
+ * notify_list:		list of subsys_info_leaf structures, containing the
+ *			subsystems to notify if this subsystem undergoes SSR
  * notify_list_len:	length of notify_list
+ * link_up:		Flag indicating whether transport is up or not
+ * link_up_lock:	Lock for protecting the link_up flag
  */
 struct subsys_info {
 	const char *ssr_name;
 	const char *edge;
 	const char *xprt;
 	void *handle;
+	void *link_state_handle;
 	struct glink_link_info *link_info;
 	struct ssr_notify_data *cb_data;
 	struct list_head subsystem_list_node;
 	struct list_head notify_list;
 	int notify_list_len;
 	bool link_up;
+	spinlock_t link_up_lock;
 };
 
 /**
@@ -703,24 +784,6 @@ struct cleanup_done_msg {
 };
 
 /**
- * struct ssr_notify_data - Contains private data used for client notifications
- *                          from G-Link.
- * tx_done:	Indicates whether or not the tx_done notification has been
- *		received.
- * event:	The state notification event received.
- * responded:	Indicates whether or not a cleanup_done response was received.
- * version:	G-Link SSR protocol version
- * seq_num:	G-Link SSR protocol sequence number
- */
-struct ssr_notify_data {
-	bool tx_done;
-	unsigned event;
-	bool responded;
-	uint32_t version;
-	uint32_t seq_num;
-};
-
-/**
  * get_info_for_subsystem() - Retrieve information about a subsystem from the
  *                            global subsystem_info_list
  * @subsystem:	The name of the subsystem recognized by the SSR
@@ -754,6 +817,20 @@ uint32_t glink_ssr_get_seq_num(void);
  * Return: Standard error code.
  */
 int glink_ssr(const char *subsystem);
+
+/**
+ * notify for subsystem() - Notify other subsystems that a subsystem is being
+ *                          restarted
+ * @ss_info:	Subsystem info structure for the subsystem being restarted
+ *
+ * This function sends notifications to affected subsystems that the subsystem
+ * in ss_info is being restarted, and waits for the cleanup done response from
+ * all of those subsystems. It also initiates any local cleanup that is
+ * necessary.
+ *
+ * Return: 0 on success, standard error codes otherwise
+ */
+int notify_for_subsystem(struct subsys_info *ss_info);
 
 /**
  * glink_ssr_wait_cleanup_done() - Get the value of the
@@ -813,7 +890,7 @@ struct rwref_lock {
 	unsigned read_count;
 	unsigned write_count;
 	spinlock_t lock;
-	struct completion count_zero;
+	wait_queue_head_t count_zero;
 
 	void (*release)(struct rwref_lock *);
 };
@@ -847,7 +924,7 @@ static inline void rwref_lock_init(struct rwref_lock *lock_ptr,
 	lock_ptr->read_count = 0;
 	lock_ptr->write_count = 0;
 	spin_lock_init(&lock_ptr->lock);
-	init_completion(&lock_ptr->count_zero);
+	init_waitqueue_head(&lock_ptr->count_zero);
 	lock_ptr->release = release;
 }
 
@@ -876,12 +953,14 @@ static inline void rwref_put(struct rwref_lock *lock_ptr)
 }
 
 /**
- * rwref_read_get() - gains a reference count for a read operation
+ * rwref_read_get_atomic() - gains a reference count for a read operation
  * lock_ptr:	pointer to lock structure
+ * is_atomic:   if True, do not wait when acquiring lock
  *
  * Multiple readers may acquire the lock as long as the write count is zero.
  */
-static inline void rwref_read_get(struct rwref_lock *lock_ptr)
+static inline void rwref_read_get_atomic(struct rwref_lock *lock_ptr,
+			bool is_atomic)
 {
 	unsigned long flags;
 
@@ -896,8 +975,22 @@ static inline void rwref_read_get(struct rwref_lock *lock_ptr)
 			break;
 		}
 		spin_unlock_irqrestore(&lock_ptr->lock, flags);
-		wait_for_completion(&lock_ptr->count_zero);
+		if (!is_atomic) {
+			wait_event(lock_ptr->count_zero,
+					lock_ptr->write_count == 0);
+		}
 	}
+}
+
+/**
+ * rwref_read_get() - gains a reference count for a read operation
+ * lock_ptr:	pointer to lock structure
+ *
+ * Multiple readers may acquire the lock as long as the write count is zero.
+ */
+static inline void rwref_read_get(struct rwref_lock *lock_ptr)
+{
+	rwref_read_get_atomic(lock_ptr, false);
 }
 
 /**
@@ -915,18 +1008,20 @@ static inline void rwref_read_put(struct rwref_lock *lock_ptr)
 	spin_lock_irqsave(&lock_ptr->lock, flags);
 	BUG_ON(lock_ptr->read_count == 0);
 	if (--lock_ptr->read_count == 0)
-		complete(&lock_ptr->count_zero);
+		wake_up(&lock_ptr->count_zero);
 	spin_unlock_irqrestore(&lock_ptr->lock, flags);
 	kref_put(&lock_ptr->kref, rwref_lock_release);
 }
 
 /**
- * rwref_write_get() - gains a reference count for a write operation
+ * rwref_write_get_atomic() - gains a reference count for a write operation
  * lock_ptr:	pointer to lock structure
+ * is_atomic:   if True, do not wait when acquiring lock
  *
  * Only one writer may acquire the lock as long as the reader count is zero.
  */
-static inline void rwref_write_get(struct rwref_lock *lock_ptr)
+static inline void rwref_write_get_atomic(struct rwref_lock *lock_ptr,
+			bool is_atomic)
 {
 	unsigned long flags;
 
@@ -941,8 +1036,23 @@ static inline void rwref_write_get(struct rwref_lock *lock_ptr)
 			break;
 		}
 		spin_unlock_irqrestore(&lock_ptr->lock, flags);
-		wait_for_completion(&lock_ptr->count_zero);
+		if (!is_atomic) {
+			wait_event(lock_ptr->count_zero,
+					(lock_ptr->read_count == 0 &&
+					lock_ptr->write_count == 0));
+		}
 	}
+}
+
+/**
+ * rwref_write_get() - gains a reference count for a write operation
+ * lock_ptr:	pointer to lock structure
+ *
+ * Only one writer may acquire the lock as long as the reader count is zero.
+ */
+static inline void rwref_write_get(struct rwref_lock *lock_ptr)
+{
+	rwref_write_get_atomic(lock_ptr, false);
 }
 
 /**
@@ -960,7 +1070,7 @@ static inline void rwref_write_put(struct rwref_lock *lock_ptr)
 	spin_lock_irqsave(&lock_ptr->lock, flags);
 	BUG_ON(lock_ptr->write_count != 1);
 	if (--lock_ptr->write_count == 0)
-		complete(&lock_ptr->count_zero);
+		wake_up(&lock_ptr->count_zero);
 	spin_unlock_irqrestore(&lock_ptr->lock, flags);
 	kref_put(&lock_ptr->kref, rwref_lock_release);
 }

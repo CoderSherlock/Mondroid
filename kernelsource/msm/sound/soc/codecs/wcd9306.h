@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,16 +20,10 @@
 #include "wcd9xxx-resmgr.h"
 #include "wcd9xxx-common.h"
 
-#define TAPAN_NUM_REGISTERS 0x400
-#define TAPAN_MAX_REGISTER (TAPAN_NUM_REGISTERS-1)
-#define TAPAN_CACHE_SIZE TAPAN_NUM_REGISTERS
-
 #define TAPAN_REG_VAL(reg, val)		{reg, 0, val}
 
 #define TAPAN_CDC_ZDET_SUPPORTED  true
 
-extern const u8 tapan_reg_readable[TAPAN_CACHE_SIZE];
-extern const u8 tapan_reset_reg_defaults[TAPAN_CACHE_SIZE];
 struct tapan_codec_dai_data {
 	u32 rate;
 	u32 *ch_num;
@@ -83,6 +77,6 @@ extern void *tapan_get_afe_config(struct snd_soc_codec *codec,
 				  enum afe_config_type config_type);
 extern void tapan_event_register(
 	int (*machine_event_cb)(struct snd_soc_codec *codec,
-				 enum wcd9xxx_codec_event),
-	struct snd_soc_codec *codec);
+				enum wcd9xxx_codec_event),
+				struct snd_soc_codec *codec);
 #endif

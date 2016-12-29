@@ -111,19 +111,19 @@ static void __tpda_enable_port(struct tpda_drvdata *drvdata, int port)
 
 	val = tpda_readl(drvdata, TPDA_Pn_CR(port));
 	if (drvdata->bc_esize[port] == 32)
-		val = val | BIT(4);
-	else if (drvdata->bc_esize[port] == 64)
 		val = val & ~BIT(4);
+	else if (drvdata->bc_esize[port] == 64)
+		val = val | BIT(4);
 
 	if (drvdata->tc_esize[port] == 32)
-		val = val | BIT(5);
-	else if (drvdata->tc_esize[port] == 64)
 		val = val & ~BIT(5);
+	else if (drvdata->tc_esize[port] == 64)
+		val = val | BIT(5);
 
 	if (drvdata->dsb_esize[port] == 32)
-		val = val | BIT(8);
-	else if (drvdata->dsb_esize[port] == 64)
 		val = val & ~BIT(8);
+	else if (drvdata->dsb_esize[port] == 64)
+		val = val | BIT(8);
 
 	val = val & ~(0x3 << 6);
 	if (drvdata->cmb_esize[port] == 8)
@@ -662,9 +662,6 @@ static int tpda_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct coresight_desc *desc;
 
-	if (coresight_fuse_access_disabled())
-		return -EPERM;
-
 	pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
 	if (IS_ERR(pdata))
 		return PTR_ERR(pdata);
@@ -698,6 +695,15 @@ static int tpda_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	ret = clk_prepare_enable(drvdata->clk);
+	if (ret)
+		return ret;
+
+	if (!coresight_authstatus_enabled(drvdata->base))
+		goto err;
+
+	clk_disable_unprepare(drvdata->clk);
+
 	tpda_init_default_data(drvdata);
 
 	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
@@ -714,8 +720,11 @@ static int tpda_probe(struct platform_device *pdev)
 	if (IS_ERR(drvdata->csdev))
 		return PTR_ERR(drvdata->csdev);
 
-	dev_info(drvdata->dev, "TPDA initialized\n");
+	dev_dbg(drvdata->dev, "TPDA initialized\n");
 	return 0;
+err:
+	clk_disable_unprepare(drvdata->clk);
+	return -EPERM;
 }
 
 static int tpda_remove(struct platform_device *pdev)

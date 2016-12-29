@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2008-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2008-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,6 +21,96 @@
 #include "adreno.h"
 #include "kgsl_cffdump.h"
 #include "kgsl_sync.h"
+
+static int _isdb_set(void *data, u64 val)
+{
+	struct kgsl_device *device = data;
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+
+	/* Once ISDB goes enabled it stays enabled */
+	if (test_bit(ADRENO_DEVICE_ISDB_ENABLED, &adreno_dev->priv))
+		return 0;
+
+	mutex_lock(&device->mutex);
+
+	/*
+	 * Bring down the GPU so we can bring it back up with the correct power
+	 * and clock settings
+	 */
+	kgsl_pwrctrl_change_state(device, KGSL_STATE_SUSPEND);
+	set_bit(ADRENO_DEVICE_ISDB_ENABLED, &adreno_dev->priv);
+	kgsl_pwrctrl_change_state(device, KGSL_STATE_SLUMBER);
+
+	mutex_unlock(&device->mutex);
+
+	return 0;
+}
+
+static int _isdb_get(void *data, u64 *val)
+{
+	struct kgsl_device *device = data;
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+
+	*val = (u64) test_bit(ADRENO_DEVICE_ISDB_ENABLED, &adreno_dev->priv);
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(_isdb_fops, _isdb_get, _isdb_set, "%llu\n");
+
+static int _lm_limit_set(void *data, u64 val)
+{
+	struct kgsl_device *device = data;
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+
+	if (!ADRENO_FEATURE(adreno_dev, ADRENO_LM))
+		return 0;
+
+	/* assure value is between 3A and 10A */
+	if (val > 10000)
+		val = 10000;
+	else if (val < 3000)
+		val = 3000;
+
+	adreno_dev->lm_limit = val;
+
+	if (test_bit(ADRENO_LM_CTRL, &adreno_dev->pwrctrl_flag)) {
+		mutex_lock(&device->mutex);
+		kgsl_pwrctrl_change_state(device, KGSL_STATE_SUSPEND);
+		kgsl_pwrctrl_change_state(device, KGSL_STATE_SLUMBER);
+		mutex_unlock(&device->mutex);
+	}
+
+	return 0;
+}
+
+static int _lm_limit_get(void *data, u64 *val)
+{
+	struct kgsl_device *device = data;
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+
+	if (!ADRENO_FEATURE(adreno_dev, ADRENO_LM))
+		*val = 0;
+
+	*val = (u64) adreno_dev->lm_limit;
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(_lm_limit_fops, _lm_limit_get, _lm_limit_set, "%llu\n");
+
+static int _lm_threshold_count_get(void *data, u64 *val)
+{
+	struct kgsl_device *device = data;
+	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+
+	if (!ADRENO_FEATURE(adreno_dev, ADRENO_LM))
+		*val = 0;
+	else
+		*val = (u64) adreno_dev->lm_threshold_cross;
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(_lm_threshold_fops, _lm_threshold_count_get,
+	NULL, "%llu\n");
 
 static int _active_count_get(void *data, u64 *val)
 {
@@ -111,35 +201,32 @@ static void print_flags(struct seq_file *s, const struct flag_entry *table,
 
 static void cmdbatch_print(struct seq_file *s, struct kgsl_cmdbatch *cmdbatch)
 {
-	struct kgsl_cmdbatch_sync_event *sync_event;
+	struct kgsl_cmdbatch_sync_event *event;
+	unsigned int i;
 
-	/*
-	 * print fences first, since they block this cmdbatch.
-	 * We may have cmdbatch timer running, which also uses
-	 * same lock, take a lock with software interrupt disabled (bh)
-	 * to avoid spin lock recursion.
-	 */
-	spin_lock_bh(&cmdbatch->lock);
+	/* print fences first, since they block this cmdbatch */
 
-	list_for_each_entry(sync_event, &cmdbatch->synclist, node) {
+	for (i = 0; i < cmdbatch->numsyncs; i++) {
+		event = &cmdbatch->synclist[i];
+
+		if (!kgsl_cmdbatch_event_pending(cmdbatch, i))
+			continue;
+
 		/*
 		 * Timestamp is 0 for KGSL_CONTEXT_SYNC, but print it anyways
 		 * so that it is clear if the fence was a separate submit
 		 * or part of an IB submit.
 		 */
 		seq_printf(s, "\t%d ", cmdbatch->timestamp);
-		sync_event_print(s, sync_event);
+		sync_event_print(s, event);
 		seq_puts(s, "\n");
 	}
-
-	spin_unlock_bh(&cmdbatch->lock);
 
 	/* if this flag is set, there won't be an IB */
 	if (cmdbatch->flags & KGSL_CONTEXT_SYNC)
 		return;
 
-	seq_printf(s, "\t%d: ib: expires: %lu",
-		cmdbatch->timestamp, cmdbatch->expires);
+	seq_printf(s, "\t%d: ", cmdbatch->timestamp);
 
 	seq_puts(s, " flags: ");
 	print_flags(s, cmdbatch_flags, ARRAY_SIZE(cmdbatch_flags),
@@ -267,19 +354,26 @@ adreno_context_debugfs_init(struct adreno_device *adreno_dev,
 
 void adreno_debugfs_init(struct adreno_device *adreno_dev)
 {
-	struct kgsl_device *device = &adreno_dev->dev;
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 
 	if (!device->d_debugfs || IS_ERR(device->d_debugfs))
 		return;
 
 	kgsl_cffdump_debugfs_create(device);
 
-	debugfs_create_u32("wait_timeout", 0644, device->d_debugfs,
-		&adreno_dev->wait_timeout);
-	debugfs_create_u32("ib_check", 0644, device->d_debugfs,
-			   &adreno_dev->ib_check_level);
 	debugfs_create_file("active_cnt", 0444, device->d_debugfs, device,
 			    &_active_count_fops);
 	adreno_dev->ctx_d_debugfs = debugfs_create_dir("ctx",
 							device->d_debugfs);
+
+	if (ADRENO_FEATURE(adreno_dev, ADRENO_LM)) {
+		debugfs_create_file("lm_limit", 0644, device->d_debugfs, device,
+			&_lm_limit_fops);
+		debugfs_create_file("lm_threshold_count", 0444,
+			device->d_debugfs, device, &_lm_threshold_fops);
+	}
+
+	if (adreno_is_a5xx(adreno_dev))
+		debugfs_create_file("isdb", 0644, device->d_debugfs,
+			device, &_isdb_fops);
 }

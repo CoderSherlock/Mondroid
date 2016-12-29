@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -102,7 +102,8 @@
 
 /* QPIC NANDc (NAND Controller) Register Set */
 #define MSM_NAND_REG(info, off)		    (info->nand_phys + off)
-#define MSM_NAND_QPIC_VERSION(info)	    MSM_NAND_REG(info, 0x20100)
+#define MSM_NAND_REG_ADJUSTED(info, off)    (info->nand_phys_adjusted + off)
+#define MSM_NAND_QPIC_VERSION(info)	    MSM_NAND_REG_ADJUSTED(info, 0x20100)
 #define MSM_NAND_FLASH_CMD(info)	    MSM_NAND_REG(info, 0x30000)
 #define MSM_NAND_ADDR0(info)                MSM_NAND_REG(info, 0x30004)
 #define MSM_NAND_ADDR1(info)                MSM_NAND_REG(info, 0x30008)
@@ -133,6 +134,10 @@
 #define BAD_BLOCK_IN_SPARE_AREA 16
 #define WR_RD_BSY_GAP		17
 #define ENABLE_BCH_ECC		27
+
+#define BYTES_512		512
+#define BYTES_516		516
+#define BYTES_517		517
 
 #define MSM_NAND_DEV0_ECC_CFG(info)	    MSM_NAND_REG(info, 0x30028)
 #define ECC_CFG_ECC_DISABLE	0
@@ -169,7 +174,7 @@
 
 #define MSM_NAND_CTRL(info)		    MSM_NAND_REG(info, 0x30F00)
 #define BAM_MODE_EN	0
-#define MSM_NAND_VERSION(info)         MSM_NAND_REG(info, 0x30F08)
+#define MSM_NAND_VERSION(info)         MSM_NAND_REG_ADJUSTED(info, 0x30F08)
 #define MSM_NAND_READ_LOCATION_0(info)      MSM_NAND_REG(info, 0x30F20)
 #define MSM_NAND_READ_LOCATION_1(info)      MSM_NAND_REG(info, 0x30F24)
 
@@ -195,18 +200,6 @@
 #define INT_UNLCK	(INT | SPS_IOVEC_FLAG_UNLOCK)
 #define CMD_INT_UNLCK	(CMD | INT_UNLCK)
 #define NWD		SPS_IOVEC_FLAG_NWD
-
-#define msm_nand_sps_get_iovec(pipe, indx, cnt, ret, label, iovec)	\
-	do {								\
-		do {							\
-			ret = sps_get_iovec((pipe), (iovec));		\
-		} while (((iovec)->addr == 0x0) && ((iovec)->size == 0x0));\
-		if (ret) {						\
-			pr_err("sps_get_iovec failed for pipe %d (ret: %d)\n",\
-					indx, ret);			\
-			goto label;					\
-		}							\
-	} while (--(cnt))
 
 /* Structure that defines a NAND SPS command element */
 struct msm_nand_sps_cmd {
@@ -257,6 +250,7 @@ struct msm_nand_chip {
 	uint32_t cfg0, cfg1, cfg0_raw, cfg1_raw;
 	uint32_t ecc_buf_cfg;
 	uint32_t ecc_bch_cfg;
+	uint32_t ecc_cfg_raw;
 };
 
 /* Structure that defines an SPS end point for a NANDc BAM pipe. */
@@ -291,6 +285,7 @@ struct flash_identification {
 	uint32_t blksize;
 	uint32_t oobsize;
 	uint32_t ecc_correctability;
+	uint32_t ecc_capability; /* Set based on the ECC capability selected. */
 };
 
 struct msm_nand_clk_data {
@@ -308,6 +303,7 @@ struct msm_nand_info {
 	struct msm_nand_sps_info sps;
 	unsigned long bam_phys;
 	unsigned long nand_phys;
+	unsigned long nand_phys_adjusted;
 	void __iomem *bam_base;
 	int bam_irq;
 	/*
@@ -324,6 +320,7 @@ struct msm_nand_info {
 	struct mutex lock;
 	struct flash_identification flash_dev;
 	struct msm_nand_clk_data clk_data;
+	u64 dma_mask;
 };
 
 /* Structure that defines an ONFI parameter page (512B) */

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,9 +29,6 @@
 #include <linux/usb/msm_hsusb.h>
 #include <linux/msm-bus.h>
 
-#include <mach/msm_iomap.h>
-#include <mach/rpm-regulator.h>
-
 #include "ci13xxx_udc.c"
 
 #define MSM_USB_BASE	(mhsic->regs)
@@ -48,28 +45,32 @@ struct msm_hsic_per *the_mhsic;
 static u64 msm_hsic_peripheral_dma_mask = DMA_BIT_MASK(32);
 
 struct msm_hsic_per {
-	struct device		*dev;
+	struct device			*dev;
 	struct clk			*iface_clk;
 	struct clk			*core_clk;
-	struct clk			*alt_core_clk;
+	struct clk			*cal_sleep_clk;
 	struct clk			*phy_clk;
 	struct clk			*cal_clk;
-	struct regulator	*hsic_vdd;
-	int			async_int;
-	int			vdd_val[3];
-	struct regulator        *hsic_gdsc;
-	void __iomem		*regs;
-	int			irq;
-	int			async_irq_no;
-	atomic_t		in_lpm;
-	struct wake_lock	wlock;
-	struct workqueue_struct *wq;
-	struct work_struct	suspend_w;
-	struct msm_hsic_peripheral_platform_data *pdata;
-	u32			bus_perf_client;
+	struct regulator		*hsic_vdd;
+	int				async_int;
+	int				vdd_val[3];
+	struct regulator		*hsic_gdsc;
+	void __iomem			*regs;
+	void __iomem			*tlmm_regs;
+	int				irq;
+	int				async_irq_no;
+	atomic_t			in_lpm;
+	struct workqueue_struct		*wq;
+	struct work_struct		suspend_w;
+	struct ci13xxx_platform_data	*pdata;
+	u32				bus_perf_client;
 	struct msm_bus_scale_pdata	*bus_scale_table;
-	enum usb_vdd_type	vdd_type;
-	bool connected;
+	enum usb_vdd_type		vdd_type;
+	bool				connected;
+	bool				disable_on_boot;
+	bool				sm_work_pending;
+	atomic_t			pm_suspended;
+
 };
 
 #define NONE 0
@@ -168,19 +169,30 @@ static int msm_hsic_phy_clk_reset(struct msm_hsic_per *mhsic)
 {
 	int ret;
 
-	clk_enable(mhsic->alt_core_clk);
+	clk_disable_unprepare(mhsic->iface_clk);
+	clk_disable_unprepare(mhsic->core_clk);
+	clk_disable_unprepare(mhsic->phy_clk);
+	clk_disable_unprepare(mhsic->cal_sleep_clk);
+	clk_disable_unprepare(mhsic->cal_clk);
+
 	ret = clk_reset(mhsic->core_clk, CLK_RESET_ASSERT);
 	if (ret) {
-		clk_disable(mhsic->alt_core_clk);
 		dev_err(mhsic->dev, "usb phy clk assert failed\n");
 		return ret;
 	}
 	usleep_range(10000, 12000);
-	clk_disable(mhsic->alt_core_clk);
 
 	ret = clk_reset(mhsic->core_clk, CLK_RESET_DEASSERT);
 	if (ret)
 		dev_err(mhsic->dev, "usb phy clk deassert failed\n");
+
+	usleep_range(10000, 12000);
+
+	clk_prepare_enable(mhsic->iface_clk);
+	clk_prepare_enable(mhsic->core_clk);
+	clk_prepare_enable(mhsic->phy_clk);
+	clk_prepare_enable(mhsic->cal_sleep_clk);
+	clk_prepare_enable(mhsic->cal_clk);
 
 	return ret;
 }
@@ -270,23 +282,22 @@ static int msm_hsic_enable_clocks(struct platform_device *pdev,
 	if (ret)
 		dev_err(mhsic->dev, "failed to set phy_clk rate\n");
 
-	mhsic->alt_core_clk = clk_get(&pdev->dev, "alt_core_clk");
-	if (IS_ERR(mhsic->alt_core_clk)) {
-		dev_err(mhsic->dev, "failed to get alt_core_clk\n");
-		ret = PTR_ERR(mhsic->alt_core_clk);
+	mhsic->cal_sleep_clk = clk_get(&pdev->dev, "cal_sleep_clk");
+	if (IS_ERR(mhsic->cal_sleep_clk)) {
+		dev_err(mhsic->dev, "!!!!failed to get cal_sleep_clk\n");
+		ret = PTR_ERR(mhsic->cal_sleep_clk);
 		goto put_phy_clk;
 	}
 
-	ret = clk_set_rate(mhsic->alt_core_clk,
-			clk_round_rate(mhsic->alt_core_clk, LONG_MAX));
+	ret = clk_set_rate(mhsic->cal_sleep_clk, 32000);
 	if (ret)
-		dev_err(mhsic->dev, "failed to set alt_core_clk rate\n");
+		dev_err(mhsic->dev, "failed to set cal_sleep_clk rate\n");
 
 	mhsic->cal_clk = clk_get(&pdev->dev, "cal_clk");
 	if (IS_ERR(mhsic->cal_clk)) {
 		dev_err(mhsic->dev, "failed to get cal_clk\n");
 		ret = PTR_ERR(mhsic->cal_clk);
-		goto put_alt_core_clk;
+		goto put_cal_sleep_clk;
 	}
 
 	ret = clk_set_rate(mhsic->cal_clk,
@@ -297,7 +308,7 @@ static int msm_hsic_enable_clocks(struct platform_device *pdev,
 	clk_prepare_enable(mhsic->iface_clk);
 	clk_prepare_enable(mhsic->core_clk);
 	clk_prepare_enable(mhsic->phy_clk);
-	clk_prepare_enable(mhsic->alt_core_clk);
+	clk_prepare_enable(mhsic->cal_sleep_clk);
 	clk_prepare_enable(mhsic->cal_clk);
 
 	return 0;
@@ -306,12 +317,12 @@ put_clocks:
 	clk_disable_unprepare(mhsic->iface_clk);
 	clk_disable_unprepare(mhsic->core_clk);
 	clk_disable_unprepare(mhsic->phy_clk);
-	clk_disable_unprepare(mhsic->alt_core_clk);
+	clk_disable_unprepare(mhsic->cal_sleep_clk);
 	clk_disable_unprepare(mhsic->cal_clk);
 
 	clk_put(mhsic->cal_clk);
-put_alt_core_clk:
-	clk_put(mhsic->alt_core_clk);
+put_cal_sleep_clk:
+	clk_put(mhsic->cal_sleep_clk);
 put_phy_clk:
 	clk_put(mhsic->phy_clk);
 put_core_clk:
@@ -357,7 +368,26 @@ static void msm_hsic_wakeup(void)
 
 static void msm_hsic_start(void)
 {
-	int ret;
+	struct msm_hsic_per *mhsic = the_mhsic;
+	int ret, *seq, seq_count;
+	u32 val;
+
+	/* Program TLMM pad configuration for HSIC */
+	seq = mhsic->pdata->tlmm_init_seq;
+	seq_count = mhsic->pdata->tlmm_seq_count;
+	if (seq && seq_count) {
+		while (seq[0] >= 0 && seq_count > 0) {
+			val = readl_relaxed(mhsic->tlmm_regs + seq[0]);
+			val |= seq[1];
+			dev_dbg(mhsic->dev, "%s: writing %x to %p\n",
+				__func__, val, mhsic->tlmm_regs + seq[0]);
+			writel_relaxed(val, mhsic->tlmm_regs + seq[0]);
+			seq += 2;
+			seq_count -= 2;
+		}
+	}
+	/* ensure above writes are completed before programming PHY */
+	wmb();
 
 	/* programmable length of connect signaling (33.2ns) */
 	ret = ulpi_write(the_mhsic, 3, HSIC_DBG1_REG);
@@ -396,7 +426,7 @@ static int msm_hsic_suspend(struct msm_hsic_per *mhsic)
 	disable_irq(mhsic->irq);
 
 	/* Don't try to put PHY into suspend if it is not in CONNECT state. */
-	if (the_mhsic->connected) {
+	if (the_mhsic->connected || mhsic->disable_on_boot) {
 		/*
 		 * PHY may take some time or even fail to enter into low power
 		 * mode (LPM). Hence poll for 500 msec and reset the PHY and
@@ -436,13 +466,11 @@ static int msm_hsic_suspend(struct msm_hsic_per *mhsic)
 		dev_dbg(mhsic->dev, "%s SKIP PHY suspend\n", __func__);
 	}
 
-	if (!mhsic->connected) {
-		clk_disable_unprepare(mhsic->iface_clk);
-		clk_disable_unprepare(mhsic->core_clk);
-	}
+	clk_disable_unprepare(mhsic->iface_clk);
+	clk_disable_unprepare(mhsic->core_clk);
+
 	clk_disable_unprepare(mhsic->phy_clk);
 	clk_disable_unprepare(mhsic->cal_clk);
-	clk_disable_unprepare(mhsic->alt_core_clk);
 
 	ret = regulator_set_voltage(mhsic->hsic_vdd, mhsic->vdd_val[NONE],
 							mhsic->vdd_val[MAX]);
@@ -467,7 +495,7 @@ static int msm_hsic_suspend(struct msm_hsic_per *mhsic)
 		enable_irq(mhsic->async_irq_no);
 
 	enable_irq(mhsic->irq);
-	wake_unlock(&mhsic->wlock);
+	pm_relax(mhsic->dev);
 
 	dev_info(mhsic->dev, "HSIC-USB in low power mode\n");
 
@@ -484,7 +512,7 @@ static int msm_hsic_resume(struct msm_hsic_per *mhsic)
 		return 0;
 	}
 
-	wake_lock(&mhsic->wlock);
+	pm_stay_awake(mhsic->dev);
 
 	if (mhsic->bus_perf_client) {
 		ret = msm_bus_scale_client_update_request(
@@ -498,14 +526,11 @@ static int msm_hsic_resume(struct msm_hsic_per *mhsic)
 		dev_err(mhsic->dev,
 			"unable to set nominal vddcx voltage (no VDD MIN)\n");
 
-	if (!mhsic->connected) {
-		clk_prepare_enable(mhsic->iface_clk);
-		clk_prepare_enable(mhsic->core_clk);
-	}
+	clk_prepare_enable(mhsic->iface_clk);
+	clk_prepare_enable(mhsic->core_clk);
 
 	clk_prepare_enable(mhsic->phy_clk);
 	clk_prepare_enable(mhsic->cal_clk);
-	clk_prepare_enable(mhsic->alt_core_clk);
 
 	temp = readl_relaxed(USB_USBCMD);
 	temp &= ~ASYNC_INTR_CTRL;
@@ -559,22 +584,49 @@ skip_phy_resume:
 static int msm_hsic_pm_suspend(struct device *dev)
 {
 	struct msm_hsic_per *mhsic = dev_get_drvdata(dev);
+	int ret = 0;
 
 	dev_dbg(dev, "MSM HSIC Peripheral PM suspend\n");
 
-	return msm_hsic_suspend(mhsic);
+	if (!atomic_read(&mhsic->in_lpm)) {
+		dev_err(dev, "Abort PM suspend!! (HSIC-USB is outside LPM)\n");
+		return -EBUSY;
+	}
+
+	atomic_set(&mhsic->pm_suspended, 1);
+	ret = msm_hsic_suspend(mhsic);
+	if (ret)
+		atomic_set(&mhsic->pm_suspended, 0);
+
+	return ret;
 }
 
 #ifdef CONFIG_PM_RUNTIME
 static int msm_hsic_pm_resume(struct device *dev)
 {
+	struct msm_hsic_per *mhsic = dev_get_drvdata(dev);
+	int ret = 0;
+
 	dev_dbg(dev, "MSM HSIC Peripheral PM resume\n");
+
+	atomic_set(&mhsic->pm_suspended, 0);
+	if (mhsic->sm_work_pending) {
+		dev_dbg(dev, "MSM HSIC PM resume by USB\n");
+		mhsic->sm_work_pending = false;
+		pm_runtime_get_noresume(dev);
+		ret = msm_hsic_resume(mhsic);
+
+		/* Update runtime PM status */
+		pm_runtime_disable(dev);
+		pm_runtime_set_active(dev);
+		pm_runtime_enable(dev);
+	}
 
 	/*
 	 * Do not resume hardware as part of system resume,
 	 * rather, wait for the ASYNC INT from the h/w
 	 */
-	return 0;
+	return ret;
 }
 #else
 static int msm_hsic_pm_resume(struct device *dev)
@@ -646,6 +698,17 @@ static void msm_hsic_connect_peripheral(struct device *msm_udc_dev)
 	usb_gadget_vbus_connect(gadget);
 }
 
+static void msm_hsic_disconnect_peripheral(struct device *msm_udc_dev)
+{
+	struct device *dev;
+	struct usb_gadget *gadget;
+
+	dev = device_find_child(msm_udc_dev, NULL, __match);
+	gadget = dev_to_usb_gadget(dev);
+	usb_gadget_vbus_disconnect(gadget);
+}
+
+
 static irqreturn_t msm_udc_hsic_irq(int irq, void *data)
 {
 	struct msm_hsic_per *mhsic = data;
@@ -654,12 +717,62 @@ static irqreturn_t msm_udc_hsic_irq(int irq, void *data)
 		pr_debug("%s(): HSIC IRQ:%d in LPM\n", __func__, irq);
 		disable_irq_nosync(irq);
 		mhsic->async_int = irq;
-		pm_request_resume(mhsic->dev);
+		if (atomic_read(&mhsic->pm_suspended))
+			mhsic->sm_work_pending = true;
+		else
+			pm_request_resume(mhsic->dev);
+
 		return IRQ_HANDLED;
 	}
 
 	return udc_irq();
 }
+
+/**
+ * store_hsic_init: initialize hsic interface to state passed
+ */
+static ssize_t store_hsic_init(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct msm_hsic_per *mhsic = the_mhsic;
+	int init_state, ret;
+
+	if (attr == NULL || buf == NULL) {
+		dev_err(dev, "[%s] EINVAL\n", __func__);
+		goto done;
+	}
+
+	if (kstrtoint(buf, 10, &init_state) < 0) {
+		dev_err(dev, "scan init_state failed\n");
+		goto done;
+	}
+
+	dev_dbg(dev, "Value for init_state = %d\n", init_state);
+
+	if (init_state == 1) {
+		pm_runtime_resume(mhsic->dev);
+		ret = msm_hsic_reset(mhsic);
+		if (ret)
+			pr_err("msm_hsic_reset failed\n");
+		msm_hsic_start();
+		usleep_range(10000, 10010);
+		msm_hsic_connect_peripheral(mhsic->dev);
+		the_mhsic->connected = true;
+	} else if (init_state == 0) {
+		msm_hsic_disconnect_peripheral(mhsic->dev);
+		mhsic->connected = false;
+		pm_runtime_put_noidle(mhsic->dev);
+		pm_runtime_suspend(mhsic->dev);
+	} else {
+		pr_err("Invalid value : no action taken\n");
+	}
+
+done:
+	return count;
+}
+
+static DEVICE_ATTR(hsic_init, S_IWUSR, NULL, store_hsic_init);
 
 static void ci13xxx_msm_hsic_notify_event(struct ci13xxx *udc, unsigned event)
 {
@@ -677,12 +790,18 @@ static void ci13xxx_msm_hsic_notify_event(struct ci13xxx *udc, unsigned event)
 		temp = readl_relaxed(USB_GENCONFIG);
 		temp &= ~GENCONFIG_TXFIFO_IDLE_FORCE_DISABLE;
 		writel_relaxed(temp, USB_GENCONFIG);
+		/*
+		 * Ensure that register write for workaround is completed
+		 * before configuring USBMODE.
+		 */
 		mb();
 		break;
 	case CI13XXX_CONTROLLER_CONNECT_EVENT:
 		dev_info(dev, "CI13XXX_CONTROLLER_CONNECT_EVENT received\n");
+		if (mhsic->disable_on_boot)
+			mhsic->disable_on_boot = false;
 		/* bring HSIC core out of LPM */
-		pm_runtime_get_sync(the_mhsic->dev);
+		pm_runtime_resume(the_mhsic->dev);
 		msm_hsic_start();
 		the_mhsic->connected = true;
 		break;
@@ -725,19 +844,34 @@ struct ci13xxx_platform_data *msm_hsic_peripheral_dt_to_pdata(
 	struct device_node *node = pdev->dev.of_node;
 	struct ci13xxx_platform_data *pdata;
 	u32 core_id;
-	int ret;
+	int ret, len;
 
 	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
-	if (!pdata) {
-		dev_err(&pdev->dev, "unable to allocate platform data\n");
+	if (!pdata)
 		return NULL;
-	}
 
 	ret = of_property_read_u32(node, "qcom,hsic-usb-core-id", &core_id);
 	if (ret)
 		dev_err(&pdev->dev, "hsic usb core id is not provided.\n");
 	else
 		pdata->usb_core_id = (u8)core_id;
+
+	of_get_property(node, "qcom,hsic-tlmm-init-seq", &len);
+	if (len) {
+		pdata->tlmm_init_seq = devm_kzalloc(&pdev->dev, len,
+						    GFP_KERNEL);
+		if (!pdata->tlmm_init_seq)
+			return NULL;
+
+		pdata->tlmm_seq_count = len / sizeof(*pdata->tlmm_init_seq);
+		ret = of_property_read_u32_array(node,
+				"qcom,hsic-tlmm-init-seq",
+				pdata->tlmm_init_seq, pdata->tlmm_seq_count);
+		if (ret) {
+			dev_err(&pdev->dev, "hsic init-seq failed:%d\n", ret);
+			pdata->tlmm_seq_count = 0;
+		}
+	}
 
 	return pdata;
 }
@@ -769,15 +903,15 @@ static int msm_hsic_probe(struct platform_device *pdev)
 	pdata = pdev->dev.platform_data;
 
 	mhsic = kzalloc(sizeof(struct msm_hsic_per), GFP_KERNEL);
-	if (!mhsic) {
-		dev_err(&pdev->dev, "unable to allocate msm_hsic\n");
+	if (!mhsic)
 		return -ENOMEM;
-	}
 	the_mhsic = mhsic;
 	platform_set_drvdata(pdev, mhsic);
 	mhsic->dev = &pdev->dev;
-	mhsic->pdata =
-		(struct msm_hsic_peripheral_platform_data *)pdata->prv_data;
+	mhsic->pdata = pdata;
+
+	mhsic->disable_on_boot = of_property_read_bool(pdev->dev.of_node,
+					"qcom,hsic-disable-on-boot");
 
 	mhsic->irq = platform_get_irq(pdev, 0);
 	if (mhsic->irq < 0) {
@@ -815,6 +949,20 @@ static int msm_hsic_probe(struct platform_device *pdev)
 		goto error;
 	}
 	dev_info(&pdev->dev, "HSIC Peripheral regs = %p\n", mhsic->regs);
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+	if (!res && pdata->tlmm_init_seq) {
+		dev_err(&pdev->dev, "Unable to get TLMM memory resource\n");
+		ret = -ENODEV;
+		goto unmap;
+	} else if (res) {
+		mhsic->tlmm_regs =  devm_ioremap(&pdev->dev, res->start,
+						 resource_size(res));
+		if (IS_ERR(mhsic->tlmm_regs)) {
+			ret = PTR_ERR(mhsic->tlmm_regs);
+			goto unmap;
+		}
+	}
 
 	ret = msm_hsic_config_gdsc(pdev, mhsic, true);
 	if (ret) {
@@ -863,18 +1011,20 @@ static int msm_hsic_probe(struct platform_device *pdev)
 		goto deinit_vddcx;
 	}
 
+	ret = device_create_file(mhsic->dev, &dev_attr_hsic_init);
+	if (ret)
+		goto udc_remove;
 	msm_hsic_connect_peripheral(&pdev->dev);
 
 	device_init_wakeup(&pdev->dev, 1);
-	wake_lock_init(&mhsic->wlock, WAKE_LOCK_SUSPEND, dev_name(&pdev->dev));
-	wake_lock(&mhsic->wlock);
+	pm_stay_awake(mhsic->dev);
 
 	ret = request_irq(mhsic->irq, msm_udc_hsic_irq,
 					  IRQF_SHARED, pdev->name, mhsic);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "request_irq failed\n");
 		ret = -ENODEV;
-		goto udc_remove;
+		goto remove_sysfs;
 	}
 
 	ret = request_irq(mhsic->async_irq_no, msm_udc_hsic_irq,
@@ -887,6 +1037,9 @@ static int msm_hsic_probe(struct platform_device *pdev)
 
 	disable_irq(mhsic->async_irq_no);
 
+	/* Driver manages its own runtime PM state. Ignore any chidren votes */
+	pm_suspend_ignore_children(&pdev->dev, true);
+
 	pm_runtime_set_active(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 	pm_runtime_get_sync(&pdev->dev);
@@ -894,6 +1047,8 @@ static int msm_hsic_probe(struct platform_device *pdev)
 	return 0;
 free_core_irq:
 	free_irq(mhsic->irq, mhsic);
+remove_sysfs:
+	device_remove_file(mhsic->dev, &dev_attr_hsic_init);
 udc_remove:
 	udc_remove();
 	if (mhsic->bus_perf_client)
@@ -907,7 +1062,8 @@ unconfig_gdsc:
 unmap:
 	iounmap(mhsic->regs);
 error:
-	destroy_workqueue(mhsic->wq);
+	if (mhsic->wq)
+		destroy_workqueue(mhsic->wq);
 	kfree(mhsic);
 	return ret;
 }
@@ -925,10 +1081,11 @@ static int hsic_msm_remove(struct platform_device *pdev)
 
 	msm_hsic_init_vdd(mhsic, 0);
 	msm_hsic_enable_clocks(pdev, mhsic, 0);
-	wake_lock_destroy(&mhsic->wlock);
+	device_wakeup_disable(mhsic->dev);
 	destroy_workqueue(mhsic->wq);
 	if (mhsic->bus_perf_client)
 		msm_bus_scale_unregister_client(mhsic->bus_perf_client);
+	device_remove_file(mhsic->dev, &dev_attr_hsic_init);
 	udc_remove();
 	iounmap(mhsic->regs);
 	kfree(mhsic);
@@ -956,8 +1113,7 @@ static struct platform_driver msm_hsic_peripheral_driver = {
 
 static int __init msm_hsic_peripheral_init(void)
 {
-	return platform_driver_probe(&msm_hsic_peripheral_driver,
-								msm_hsic_probe);
+	return platform_driver_register(&msm_hsic_peripheral_driver);
 }
 
 static void __exit msm_hsic_peripheral_exit(void)

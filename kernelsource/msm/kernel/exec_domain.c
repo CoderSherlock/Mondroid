@@ -37,7 +37,7 @@ static unsigned long ident_map[32] = {
 struct exec_domain default_exec_domain = {
 	.name		= "Linux",		/* name */
 	.handler	= default_handler,	/* lcall7 causes a seg fault. */
-	.pers_low	= 0, 			/* PER_LINUX personality. */
+	.pers_low	= 0,			/* PER_LINUX personality. */
 	.pers_high	= 0,			/* PER_LINUX personality. */
 	.signal_map	= ident_map,		/* Identity map signals. */
 	.signal_invmap	= ident_map,		/*  - both ways. */
@@ -68,7 +68,14 @@ lookup_exec_domain(unsigned int personality)
 				goto out;
 	}
 
-#ifdef CONFIG_MODULES
+/*
+ * Disable the request_module here to avoid trying to
+ * load the personality-8 module, which  doesn't exist,
+ * and results in selinux audit noise.
+ * Disabling this here avoids folks adding module_request
+ * to their sepolicy, which is maybe too generous
+ */
+#if 0
 	read_unlock(&exec_domains_lock);
 	request_module("personality-%d", pers);
 	read_lock(&exec_domains_lock);
@@ -83,7 +90,7 @@ lookup_exec_domain(unsigned int personality)
 	ep = &default_exec_domain;
 out:
 	read_unlock(&exec_domains_lock);
-	return (ep);
+	return ep;
 }
 
 int
@@ -110,8 +117,9 @@ register_exec_domain(struct exec_domain *ep)
 
 out:
 	write_unlock(&exec_domains_lock);
-	return (err);
+	return err;
 }
+EXPORT_SYMBOL(register_exec_domain);
 
 int
 unregister_exec_domain(struct exec_domain *ep)
@@ -133,6 +141,7 @@ unregister:
 	write_unlock(&exec_domains_lock);
 	return 0;
 }
+EXPORT_SYMBOL(unregister_exec_domain);
 
 int __set_personality(unsigned int personality)
 {
@@ -144,6 +153,7 @@ int __set_personality(unsigned int personality)
 
 	return 0;
 }
+EXPORT_SYMBOL(__set_personality);
 
 #ifdef CONFIG_PROC_FS
 static int execdomains_proc_show(struct seq_file *m, void *v)
@@ -188,8 +198,3 @@ SYSCALL_DEFINE1(personality, unsigned int, personality)
 
 	return old;
 }
-
-
-EXPORT_SYMBOL(register_exec_domain);
-EXPORT_SYMBOL(unregister_exec_domain);
-EXPORT_SYMBOL(__set_personality);

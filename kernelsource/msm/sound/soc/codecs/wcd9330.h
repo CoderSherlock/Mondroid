@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -39,7 +39,6 @@
 
 #define TOMTOM_ZDET_SUPPORTED true
 
-extern const u8 tomtom_reg_readable[TOMTOM_CACHE_SIZE];
 extern const u8 tomtom_reset_reg_defaults[TOMTOM_CACHE_SIZE];
 struct tomtom_codec_dai_data {
 	u32 rate;
@@ -108,6 +107,8 @@ enum {
 
 extern int tomtom_mclk_enable(struct snd_soc_codec *codec, int mclk_enable,
 			     bool dapm);
+extern int tomtom_codec_mclk_enable(struct snd_soc_codec *codec,
+				    int mclk_enable, bool dapm);
 extern int tomtom_hs_detect(struct snd_soc_codec *codec,
 			   struct wcd9xxx_mbhc_config *mbhc_cfg);
 extern void tomtom_hs_detect_exit(struct snd_soc_codec *codec);

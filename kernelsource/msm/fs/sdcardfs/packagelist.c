@@ -99,7 +99,7 @@ int check_caller_access_to_name(struct inode *parent_node, const char* name) {
 
 	/* Root always has access; access for any other UIDs should always
 	 * be controlled through packages.list. */
-	if (current_fsuid() == 0) {
+	if (from_kuid(&init_user_ns, current_fsuid()) == 0) {
 		return 1;
 	}
 
@@ -349,12 +349,19 @@ static ssize_t packages_attr_show(struct config_item *item,
 	struct hashtable_entry *hash_cur;
 	struct hlist_node *h_t;
 	int i;
-	int count = 0;
-	mutex_lock(&pkgl_data_all->hashtable_lock);
-	hash_for_each_safe(pkgl_data_all->package_to_appid, i, h_t, hash_cur, hlist)
-		count += snprintf(page + count, PAGE_SIZE - count, "%s %d\n", (char *)hash_cur->key, hash_cur->value);
-	mutex_unlock(&pkgl_data_all->hashtable_lock);
+	int count = 0, written = 0;
+	char errormsg[] = "<truncated>\n";
 
+	mutex_lock(&pkgl_data_all->hashtable_lock);
+	hash_for_each_safe(pkgl_data_all->package_to_appid, i, h_t, hash_cur, hlist) {
+		written = scnprintf(page + count, PAGE_SIZE - sizeof(errormsg) - count, "%s %d\n", (char *)hash_cur->key, hash_cur->value);
+		if (count + written == PAGE_SIZE - sizeof(errormsg)) {
+			count += scnprintf(page + count, PAGE_SIZE - count, errormsg);
+			break;
+		}
+		count += written;
+	}
+	mutex_unlock(&pkgl_data_all->hashtable_lock);
 
 	return count;
 }

@@ -29,10 +29,13 @@
 #include <linux/sched.h>
 #include <linux/highmem.h>
 #include <linux/perf_event.h>
+#include <linux/msm_rtb.h>
 
+#include <asm/cpufeature.h>
 #include <asm/exception.h>
 #include <asm/debug-monitors.h>
 #include <asm/esr.h>
+#include <asm/sysreg.h>
 #include <asm/system_misc.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
@@ -65,6 +68,7 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 			break;
 
 		pud = pud_offset(pgd, addr);
+		printk(", *pud=%016llx", pud_val(*pud));
 		if (pud_none(*pud) || pud_bad(*pud))
 			break;
 
@@ -93,6 +97,9 @@ static void __do_kernel_fault(struct mm_struct *mm, unsigned long addr,
 	if (fixup_exception(regs))
 		return;
 
+	uncached_logk(LOGK_DIE, (void *)regs->pc);
+	uncached_logk(LOGK_DIE, (void *)regs->regs[30]);
+	uncached_logk(LOGK_DIE, (void *)addr);
 	/*
 	 * No handler, we'll have to terminate things with extreme prejudice.
 	 */
@@ -223,10 +230,17 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 
 	if (esr & ESR_LNX_EXEC) {
 		vm_flags = VM_EXEC;
-	} else if (esr & ESR_EL1_WRITE) {
+	} else if ((esr & ESR_EL1_WRITE) && !(esr & ESR_EL1_CM)) {
 		vm_flags = VM_WRITE;
 		mm_flags |= FAULT_FLAG_WRITE;
 	}
+
+	/*
+	 * PAN bit set implies the fault happened in kernel space, but not
+	 * in the arch's user access functions.
+	 */
+	if (IS_ENABLED(CONFIG_ARM64_PAN) && (regs->pstate & PSR_PAN_BIT))
+		goto no_context;
 
 	/*
 	 * As per x86, we may deadlock here. However, since the kernel only
@@ -367,6 +381,13 @@ static int __kprobes do_translation_fault(unsigned long addr,
 	return 0;
 }
 
+static int do_alignment_fault(unsigned long addr, unsigned int esr,
+			      struct pt_regs *regs)
+{
+	do_bad_area(addr, esr, regs);
+	return 0;
+}
+
 /*
  * This abort handler always returns "fault".
  */
@@ -415,7 +436,7 @@ static struct fault_info {
 	{ do_bad,		SIGBUS,  0,		"synchronous parity error (translation table walk" },
 	{ do_bad,		SIGBUS,  0,		"synchronous parity error (translation table walk" },
 	{ do_bad,		SIGBUS,  0,		"unknown 32"			},
-	{ do_bad,		SIGBUS,  BUS_ADRALN,	"alignment fault"		},
+	{ do_alignment_fault,	SIGBUS,  BUS_ADRALN,	"alignment fault"		},
 	{ do_bad,		SIGBUS,  0,		"debug event"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 35"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 36"			},
@@ -536,3 +557,10 @@ asmlinkage int __exception do_debug_exception(unsigned long addr,
 
 	return 0;
 }
+
+#ifdef CONFIG_ARM64_PAN
+void cpu_enable_pan(void)
+{
+	config_sctlr_el1(SCTLR_EL1_SPAN, 0);
+}
+#endif /* CONFIG_ARM64_PAN */

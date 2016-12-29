@@ -16,7 +16,6 @@ Required Properties:
 				power supply name.
 - qcom,float-voltage-mv		Float Voltage in mV - the maximum voltage up to which
 				the battery is charged. Supported range 3500mV to 4500mV
-- qcom,chg-vadc			Corresponding VADC device's phandle.
 
 Optional Properties:
 
@@ -66,6 +65,16 @@ Optional Properties:
 - qcom,cool-bat-ma:		Maximum cool battery charge current in milli-amps.
 - qcom,warm-bat-mv:		Maximum warm battery target voltage in milli-volts.
 - qcom,cool-bat-mv:		Maximum cool battery target voltage in milli-volts.
+- qcom,chg-vadc			Corresponding VADC device's phandle.
+- qcom,skip-usb-suspend-for-fake-battery:	A boolean property to skip suspending USB path for fake
+				battery. If this property is not present then 'qcom,batt-id-vref-uv' and
+				'qcom,batt-id-rpullup-kohm' should be present.
+- qcom,batt-id-vref-uv		The reference voltage on the battery-ID line
+				specified in micro-volts.
+- qcom,batt-id-rpullup-kohm	The pull-up resistor connected on the battery-ID
+				(vref) line.
+- qcom,using-vbat-sns		Bool property to indicate that VBAT sense can be
+				done by PMIC.
 
 Example:
 	i2c@f9967000 {

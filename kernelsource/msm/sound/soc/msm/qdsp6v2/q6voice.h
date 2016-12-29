@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -40,6 +40,20 @@
 #define CVD_VERSION_STRING_MAX_SIZE          31
 #define CVD_VERSION_DEFAULT                  ""
 #define CVD_VERSION_0_0                      "0.0"
+#define CVD_VERSION_2_1                      "2.1"
+#define CVD_VERSION_2_2                      "2.2"
+
+#define CVD_INT_VERSION_DEFAULT              0
+#define CVD_INT_VERSION_0_0                  1
+#define CVD_INT_VERSION_2_1                  2
+#define CVD_INT_VERSION_2_2                  3
+#define CVD_INT_VERSION_LAST                 CVD_INT_VERSION_2_2
+#define CVD_INT_VERSION_MAX                  (CVD_INT_VERSION_LAST + 1)
+
+struct cvd_version_table {
+	char cvd_ver[CVD_VERSION_STRING_MAX_SIZE];
+	int cvd_ver_int;
+};
 
 int voc_get_cvd_version(char *);
 
@@ -90,6 +104,7 @@ struct device_data {
 	uint32_t volume_step_value;
 	uint32_t volume_ramp_duration_ms;
 	uint32_t dev_mute_ramp_duration_ms;
+	uint32_t no_of_channels;
 };
 
 struct voice_dev_route_state {
@@ -384,7 +399,8 @@ struct mvm_set_hd_enable_cmd {
 } __packed;
 
 struct vss_imemory_table_descriptor_t {
-	uint64_t mem_address;
+	uint32_t mem_address_lsw;
+	uint32_t mem_address_msw;
 	/*
 	 * Base physical address of the table. The address must be aligned
 	 * to LCM( cache_line_size, page_align, max_data_width ), where the
@@ -770,7 +786,8 @@ struct vss_istream_cmd_set_enc_dtx_mode_t {
 struct vss_istream_cmd_register_calibration_data_v2_t {
 	uint32_t cal_mem_handle;
 	/* Handle to the shared memory that holds the calibration data. */
-	uint64_t cal_mem_address;
+	uint32_t cal_mem_address_lsw;
+	uint32_t cal_mem_address_msw;
 	/* Location of calibration data. */
 	uint32_t cal_mem_size;
 	/* Size of the calibration data in bytes. */
@@ -930,9 +947,11 @@ struct cvs_enc_buffer_consumed_cmd {
 struct vss_istream_cmd_set_oob_packet_exchange_config_t {
 	struct apr_hdr hdr;
 	uint32_t mem_handle;
-	uint64_t enc_buf_addr;
+	uint32_t enc_buf_addr_lsw;
+	uint32_t enc_buf_addr_msw;
 	uint32_t enc_buf_size;
-	uint64_t dec_buf_addr;
+	uint32_t dec_buf_addr_lsw;
+	uint32_t dec_buf_addr_msw;
 	uint32_t dec_buf_size;
 } __packed;
 
@@ -949,6 +968,12 @@ struct vss_istream_cmd_set_packet_exchange_mode_t {
 #define APRV2_IBASIC_CMD_DESTROY_SESSION		0x0001003C
 
 #define VSS_IVOCPROC_CMD_SET_DEVICE_V2			0x000112C6
+
+#define VSS_IVOCPROC_CMD_SET_DEVICE_V3			0x0001316A
+
+#define VSS_IVOCPROC_CMD_TOPOLOGY_SET_DEV_CHANNELS	0x00013199
+
+#define VSS_IVOCPROC_CMD_TOPOLOGY_COMMIT		0x00013198
 
 #define VSS_IVOCPROC_CMD_SET_VP3_DATA			0x000110EB
 
@@ -1001,12 +1026,12 @@ struct vss_istream_cmd_set_packet_exchange_mode_t {
 #define VSS_IVOCPROC_VOCPROC_MODE_EC_EXT_MIXING	0x00010F7D
 
 /* Default AFE port ID. Applicable to Tx and Rx. */
-#define VSS_IVOCPROC_PORT_ID_NONE			0xFFFF
+#define VSS_IVOCPROC_PORT_ID_NONE		0xFFFF
 
-#define VSS_NETWORK_ID_DEFAULT				0x00010037
-#define VSS_NETWORK_ID_VOIP_NB				0x00011240
-#define VSS_NETWORK_ID_VOIP_WB				0x00011241
-#define VSS_NETWORK_ID_VOIP_WV				0x00011242
+#define VSS_NETWORK_ID_DEFAULT		0x00010037
+
+/* Voice over Internet Protocol (VoIP) network ID. Common for all bands.*/
+#define VSS_NETWORK_ID_VOIP		0x00011362
 
 /* Media types */
 #define VSS_MEDIA_ID_EVRC_MODEM		0x00010FC2
@@ -1015,8 +1040,12 @@ struct vss_istream_cmd_set_packet_exchange_mode_t {
 /* 80-VF690-47 UMTS AMR-NB vocoder modem format. */
 #define VSS_MEDIA_ID_AMR_WB_MODEM	0x00010FC7
 /* 80-VF690-47 UMTS AMR-WB vocoder modem format. */
-#define VSS_MEDIA_ID_PCM_NB		0x00010FCB
-#define VSS_MEDIA_ID_PCM_WB		0x00010FCC
+
+#define VSS_MEDIA_ID_PCM_8_KHZ		0x00010FCB
+#define VSS_MEDIA_ID_PCM_16_KHZ		0x00010FCC
+#define VSS_MEDIA_ID_PCM_32_KHZ		0x00010FD9
+#define VSS_MEDIA_ID_PCM_48_KHZ		0x00010FD6
+
 /* Linear PCM (16-bit, little-endian). */
 #define VSS_MEDIA_ID_G711_ALAW		0x00010FCD
 /* G.711 a-law (contains two 10ms vocoder frames). */
@@ -1032,6 +1061,12 @@ struct vss_istream_cmd_set_packet_exchange_mode_t {
 /*CDMA EVRC-NW vocoder modem format */
 
 #define VSS_IVOCPROC_CMD_CREATE_FULL_CONTROL_SESSION_V2	0x000112BF
+#define VSS_IVOCPROC_CMD_CREATE_FULL_CONTROL_SESSION_V3	0x00013169
+
+#define VSS_NUM_DEV_CHANNELS_1 1
+#define VSS_NUM_DEV_CHANNELS_2 2
+#define VSS_NUM_DEV_CHANNELS_3 3
+#define VSS_NUM_DEV_CHANNELS_4 4
 
 struct vss_ivocproc_cmd_create_full_control_session_v2_t {
 	uint16_t direction;
@@ -1153,7 +1188,8 @@ struct vss_ivocproc_cmd_register_device_config_t {
 	 * Handle to the shared memory that holds the per-network calibration
 	 * data.
 	 */
-	uint64_t mem_address;
+	uint32_t mem_address_lsw;
+	uint32_t mem_address_msw;
 	/* Location of calibration data. */
 	uint32_t mem_size;
 	/* Size of the calibration data in bytes. */
@@ -1165,7 +1201,8 @@ struct vss_ivocproc_cmd_register_calibration_data_v2_t {
 	 * Handle to the shared memory that holds the per-network calibration
 	 * data.
 	 */
-	uint64_t cal_mem_address;
+	uint32_t cal_mem_address_lsw;
+	uint32_t cal_mem_address_msw;
 	/* Location of calibration data. */
 	uint32_t cal_mem_size;
 	/* Size of the calibration data in bytes. */
@@ -1184,7 +1221,8 @@ struct vss_ivocproc_cmd_register_volume_cal_data_t {
 	 * Handle to the shared memory that holds the volume calibration
 	 * data.
 	 */
-	uint64_t cal_mem_address;
+	uint32_t cal_mem_address_lsw;
+	uint32_t cal_mem_address_msw;
 	/* Location of volume calibration data. */
 	uint32_t cal_mem_size;
 	/* Size of the volume calibration data in bytes. */
@@ -1194,6 +1232,24 @@ struct vss_ivocproc_cmd_register_volume_cal_data_t {
 	 * in the calibration table. The order in which the columns are provided
 	 * here must match the order in which they exist in the calibration
 	 * table provided.
+	 */
+} __packed;
+
+struct vss_ivocproc_cmd_topology_set_dev_channels_t {
+	uint16_t tx_num_channels;
+	/*
+	 * Number of Mics.
+	 * Supported values
+	 * 1  VSS_NUM_DEV_CHANNELS_1
+	 * 2  VSS_NUM_DEV_CHANNELS_2
+	 * 3  VSS_NUM_DEV_CHANNELS_3
+	 * 4  VSS_NUM_DEV_CHANNELS_4
+	 */
+	uint16_t rx_num_channels;
+	/*
+	 * Number of speaker channels.
+	 * Supported values
+	 * 1 VSS_NUM_DEV_CHANNELS_1
 	 */
 } __packed;
 
@@ -1225,7 +1281,7 @@ struct vss_ivocproc_cmd_register_volume_cal_data_t {
 #define VSS_IVPCM_SAMPLING_RATE_16K	16000
 
 /* RX and TX */
-#define MAX_TAP_POINTS_SUPPORTED	1
+#define MAX_TAP_POINTS_SUPPORTED	2
 
 struct vss_ivpcm_tap_point {
 	uint32_t tap_point;
@@ -1314,6 +1370,11 @@ struct cvp_command {
 struct cvp_set_device_cmd {
 	struct apr_hdr hdr;
 	struct vss_ivocproc_cmd_set_device_v2_t cvp_set_device_v2;
+} __packed;
+
+struct cvp_set_dev_channels_cmd {
+	struct apr_hdr hdr;
+	struct vss_ivocproc_cmd_topology_set_dev_channels_t cvp_set_channels;
 } __packed;
 
 struct cvp_set_vp3_data_cmd {
@@ -1427,6 +1488,57 @@ struct share_memory_info {
 	struct mem_map_table	memtbl;
 };
 
+#define VSS_ISOUNDFOCUS_CMD_SET_SECTORS     0x00013133
+#define VSS_ISOUNDFOCUS_CMD_GET_SECTORS     0x00013134
+#define VSS_ISOUNDFOCUS_RSP_GET_SECTORS     0x00013135
+#define VSS_ISOURCETRACK_CMD_GET_ACTIVITY   0x00013136
+
+struct vss_isoundfocus_cmd_set_sectors_t {
+	uint16_t start_angles[8];
+	uint8_t enables[8];
+	uint16_t gain_step;
+} __packed;
+
+/* Payload of the VSS_ISOUNDFOCUS_RSP_GET_SECTORS response */
+struct vss_isoundfocus_rsp_get_sectors_t {
+	uint16_t start_angles[8];
+	uint8_t enables[8];
+	uint16_t gain_step;
+} __packed;
+
+struct cvp_set_sound_focus_param_cmd_t {
+	struct apr_hdr hdr;
+	struct vss_isoundfocus_cmd_set_sectors_t cvp_set_sound_focus_param;
+} __packed;
+
+/* Payload structure for the VSS_ISOURCETRACK_CMD_GET_ACTIVITY command */
+struct vss_isourcetrack_cmd_get_activity_t {
+	uint32_t mem_handle;
+	uint32_t mem_address_lsw;
+	uint32_t mem_address_msw;
+	uint32_t mem_size;
+} __packed;
+
+struct cvp_get_source_tracking_param_cmd_t {
+	struct apr_hdr hdr;
+	struct vss_isourcetrack_cmd_get_activity_t
+			cvp_get_source_tracking_param;
+} __packed;
+
+/* Structure for the sound activity data */
+struct vss_isourcetrack_activity_data_t {
+	uint8_t voice_active[8];
+	uint16_t talker_doa;
+	uint16_t interferer_doa[3];
+	uint8_t sound_strength[360];
+} __packed;
+
+struct shared_mem_info {
+	uint32_t mem_handle;
+	struct mem_map_table sh_mem_block;
+	struct mem_map_table sh_mem_table;
+};
+
 struct voice_data {
 	int voc_state;/*INIT, CHANGE, RELEASE, RUN */
 
@@ -1448,6 +1560,8 @@ struct voice_data {
 	u32 mvm_state;
 	u32 cvs_state;
 	u32 cvp_state;
+
+	u32 async_err;
 
 	/* Handle to MVM in the Q6 */
 	u16 mvm_handle;
@@ -1488,7 +1602,7 @@ struct cal_mem {
 	void *buf;
 };
 
-#define MAX_VOC_SESSIONS 6
+#define MAX_VOC_SESSIONS 8
 
 struct common_data {
 	/* these default values are for all devices */
@@ -1535,6 +1649,11 @@ struct common_data {
 	bool is_vote_bms;
 	char cvd_version[CVD_VERSION_STRING_MAX_SIZE];
 	bool is_per_vocoder_cal_enabled;
+	bool is_sound_focus_resp_success;
+	bool is_source_tracking_resp_success;
+	struct vss_isoundfocus_rsp_get_sectors_t soundFocusResponse;
+	struct shared_mem_info source_tracking_sh_mem;
+	struct vss_isourcetrack_activity_data_t sourceTrackingResponse;
 };
 
 struct voice_session_itr {
@@ -1574,6 +1693,8 @@ enum {
 #define VOC_PATH_VOICE2_PASSIVE 3
 #define VOC_PATH_QCHAT_PASSIVE 4
 #define VOC_PATH_VOWLAN_PASSIVE 5
+#define VOC_PATH_VOICEMMODE1_PASSIVE 6
+#define VOC_PATH_VOICEMMODE2_PASSIVE 7
 
 #define MAX_SESSION_NAME_LEN 32
 #define VOICE_SESSION_NAME   "Voice session"
@@ -1582,29 +1703,24 @@ enum {
 #define VOICE2_SESSION_NAME  "Voice2 session"
 #define QCHAT_SESSION_NAME   "QCHAT session"
 #define VOWLAN_SESSION_NAME  "VoWLAN session"
+#define VOICEMMODE1_NAME     "VoiceMMode1"
+#define VOICEMMODE2_NAME     "VoiceMMode2"
 
-#define VOICE2_SESSION_VSID_STR "10DC1000"
-#define QCHAT_SESSION_VSID_STR "10803000"
-#define VOWLAN_SESSION_VSID_STR "10002000"
-#define VOICE_SESSION_VSID  0x10C01000
-#define VOICE2_SESSION_VSID 0x10DC1000
-#define VOLTE_SESSION_VSID  0x10C02000
-#define VOIP_SESSION_VSID   0x10004000
-#define QCHAT_SESSION_VSID  0x10803000
-#define VOWLAN_SESSION_VSID 0x10002000
-#define ALL_SESSION_VSID    0xFFFFFFFF
-#define VSID_MAX            ALL_SESSION_VSID
-
-#define APP_ID_MASK         0x3F000
-#define APP_ID_SHIFT		12
-enum vsid_app_type {
-	VSID_APP_NONE = 0,
-	VSID_APP_CS_VOICE = 1,
-	VSID_APP_IMS = 2, /* IMS voice services covering VoLTE etc */
-	VSID_APP_QCHAT = 3,
-	VSID_APP_VOIP = 4, /* VoIP on AP HLOS without modem processor */
-	VSID_APP_MAX,
-};
+#define VOICE2_SESSION_VSID_STR      "10DC1000"
+#define QCHAT_SESSION_VSID_STR       "10803000"
+#define VOWLAN_SESSION_VSID_STR      "10002000"
+#define VOICEMMODE1_VSID_STR         "11C05000"
+#define VOICEMMODE2_VSID_STR         "11DC5000"
+#define VOICE_SESSION_VSID           0x10C01000
+#define VOICE2_SESSION_VSID          0x10DC1000
+#define VOLTE_SESSION_VSID           0x10C02000
+#define VOIP_SESSION_VSID            0x10004000
+#define QCHAT_SESSION_VSID           0x10803000
+#define VOWLAN_SESSION_VSID          0x10002000
+#define VOICEMMODE1_VSID             0x11C05000
+#define VOICEMMODE2_VSID             0x11DC5000
+#define ALL_SESSION_VSID             0xFFFFFFFF
+#define VSID_MAX                     ALL_SESSION_VSID
 
 /* called  by alsa driver */
 int voc_set_pp_enable(uint32_t session_id, uint32_t module_id,
@@ -1618,9 +1734,6 @@ int voc_end_voice_call(uint32_t session_id);
 int voc_standby_voice_call(uint32_t session_id);
 int voc_resume_voice_call(uint32_t session_id);
 int voc_set_lch(uint32_t session_id, enum voice_lch_mode lch_mode);
-int voc_set_rxtx_port(uint32_t session_id,
-		      uint32_t dev_port_id,
-		      uint32_t dev_type);
 int voc_set_rx_vol_step(uint32_t session_id, uint32_t dir, uint32_t vol_step,
 			uint32_t ramp_duration);
 int voc_set_tx_mute(uint32_t session_id, uint32_t dir, uint32_t mute,
@@ -1666,6 +1779,10 @@ int voc_enable_device(uint32_t session_id);
 void voc_set_destroy_cvd_flag(bool is_destroy_cvd);
 void voc_set_vote_bms_flag(bool is_vote_bms);
 int voc_disable_topology(uint32_t session_id, uint32_t disable);
-
+int voc_set_device_config(uint32_t session_id, uint8_t path_dir,
+			  uint8_t no_of_channels, uint32_t dev_port_id);
 uint32_t voice_get_topology(uint32_t topology_idx);
+int voc_set_sound_focus(struct sound_focus_param sound_focus_param);
+int voc_get_sound_focus(struct sound_focus_param *soundFocusData);
+int voc_get_source_tracking(struct source_tracking_param *sourceTrackingData);
 #endif

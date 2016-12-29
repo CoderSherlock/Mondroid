@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -16,6 +16,8 @@
 
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
+
+#define MAX_SSR_REASON_LEN  81U
 
 struct subsys_device;
 
@@ -49,6 +51,7 @@ struct module;
  * @sysmon_shutdown_ret: Return value for the call to sysmon_send_shutdown
  * @system_debug: If "set", triggers a device restart when the
  * subsystem's wdog bite handler is invoked.
+ * @edge: GLINK logical name of the subsystem
  */
 struct subsys_desc {
 	const char *name;
@@ -65,32 +68,41 @@ struct subsys_desc {
 	irqreturn_t (*err_fatal_handler) (int irq, void *dev_id);
 	irqreturn_t (*stop_ack_handler) (int irq, void *dev_id);
 	irqreturn_t (*wdog_bite_handler) (int irq, void *dev_id);
+	irqreturn_t (*generic_handler)(int irq, void *dev_id);
 	int is_not_loadable;
 	int err_fatal_gpio;
 	unsigned int err_fatal_irq;
 	unsigned int err_ready_irq;
 	unsigned int stop_ack_irq;
 	unsigned int wdog_bite_irq;
+	unsigned int generic_irq;
 	int force_stop_gpio;
 	int ramdump_disable_gpio;
+	int shutdown_ack_gpio;
 	int ramdump_disable;
 	bool no_auth;
+	bool pil_mss_memsetup;
 	int ssctl_instance_id;
 	u32 sysmon_pid;
 	int sysmon_shutdown_ret;
 	bool system_debug;
+	const char *edge;
+	char last_crash_reason[MAX_SSR_REASON_LEN];
 };
 
 /**
  * struct notif_data - additional notif information
  * @crashed: indicates if subsystem has crashed
  * @enable_ramdump: ramdumps disabled if set to 0
+ * @enable_mini_ramdumps: enable flag for minimized critical-memory-only
+ * ramdumps
  * @no_auth: set if subsystem does not use PIL to bring it out of reset
  * @pdev: subsystem platform device pointer
  */
 struct notif_data {
 	bool crashed;
 	int enable_ramdump;
+	int enable_mini_ramdumps;
 	bool no_auth;
 	struct platform_device *pdev;
 };
@@ -100,7 +112,6 @@ struct notif_data {
 extern int subsys_get_restart_level(struct subsys_device *dev);
 extern int subsystem_restart_dev(struct subsys_device *dev);
 extern int subsystem_restart(const char *name);
-extern int subsys_modem_restart(void);
 extern int subsystem_crashed(const char *name);
 
 extern void *subsystem_get(const char *name);
@@ -115,6 +126,8 @@ extern void subsys_set_crash_status(struct subsys_device *dev, bool crashed);
 extern bool subsys_get_crash_status(struct subsys_device *dev);
 void notify_proxy_vote(struct device *device);
 void notify_proxy_unvote(struct device *device);
+void complete_err_ready(struct subsys_device *subsys);
+extern int wait_for_shutdown_ack(struct subsys_desc *desc);
 #else
 
 static inline int subsys_get_restart_level(struct subsys_device *dev)
@@ -166,6 +179,10 @@ static inline bool subsys_get_crash_status(struct subsys_device *dev)
 }
 static inline void notify_proxy_vote(struct device *device) { }
 static inline void notify_proxy_unvote(struct device *device) { }
+static inline int wait_for_shutdown_ack(struct subsys_desc *desc)
+{
+	return -ENOSYS;
+}
 #endif /* CONFIG_MSM_SUBSYSTEM_RESTART */
 
 #endif

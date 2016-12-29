@@ -24,7 +24,6 @@
 
 unsigned int pci_probe = 1;
 
-int pcibios_last_bus = -1;
 struct pci_ops *pci_root_ops;
 
 /*
@@ -348,6 +347,7 @@ static int __init pcibios_init(void)
 {
 	resource_size_t io_offset, mem_offset;
 	LIST_HEAD(resources);
+	struct pci_bus *bus;
 
 	ioport_resource.start	= 0xA0000000;
 	ioport_resource.end	= 0xDFFFFFFF;
@@ -377,11 +377,14 @@ static int __init pcibios_init(void)
 
 	pci_add_resource_offset(&resources, &pci_ioport_resource, io_offset);
 	pci_add_resource_offset(&resources, &pci_iomem_resource, mem_offset);
-	pci_scan_root_bus(NULL, 0, &pci_direct_ampci, NULL, &resources);
+	bus = pci_scan_root_bus(NULL, 0, &pci_direct_ampci, NULL, &resources);
+	if (!bus)
+		return 0;
 
 	pcibios_irq_init();
 	pcibios_fixup_irqs();
 	pcibios_resource_survey();
+	pci_bus_add_devices(bus);
 	return 0;
 }
 
@@ -391,10 +394,6 @@ char *__init pcibios_setup(char *str)
 {
 	if (!strcmp(str, "off")) {
 		pci_probe = 0;
-		return NULL;
-
-	} else if (!strncmp(str, "lastbus=", 8)) {
-		pcibios_last_bus = simple_strtol(str+8, NULL, 0);
 		return NULL;
 	}
 

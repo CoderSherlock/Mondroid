@@ -43,6 +43,7 @@
 #include <ol_txrx.h>          /* ol_tx_desc_pool_size_hl */
 #include <adf_os_types.h>     /* a_bool_t */
 #include <ol_txrx_peer_find.h>
+#include "adf_trace.h"
 
 
 #if defined(CONFIG_HL_SUPPORT)
@@ -1051,6 +1052,8 @@ ol_txrx_vdev_pause(ol_txrx_vdev_handle vdev, u_int32_t reason)
     } else {
         adf_os_spin_lock_bh(&vdev->ll_pause.mutex);
         vdev->ll_pause.paused_reason |= reason;
+        vdev->ll_pause.pause_timestamp =
+                        adf_os_gettimestamp();
         vdev->ll_pause.q_pause_cnt++;
         vdev->ll_pause.is_q_paused = TRUE;
         adf_os_spin_unlock_bh(&vdev->ll_pause.mutex);
@@ -1111,6 +1114,7 @@ ol_txrx_vdev_unpause(ol_txrx_vdev_handle vdev, u_int32_t reason)
             adf_os_spin_unlock_bh(&vdev->ll_pause.mutex);
         }
     }
+
     TX_SCHED_DEBUG_PRINT("Leave %s\n", __func__);
 }
 

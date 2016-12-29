@@ -5,6 +5,7 @@ config DIAG_CHAR
 	default m
 	depends on USB_G_ANDROID || USB_FUNCTION_DIAG || USB_QCOM_MAEMO
 	depends on ARCH_MSM
+	depends on POWER_RESET_MSM
 	select CRC_CCITT
 	help
 	 Char driver interface for diag user space and diag-forwarding to modem ARM and back.
@@ -24,7 +25,7 @@ endmenu
 menu "HSIC/SMUX support for DIAG"
 
 config DIAGFWD_BRIDGE_CODE
-	depends on USB_QCOM_DIAG_BRIDGE
+	depends on USB_QCOM_DIAG_BRIDGE || MSM_MHI
 	default y
 	bool "Enable QSC/9K DIAG traffic over SMUX/HSIC"
 	help

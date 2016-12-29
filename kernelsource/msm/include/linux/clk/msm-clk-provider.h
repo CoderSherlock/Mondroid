@@ -23,6 +23,7 @@
 #include <linux/of.h>
 #include <linux/device.h>
 #include <linux/spinlock.h>
+#include <linux/platform_device.h>
 #include <linux/mutex.h>
 #include <linux/regulator/consumer.h>
 #include <linux/seq_file.h>
@@ -166,6 +167,7 @@ struct clk_ops {
  * @vdd_class: voltage scaling requirement class
  * @fmax: maximum frequency in Hz supported at each voltage level
  * @parent: the current source of this clock
+ * @opp_table_populated: tracks if the OPP table of this clock has been filled
  */
 struct clk {
 	uint32_t flags;
@@ -192,6 +194,7 @@ struct clk {
 
 	unsigned long init_rate;
 	bool always_on;
+	bool opp_table_populated;
 
 	struct dentry *clk_dir;
 };
@@ -213,6 +216,9 @@ void __clk_post_reparent(struct clk *c, struct clk *old, unsigned long *flags);
 int msm_clock_register(struct clk_lookup *table, size_t size);
 int of_msm_clock_register(struct device_node *np, struct clk_lookup *table,
 				size_t size);
+
+int clock_rcgwr_init(struct platform_device *pdev);
+int clock_rcgwr_disable(struct platform_device *pdev);
 
 extern struct clk dummy_clk;
 extern struct clk_ops clk_ops_dummy;

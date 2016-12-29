@@ -85,11 +85,7 @@
 #else
 # define smp_rmb()	barrier()
 #endif
-#ifdef CONFIG_X86_OOSTORE
-# define smp_wmb() 	wmb()
-#else
-# define smp_wmb()	barrier()
-#endif
+#define smp_wmb()	barrier()
 #define smp_read_barrier_depends()	read_barrier_depends()
 #define set_mb(var, value) do { (void)xchg(&var, value); } while (0)
 #else /* !SMP */
@@ -100,10 +96,10 @@
 #define set_mb(var, value) do { var = value; barrier(); } while (0)
 #endif /* SMP */
 
-#if defined(CONFIG_X86_OOSTORE) || defined(CONFIG_X86_PPRO_FENCE)
+#if defined(CONFIG_X86_PPRO_FENCE)
 
 /*
- * For either of these options x86 doesn't have a strong TSO memory
+ * For this option x86 doesn't have a strong TSO memory
  * model and we should fall back to full barriers.
  */
 
@@ -141,6 +137,10 @@ do {									\
 
 #endif
 
+/* Atomic operations are already serializing on x86 */
+#define smp_mb__before_atomic()	barrier()
+#define smp_mb__after_atomic()	barrier()
+
 /*
  * Stop RDTSC speculation. This is needed when you need to use RDTSC
  * (or get_cycles or vread that possibly accesses the TSC) in a defined
@@ -153,8 +153,5 @@ static __always_inline void rdtsc_barrier(void)
 	alternative(ASM_NOP3, "mfence", X86_FEATURE_MFENCE_RDTSC);
 	alternative(ASM_NOP3, "lfence", X86_FEATURE_LFENCE_RDTSC);
 }
-
-#define smp_mb__before_atomic()	smp_mb()
-#define smp_mb__after_atomic()	smp_mb()
 
 #endif /* _ASM_X86_BARRIER_H */

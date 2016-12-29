@@ -1,4 +1,4 @@
-Qualcomm mdss-qpic-panel
+Qualcomm Technologies, Inc. mdss-qpic-panel
 
 mdss-qpic-panel is a panel device which can be driven by qpic.
 

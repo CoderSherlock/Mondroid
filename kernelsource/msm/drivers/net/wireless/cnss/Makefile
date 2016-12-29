@@ -1,6 +1,8 @@
 # Makefile for CNSS platform driver
 
-cnsscore-objs += ../wcnss/qcomwlan_secif.o
-obj-$(CONFIG_CNSS_PCI) += cnss_pci.o
-obj-y += cnss_common.o
-obj-y += cnsscore.o
+obj-$(CONFIG_CNSS)	+= cnss_pci.o
+obj-$(CONFIG_CNSS)	+= cnss_sdio.o
+obj-$(CONFIG_CNSS_LOGGER)	+= logger/
+
+obj-$(CONFIG_CNSS)	+= cnss_common.o
+obj-$(CONFIG_HTC_WLAN_NV) += custom_platdev.o

@@ -1,5 +1,5 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
-   *
+/* Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
  * only version 2 as published by the Free Software Foundation.
@@ -19,7 +19,8 @@
 #define CCI_M0_RESET_RMSK                                                0x3F1
 #define CCI_M1_RESET_RMSK                                              0x3F001
 #define CCI_QUEUE_START_ADDR                                        0x00000008
-#define CCI_SET_CID_SYNC_TIMER_0_ADDR                               0x00000010
+#define CCI_SET_CID_SYNC_TIMER_ADDR                                 0x00000010
+#define CCI_SET_CID_SYNC_TIMER_OFFSET                               0x00000004
 #define CCI_I2C_M0_SCL_CTL_ADDR                                     0x00000100
 #define CCI_I2C_M0_SDA_CTL_0_ADDR                                   0x00000104
 #define CCI_I2C_M0_SDA_CTL_1_ADDR                                   0x00000108
@@ -37,6 +38,7 @@
 #define CCI_I2C_M1_MISC_CTL_ADDR                                    0x00000210
 #define CCI_I2C_M0_Q0_CUR_WORD_CNT_ADDR                             0x00000304
 #define CCI_I2C_M0_Q0_CUR_CMD_ADDR                                  0x00000308
+#define CCI_I2C_M0_Q0_REPORT_STATUS_ADDR                            0x0000030c
 #define CCI_I2C_M0_Q0_EXEC_WORD_CNT_ADDR                            0x00000300
 #define CCI_I2C_M0_Q0_LOAD_DATA_ADDR                                0x00000310
 #define CCI_IRQ_MASK_0_ADDR                                         0x00000c04
@@ -55,4 +57,13 @@
 #define CCI_IRQ_STATUS_0_I2C_M1_ERROR_BMSK                          0x60EE6000
 #define CCI_IRQ_STATUS_0_I2C_M0_RD_DONE_BMSK                               0x1
 #define CCI_IRQ_GLOBAL_CLEAR_CMD_ADDR                               0x00000c00
+
+#define DEBUG_TOP_REG_START                                                0x0
+#define DEBUG_TOP_REG_COUNT                                                 14
+#define DEBUG_MASTER_REG_START                                           0x100
+#define DEBUG_MASTER_REG_COUNT                                               8
+#define DEBUG_MASTER_QUEUE_REG_START                                     0x300
+#define DEBUG_MASTER_QUEUE_REG_COUNT                                         6
+#define DEBUG_INTR_REG_START                                             0xC00
+#define DEBUG_INTR_REG_COUNT                                                 7
 #endif /* __MSM_CAM_CCI_HWREG__ */

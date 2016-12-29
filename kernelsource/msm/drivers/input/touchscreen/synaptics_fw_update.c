@@ -22,12 +22,10 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
-#include <linux/mutex.h>
 #include <linux/delay.h>
 #include <linux/input.h>
 #include <linux/firmware.h>
 #include <linux/string.h>
-#include <linux/ctype.h>
 #include <linux/input/synaptics_dsx.h>
 #include "synaptics_i2c_rmi4.h"
 
@@ -133,12 +131,14 @@ struct image_header_data {
 			unsigned char firmware_size[4];
 			unsigned char config_size[4];
 			/* 0x10-0x1F */
-			unsigned char product_id[SYNAPTICS_RMI4_PRODUCT_ID_SIZE];
+			unsigned char product_id[
+					SYNAPTICS_RMI4_PRODUCT_ID_SIZE];
 			unsigned char pkg_id_lsb;
 			unsigned char pkg_id_msb;
 			unsigned char pkg_id_rev_lsb;
 			unsigned char pkg_id_rev_msb;
-			unsigned char product_info[SYNAPTICS_RMI4_PRODUCT_INFO_SIZE];
+			unsigned char product_info[
+					SYNAPTICS_RMI4_PRODUCT_INFO_SIZE];
 			/* 0x20-0x2F */
 			unsigned char reserved_20_2f[0x10];
 			/* 0x30-0x3F */
@@ -270,7 +270,6 @@ struct synaptics_rmi4_fwu_handle {
 	const unsigned char *firmware_data;
 	const unsigned char *config_data;
 	const unsigned char *lockdown_data;
-	unsigned char img_config_data[4];
 	unsigned short block_size;
 	unsigned short fw_block_count;
 	unsigned short config_block_count;
@@ -297,7 +296,6 @@ struct synaptics_rmi4_fwu_handle {
 static struct synaptics_rmi4_fwu_handle *fwu;
 
 DECLARE_COMPLETION(fwu_remove_complete);
-DEFINE_MUTEX(fwu_sysfs_mutex);
 
 static unsigned int extract_uint(const unsigned char *ptr)
 {
@@ -348,14 +346,12 @@ static void parse_header(void)
 		sizeof(data->product_id));
 	img->product_id[sizeof(data->product_id)] = 0;
 
+	img->product_id[sizeof(data->product_info)] = 0;
 	memcpy(img->product_info, data->product_info,
 		sizeof(data->product_info));
 
-	if (fwu->rmi4_data->check_build)
-		img->is_contain_build_info =
-			(data->options_firmware_id == (1 << OPTION_BUILD_INFO));
-	else
-		img->is_contain_build_info = 0;
+	img->is_contain_build_info =
+		(data->options_firmware_id == (1 << OPTION_BUILD_INFO));
 
 	if (img->is_contain_build_info) {
 		img->package_id = (data->pkg_id_msb << 8) |
@@ -580,6 +576,7 @@ static int fwu_read_interrupt_status(void)
 {
 	int retval;
 	unsigned char interrupt_status;
+
 	retval = fwu->fn_ptr->read(fwu->rmi4_data,
 			fwu->addr_f01_interrupt_register,
 			&interrupt_status,
@@ -672,6 +669,7 @@ static int fwu_wait_for_idle(int timeout_ms)
 {
 	int count = 0;
 	int timeout_count = ((timeout_ms * 1000) / SLEEP_TIME_US) + 1;
+
 	do {
 		if (fwu->interrupt_flag)
 			return 0;
@@ -713,33 +711,14 @@ static enum flash_area fwu_go_nogo(void)
 	struct i2c_client *i2c_client = fwu->rmi4_data->i2c_client;
 	struct f01_device_status f01_device_status;
 	struct image_content *img = &fwu->image_content;
-	int config_flag = 0;
 
 	imagePR = kzalloc(sizeof(MAX_FIRMWARE_ID_LEN), GFP_KERNEL);
 	if (!imagePR) {
-		dev_err(&i2c_client->dev,
-			"%s: Failed to alloc mem for image pointer\n",
-			__func__);
 		flash_area = NONE;
 		return flash_area;
 	}
 
 	if (fwu->force_update) {
-		flash_area = UI_FIRMWARE;
-		goto exit;
-	}
-
-	retval = fwu_read_f01_device_status(&f01_device_status);
-	if (retval < 0) {
-		flash_area = NONE;
-		goto exit;
-	}
-
-	/* Force update firmware when device is in bootloader mode */
-	if (f01_device_status.flash_prog) {
-		dev_info(&i2c_client->dev,
-			"%s: In flash prog mode\n",
-			__func__);
 		flash_area = UI_FIRMWARE;
 		goto exit;
 	}
@@ -784,6 +763,21 @@ static enum flash_area fwu_go_nogo(void)
 		goto exit;
 	}
 
+	retval = fwu_read_f01_device_status(&f01_device_status);
+	if (retval < 0) {
+		flash_area = NONE;
+		goto exit;
+	}
+
+	/* Force update firmware when device is in bootloader mode */
+	if (f01_device_status.flash_prog) {
+		dev_info(&i2c_client->dev,
+			"%s: In flash prog mode\n",
+			__func__);
+		flash_area = UI_FIRMWARE;
+		goto exit;
+	}
+
 	/* device firmware id */
 	retval = fwu->fn_ptr->read(fwu->rmi4_data,
 				fwu->f01_fd.query_base_addr + 18,
@@ -816,10 +810,8 @@ static enum flash_area fwu_go_nogo(void)
 				sizeof(fwu->image_name));
 		if (!strptr) {
 			dev_err(&i2c_client->dev,
-				"No valid PR number (PRxxxxxxx)" \
-				"found in image file name...\n");
-			config_flag = 1;
-			goto check_config_id;
+			"No valid PR number found in image file name...\n");
+			goto exit;
 		}
 
 		strptr += 2;
@@ -841,18 +833,16 @@ static enum flash_area fwu_go_nogo(void)
 			"Device firmware id %d, .img firmware id %d\n",
 			deviceFirmwareID,
 			(unsigned int)imageFirmwareID);
-
-	/*
-	 * New firmware's FirmwareID isn't always increased
-	 * from the current firmware's, so just mark firmware update flag
-	 * if FirmwareIDs are different.
-	 * Firmware update will be decided by checking "config_id".
-	 */
-	if (imageFirmwareID != deviceFirmwareID) {
-		config_flag = 1;
+	if (imageFirmwareID > deviceFirmwareID) {
+		flash_area = UI_FIRMWARE;
+		goto exit;
+	} else if (imageFirmwareID < deviceFirmwareID) {
+		flash_area = NONE;
+		dev_info(&i2c_client->dev,
+			"%s: Img fw is older than device fw. Skip fw update.\n",
+			__func__);
+		goto exit;
 	}
-
-check_config_id:
 
 	/* device config id */
 	retval = fwu->fn_ptr->read(fwu->rmi4_data,
@@ -866,48 +856,34 @@ check_config_id:
 		flash_area = NONE;
 		goto exit;
 	}
-	config_id[0] = toupper(config_id[0]);
-	config_id[1] = toupper(config_id[1]);
-	config_id[2] = toupper(config_id[2]);
-	config_id[3] = toupper(config_id[3]);
 	deviceConfigID =  extract_uint_be(config_id);
 
-	dev_info(&i2c_client->dev,
+	dev_dbg(&i2c_client->dev,
 		"Device config ID 0x%02X, 0x%02X, 0x%02X, 0x%02X\n",
 		config_id[0], config_id[1], config_id[2], config_id[3]);
 
 	/* .img config id */
-	dev_info(&i2c_client->dev,
+	dev_dbg(&i2c_client->dev,
 			".img config ID 0x%02X, 0x%02X, 0x%02X, 0x%02X\n",
 			fwu->config_data[0],
 			fwu->config_data[1],
 			fwu->config_data[2],
 			fwu->config_data[3]);
-
-	/* copy to keep debug information */
-	fwu->img_config_data[0] = toupper(fwu->config_data[0]);
-	fwu->img_config_data[1] = toupper(fwu->config_data[1]);
-	fwu->img_config_data[2] = toupper(fwu->config_data[2]);
-	fwu->img_config_data[3] = toupper(fwu->config_data[3]);
-
-	imageConfigID =  extract_uint_be(fwu->img_config_data);
+	imageConfigID =  extract_uint_be(fwu->config_data);
 
 	dev_dbg(&i2c_client->dev,
 		"%s: Device config ID %d, .img config ID %d\n",
 		__func__, deviceConfigID, imageConfigID);
 
 	if (imageConfigID > deviceConfigID) {
-		if (config_flag)
-			flash_area = UI_FIRMWARE;
-		else
-			flash_area = CONFIG_AREA;
+		flash_area = CONFIG_AREA;
 		goto exit;
 	}
 exit:
 	kfree(imagePR);
 	if (flash_area == MISMATCH)
 		dev_info(&i2c_client->dev,
-			"%s: Package ID indicates mismatch of firmware and" \
+			"%s: Package ID indicates mismatch of firmware and"
 			" controller compatibility\n", __func__);
 	else if (flash_area == NONE)
 		dev_info(&i2c_client->dev,
@@ -1427,12 +1403,10 @@ static int fwu_do_read_config(void)
 	kfree(fwu->read_config_buf);
 	fwu->read_config_buf = kzalloc(fwu->config_size, GFP_KERNEL);
 	if (!fwu->read_config_buf) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-			"%s: Failed to alloc memory for config buffer\n",
-			__func__);
 		retval = -ENOMEM;
 		goto exit;
 	}
+
 	block_offset[1] |= (fwu->config_area << 5);
 
 	retval = fwu->fn_ptr->write(fwu->rmi4_data,
@@ -1646,9 +1620,6 @@ static int fwu_start_reflash(void)
 	/* reset device */
 	fwu_reset_device();
 
-	/* rescan pdt */
-	fwu_scan_pdt();
-
 	/* check device status */
 	retval = fwu_read_f01_device_status(&f01_device_status);
 	if (retval < 0)
@@ -1695,16 +1666,10 @@ int synaptics_fw_updater(void)
 
 	fwu->config_area = UI_CONFIG_AREA;
 
-	if (fwu->fn_ptr->enable)
-		fwu->fn_ptr->enable(fwu->rmi4_data, false);
-
 	retval = fwu_start_reflash();
 	fwu->rmi4_data->fw_updating = false;
 
 	synaptics_rmi4_update_debug_info();
-
-	if (fwu->fn_ptr->enable)
-		fwu->fn_ptr->enable(fwu->rmi4_data, true);
 
 	return retval;
 }
@@ -1715,60 +1680,31 @@ static ssize_t fwu_sysfs_show_image(struct file *data_file,
 		char *buf, loff_t pos, size_t count)
 {
 	struct synaptics_rmi4_data *rmi4_data = fwu->rmi4_data;
-	ssize_t retval;
-
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
 
 	if (count < fwu->config_size) {
 		dev_err(&rmi4_data->i2c_client->dev,
 				"%s: Not enough space (%zu bytes) in buffer\n",
 				__func__, count);
-		retval = -EINVAL;
-		goto show_image_exit;
+		return -EINVAL;
 	}
 
 	memcpy(buf, fwu->read_config_buf, fwu->config_size);
-	retval = fwu->config_size;
-show_image_exit:
-	mutex_unlock(&fwu_sysfs_mutex);
-	return retval;
+
+	return fwu->config_size;
 }
 
 static ssize_t fwu_sysfs_store_image(struct file *data_file,
 		struct kobject *kobj, struct bin_attribute *attributes,
 		char *buf, loff_t pos, size_t count)
 {
-	ssize_t retval;
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
-
-	if (!fwu->ext_data_source) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-			"Cannot use this without setting imagesize!\n");
-		retval = -EAGAIN;
-		goto store_image_exit;
-	}
-
-	if (count > fwu->image_size - fwu->data_pos) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-				"%s: Not enough space in buffer\n",
-				__func__);
-		retval = -EINVAL;
-		goto store_image_exit;
-	}
-
 	memcpy((void *)(&fwu->ext_data_source[fwu->data_pos]),
 			(const void *)buf,
 			count);
 
 	fwu->data_buffer = fwu->ext_data_source;
 	fwu->data_pos += count;
-	retval = count;
 
-store_image_exit:
-	mutex_unlock(&fwu_sysfs_mutex);
-	return retval;
+	return count;
 }
 
 static ssize_t fwu_sysfs_image_name_store(struct device *dev,
@@ -1776,15 +1712,11 @@ static ssize_t fwu_sysfs_image_name_store(struct device *dev,
 {
 	struct synaptics_rmi4_data *rmi4_data = fwu->rmi4_data;
 	char *strptr;
-	ssize_t retval;
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
 
 	if (count >= NAME_BUFFER_SIZE) {
 		dev_err(&rmi4_data->i2c_client->dev,
 			"Input over %d characters long\n", NAME_BUFFER_SIZE);
-		retval = -EINVAL;
-		goto image_name_store_exit;
+		return -EINVAL;
 	}
 
 	strptr = strnstr(buf, ".img",
@@ -1792,32 +1724,21 @@ static ssize_t fwu_sysfs_image_name_store(struct device *dev,
 	if (!strptr) {
 		dev_err(&rmi4_data->i2c_client->dev,
 			"Input is not valid .img file\n");
-		retval = -EINVAL;
-		goto image_name_store_exit;
+		return -EINVAL;
 	}
 
 	strlcpy(rmi4_data->fw_image_name, buf, count);
-	retval = count;
-
-image_name_store_exit:
-	mutex_unlock(&fwu_sysfs_mutex);
-	return retval;
+	return count;
 }
 
 static ssize_t fwu_sysfs_image_name_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	ssize_t retval;
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
 	if (strnlen(fwu->rmi4_data->fw_image_name, NAME_BUFFER_SIZE) > 0)
-		retval = snprintf(buf, PAGE_SIZE, "%s\n",
+		return snprintf(buf, PAGE_SIZE, "%s\n",
 			fwu->rmi4_data->fw_image_name);
 	else
-		retval = snprintf(buf, PAGE_SIZE, "No firmware name given\n");
-
-	mutex_unlock(&fwu_sysfs_mutex);
-	return retval;
+		return snprintf(buf, PAGE_SIZE, "No firmware name given\n");
 }
 
 static ssize_t fwu_sysfs_force_reflash_store(struct device *dev,
@@ -1827,17 +1748,13 @@ static ssize_t fwu_sysfs_force_reflash_store(struct device *dev,
 	unsigned int input;
 	struct synaptics_rmi4_data *rmi4_data = fwu->rmi4_data;
 
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
-
-	if (sscanf(buf, "%u", &input) != 1) {
-		retval = -EINVAL;
-		goto force_reflash_store_exit;
-	}
+	retval = kstrtouint(buf, 10, &input);
+	if (retval)
+		goto exit;
 
 	if (input != 1) {
 		retval = -EINVAL;
-		goto force_reflash_store_exit;
+		goto exit;
 	}
 	if (LOCKDOWN)
 		fwu->do_lockdown = true;
@@ -1848,18 +1765,16 @@ static ssize_t fwu_sysfs_force_reflash_store(struct device *dev,
 		dev_err(&rmi4_data->i2c_client->dev,
 				"%s: Failed to do reflash\n",
 				__func__);
-		goto force_reflash_store_free_exit;
+		goto exit;
 	}
 
 	retval = count;
 
-force_reflash_store_free_exit:
+exit:
 	kfree(fwu->ext_data_source);
 	fwu->ext_data_source = NULL;
 	fwu->force_update = FORCE_UPDATE;
 	fwu->do_lockdown = rmi4_data->board->do_lockdown;
-force_reflash_store_exit:
-	mutex_unlock(&fwu_sysfs_mutex);
 	return retval;
 }
 
@@ -1870,13 +1785,9 @@ static ssize_t fwu_sysfs_do_reflash_store(struct device *dev,
 	unsigned int input;
 	struct synaptics_rmi4_data *rmi4_data = fwu->rmi4_data;
 
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
-
-	if (sscanf(buf, "%u", &input) != 1) {
-		retval = -EINVAL;
-		goto reflash_store_exit;
-	}
+	retval = kstrtouint(buf, 10, &input);
+	if (retval)
+		goto exit;
 
 	if (input & LOCKDOWN) {
 		fwu->do_lockdown = true;
@@ -1885,7 +1796,7 @@ static ssize_t fwu_sysfs_do_reflash_store(struct device *dev,
 
 	if ((input != NORMAL) && (input != FORCE)) {
 		retval = -EINVAL;
-		goto reflash_store_exit;
+		goto exit;
 	}
 
 	if (input == FORCE)
@@ -1896,18 +1807,16 @@ static ssize_t fwu_sysfs_do_reflash_store(struct device *dev,
 		dev_err(&rmi4_data->i2c_client->dev,
 				"%s: Failed to do reflash\n",
 				__func__);
-		goto reflash_store_free_exit;
+		goto exit;
 	}
 
 	retval = count;
 
-reflash_store_free_exit:
+exit:
 	kfree(fwu->ext_data_source);
 	fwu->ext_data_source = NULL;
 	fwu->force_update = FORCE_UPDATE;
 	fwu->do_lockdown = rmi4_data->board->do_lockdown;
-reflash_store_exit:
-	mutex_unlock(&fwu_sysfs_mutex);
 	return retval;
 }
 
@@ -1918,31 +1827,14 @@ static ssize_t fwu_sysfs_write_lockdown_store(struct device *dev,
 	unsigned int input;
 	struct synaptics_rmi4_data *rmi4_data = fwu->rmi4_data;
 
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
-
 	if (sscanf(buf, "%u", &input) != 1) {
 		retval = -EINVAL;
-		goto lockdown_store_exit;
+		goto exit;
 	}
 
 	if (input != 1) {
 		retval = -EINVAL;
-		goto lockdown_store_exit;
-	}
-
-	if (!fwu->ext_data_source) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-			"Cannot use this without loading image in manual way!\n");
-		retval = -EAGAIN;
-		goto lockdown_store_exit;
-	}
-
-	if (fwu->rmi4_data->suspended == true) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-			"Cannot lockdown while device is in suspend\n");
-		retval = -EBUSY;
-		goto lockdown_store_exit;
+		goto exit;
 	}
 
 	retval = fwu_start_write_lockdown();
@@ -1950,41 +1842,17 @@ static ssize_t fwu_sysfs_write_lockdown_store(struct device *dev,
 		dev_err(&rmi4_data->i2c_client->dev,
 				"%s: Failed to write lockdown block\n",
 				__func__);
-		goto lockdown_store_free_exit;
+		goto exit;
 	}
 
 	retval = count;
 
-lockdown_store_free_exit:
+exit:
 	kfree(fwu->ext_data_source);
 	fwu->ext_data_source = NULL;
 	fwu->force_update = FORCE_UPDATE;
 	fwu->do_lockdown = rmi4_data->board->do_lockdown;
-lockdown_store_exit:
-	mutex_unlock(&fwu_sysfs_mutex);
 	return retval;
-}
-
-static ssize_t fwu_sysfs_check_fw_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t count)
-{
-	unsigned int input = 0;
-
-	/* Takes fwu_sysfs_mutex in the deferred work function. */
-
-	if (sscanf(buf, "%u", &input) != 1)
-		return -EINVAL;
-
-	if (fwu->rmi4_data->suspended == true) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-			"Cannot trigger fw check while device is in suspend\n");
-		return -EBUSY;
-	}
-
-	if (input)
-		queue_delayed_work(fwu->fwu_workqueue, &fwu->fwu_work, 0);
-
-	return count;
 }
 
 static ssize_t fwu_sysfs_write_config_store(struct device *dev,
@@ -1994,31 +1862,13 @@ static ssize_t fwu_sysfs_write_config_store(struct device *dev,
 	unsigned int input;
 	struct synaptics_rmi4_data *rmi4_data = fwu->rmi4_data;
 
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
-
-	if (sscanf(buf, "%u", &input) != 1) {
-		retval = -EINVAL;
-		goto write_config_store_exit;
-	}
+	retval = kstrtouint(buf, 10, &input);
+	if (retval)
+		goto exit;
 
 	if (input != 1) {
 		retval = -EINVAL;
-		goto write_config_store_exit;
-	}
-
-	if (!fwu->ext_data_source) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-			"Cannot use this without loading image in manual way!\n");
-		retval = -EAGAIN;
-		goto write_config_store_exit;
-	}
-
-	if (fwu->rmi4_data->suspended == true) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-			"Cannot write config while device is in suspend\n");
-		retval = -EBUSY;
-		goto write_config_store_exit;
+		goto exit;
 	}
 
 	retval = fwu_start_write_config();
@@ -2026,16 +1876,14 @@ static ssize_t fwu_sysfs_write_config_store(struct device *dev,
 		dev_err(&rmi4_data->i2c_client->dev,
 				"%s: Failed to write config\n",
 				__func__);
-		goto write_config_store_free_exit;
+		goto exit;
 	}
 
 	retval = count;
 
-write_config_store_free_exit:
+exit:
 	kfree(fwu->ext_data_source);
 	fwu->ext_data_source = NULL;
-write_config_store_exit:
-	mutex_unlock(&fwu_sysfs_mutex);
 	return retval;
 }
 
@@ -2046,23 +1894,14 @@ static ssize_t fwu_sysfs_read_config_store(struct device *dev,
 	unsigned int input;
 	struct synaptics_rmi4_data *rmi4_data = fwu->rmi4_data;
 
-	if (sscanf(buf, "%u", &input) != 1)
-		return -EINVAL;
+	retval = kstrtouint(buf, 10, &input);
+	if (retval)
+		return retval;
 
 	if (input != 1)
 		return -EINVAL;
 
-	if (fwu->rmi4_data->suspended == true) {
-		dev_err(&fwu->rmi4_data->i2c_client->dev,
-			"Cannot read config while device is in suspend\n");
-		return -EBUSY;
-	}
-
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
 	retval = fwu_do_read_config();
-	mutex_unlock(&fwu_sysfs_mutex);
-
 	if (retval < 0) {
 		dev_err(&rmi4_data->i2c_client->dev,
 				"%s: Failed to read config\n",
@@ -2091,10 +1930,7 @@ static ssize_t fwu_sysfs_config_area_store(struct device *dev,
 		return -EINVAL;
 	}
 
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
 	fwu->config_area = config_area;
-	mutex_unlock(&fwu_sysfs_mutex);
 
 	return count;
 }
@@ -2104,29 +1940,20 @@ static ssize_t fwu_sysfs_image_size_store(struct device *dev,
 {
 	int retval;
 	unsigned long size;
-	struct synaptics_rmi4_data *rmi4_data = fwu->rmi4_data;
-	if (!mutex_trylock(&fwu_sysfs_mutex))
-		return -EBUSY;
 
 	retval = kstrtoul(buf, 10, &size);
 	if (retval)
-		goto image_size_store_exit;
+		return retval;
 
 	fwu->image_size = size;
 	fwu->data_pos = 0;
 
 	kfree(fwu->ext_data_source);
 	fwu->ext_data_source = kzalloc(fwu->image_size, GFP_KERNEL);
-	if (!fwu->ext_data_source) {
-		dev_err(&rmi4_data->i2c_client->dev,
-				"%s: Failed to alloc mem for image data\n",
-				__func__);
-		retval = -ENOMEM;
-	}
+	if (!fwu->ext_data_source)
+		return -ENOMEM;
 
-image_size_store_exit:
-	mutex_unlock(&fwu_sysfs_mutex);
-	return retval;
+	return count;
 }
 
 static ssize_t fwu_sysfs_block_size_show(struct device *dev,
@@ -2170,23 +1997,13 @@ static ssize_t fwu_sysfs_config_id_show(struct device *dev,
 {
 	unsigned char config_id[4];
 	/* device config id */
-
-	if (fwu->rmi4_data->suspended == true)
-		return snprintf(buf, PAGE_SIZE, "Device is in suspend\n");
-
 	fwu->fn_ptr->read(fwu->rmi4_data,
 				fwu->f34_fd.ctrl_base_addr,
 				config_id,
 				sizeof(config_id));
 
-	return snprintf(buf, PAGE_SIZE,"DEVICE: 0x%x 0x%x 0x%x 0x%x,  "
-				"IMG: 0x%x 0x%x 0x%x 0x%x\n",
-				config_id[0], config_id[1],
-				config_id[2], config_id[3],
-				fwu->img_config_data[0],
-				fwu->img_config_data[1],
-				fwu->img_config_data[2],
-				fwu->img_config_data[3]);
+	return snprintf(buf, PAGE_SIZE, "%d.%d.%d.%d\n",
+		config_id[0], config_id[1], config_id[2], config_id[3]);
 }
 
 static ssize_t fwu_sysfs_package_id_show(struct device *dev,
@@ -2194,10 +2011,6 @@ static ssize_t fwu_sysfs_package_id_show(struct device *dev,
 {
 	unsigned char pkg_id[4];
 	/* read device package id */
-
-	if (fwu->rmi4_data->suspended == true)
-		return snprintf(buf, PAGE_SIZE, "Device is in suspend\n");
-
 	fwu->fn_ptr->read(fwu->rmi4_data,
 				fwu->f01_fd.query_base_addr + 17,
 				pkg_id,
@@ -2260,9 +2073,6 @@ static struct device_attribute attrs[] = {
 	__ATTR(update_fw, S_IWUSR | S_IWGRP,
 			NULL,
 			fwu_sysfs_do_reflash_store),
-	__ATTR(check_fw, S_IWUSR | S_IWGRP,
-			NULL,
-			fwu_sysfs_check_fw_store),
 	__ATTR(writeconfig, S_IWUSR | S_IWGRP,
 			NULL,
 			fwu_sysfs_write_config_store),
@@ -2307,21 +2117,7 @@ static struct device_attribute attrs[] = {
 
 static void synaptics_rmi4_fwu_work(struct work_struct *work)
 {
-	struct synaptics_rmi4_fwu_handle *fwu =
-		container_of(to_delayed_work(work),
-			struct synaptics_rmi4_fwu_handle, fwu_work);
-
-	mutex_lock(&fwu_sysfs_mutex);
-
-	if (fwu->fn_ptr->enable)
-		fwu->fn_ptr->enable(fwu->rmi4_data, false);
-
 	fwu_start_reflash();
-
-	if (fwu->fn_ptr->enable)
-		fwu->fn_ptr->enable(fwu->rmi4_data, true);
-
-	mutex_unlock(&fwu_sysfs_mutex);
 }
 
 static int synaptics_rmi4_fwu_init(struct synaptics_rmi4_data *rmi4_data)
@@ -2333,18 +2129,12 @@ static int synaptics_rmi4_fwu_init(struct synaptics_rmi4_data *rmi4_data)
 
 	fwu = kzalloc(sizeof(*fwu), GFP_KERNEL);
 	if (!fwu) {
-		dev_err(&rmi4_data->i2c_client->dev,
-				"%s: Failed to alloc mem for fwu\n",
-				__func__);
 		retval = -ENOMEM;
 		goto exit;
 	}
 
 	fwu->fn_ptr = kzalloc(sizeof(*(fwu->fn_ptr)), GFP_KERNEL);
 	if (!fwu->fn_ptr) {
-		dev_err(&rmi4_data->i2c_client->dev,
-				"%s: Failed to alloc mem for fn_ptr\n",
-				__func__);
 		retval = -ENOMEM;
 		goto exit_free_fwu;
 	}
@@ -2399,19 +2189,6 @@ static int synaptics_rmi4_fwu_init(struct synaptics_rmi4_data *rmi4_data)
 	fwu->initialized = true;
 	fwu->polling_mode = false;
 
-	fwu->ts_info = kzalloc(RMI4_INFO_MAX_LEN, GFP_KERNEL);
-	if (!fwu->ts_info) {
-		dev_err(&rmi4_data->i2c_client->dev, "Not enough memory\n");
-		goto exit_free_ts_info;
-	}
-
-	synaptics_rmi4_update_debug_info();
-
-#ifdef INSIDE_FIRMWARE_UPDATE
-	fwu->fwu_workqueue = create_singlethread_workqueue("fwu_workqueue");
-	INIT_DELAYED_WORK(&fwu->fwu_work, synaptics_rmi4_fwu_work);
-#endif
-
 	retval = sysfs_create_bin_file(&rmi4_data->i2c_client->dev.kobj,
 			&dev_attr_data);
 	if (retval < 0) {
@@ -2443,6 +2220,20 @@ static int synaptics_rmi4_fwu_init(struct synaptics_rmi4_data *rmi4_data)
 		retval = PTR_ERR(temp);
 		goto exit_remove_attrs;
 	}
+
+	fwu->ts_info = kzalloc(RMI4_INFO_MAX_LEN, GFP_KERNEL);
+	if (!fwu->ts_info)
+		goto exit_free_ts_info;
+
+	synaptics_rmi4_update_debug_info();
+
+#ifdef INSIDE_FIRMWARE_UPDATE
+	fwu->fwu_workqueue = create_singlethread_workqueue("fwu_workqueue");
+	INIT_DELAYED_WORK(&fwu->fwu_work, synaptics_rmi4_fwu_work);
+	queue_delayed_work(fwu->fwu_workqueue,
+			&fwu->fwu_work,
+			msecs_to_jiffies(1000));
+#endif
 
 	return 0;
 exit_free_ts_info:

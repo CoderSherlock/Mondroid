@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -13,6 +13,7 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#include <linux/platform_device.h>
 
 #include "mhi_sys.h"
 #include "mhi.h"
@@ -30,7 +31,7 @@ static ssize_t bhi_write(struct file *file,
 		const char __user *buf,
 		size_t count, loff_t *offp)
 {
-	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
+	int ret_val = 0;
 	u32 pcie_word_val = 0;
 	u32 i = 0;
 	struct bhi_ctxt_t *bhi_ctxt =
@@ -47,10 +48,10 @@ static ssize_t bhi_write(struct file *file,
 	if (count > BHI_MAX_IMAGE_SIZE)
 		return -ENOMEM;
 
-	wait_event_interruptible(*mhi_dev_ctxt->bhi_event,
+	wait_event_interruptible(*mhi_dev_ctxt->mhi_ev_wq.bhi_event,
 			mhi_dev_ctxt->mhi_state == MHI_STATE_BHI);
 
-	mhi_log(MHI_MSG_INFO, "Entered. User Image size 0x%x\n", count);
+	mhi_log(MHI_MSG_INFO, "Entered. User Image size 0x%zx\n", count);
 
 	bhi_ctxt->unaligned_image_loc = kmalloc(count + (align_len - 1),
 						GFP_KERNEL);
@@ -73,10 +74,12 @@ static ssize_t bhi_write(struct file *file,
 		goto bhi_copy_error;
 	}
 	amount_copied = count;
+	/* Flush the writes, in anticipation for a device read */
 	wmb();
 	mhi_log(MHI_MSG_INFO,
 		"Copied image from user at addr: %p\n", bhi_ctxt->image_loc);
-	bhi_ctxt->phy_image_loc = dma_map_single(NULL,
+	bhi_ctxt->phy_image_loc = dma_map_single(
+			&mhi_dev_ctxt->dev_info->plat_dev->dev,
 			bhi_ctxt->image_loc,
 			bhi_ctxt->image_size,
 			DMA_TO_DEVICE);
@@ -118,11 +121,19 @@ static ssize_t bhi_write(struct file *file,
 	mhi_reg_write(mhi_dev_ctxt, bhi_ctxt->bhi_base, BHI_INTVEC, 0);
 
 	for (i = 0; i < BHI_POLL_NR_RETRIES; ++i) {
+		u32 err = 0, errdbg1 = 0, errdbg2 = 0, errdbg3 = 0;
+
+		err = mhi_reg_read(bhi_ctxt->bhi_base, BHI_ERRCODE);
+		errdbg1 = mhi_reg_read(bhi_ctxt->bhi_base, BHI_ERRDBG1);
+		errdbg2 = mhi_reg_read(bhi_ctxt->bhi_base, BHI_ERRDBG2);
+		errdbg3 = mhi_reg_read(bhi_ctxt->bhi_base, BHI_ERRDBG3);
 		tx_db_val = mhi_reg_read_field(bhi_ctxt->bhi_base,
 						BHI_STATUS,
 						BHI_STATUS_MASK,
 						BHI_STATUS_SHIFT);
-		mhi_log(MHI_MSG_CRITICAL, "BHI STATUS 0x%x\n", tx_db_val);
+		mhi_log(MHI_MSG_CRITICAL,
+		"BHI STATUS 0x%x, err:0x%x errdbg1:0x%x errdbg2:0x%x errdbg3:0x%x\n",
+			tx_db_val, err, errdbg1, errdbg2, errdbg3);
 		if (BHI_STATUS_SUCCESS != tx_db_val)
 			mhi_log(MHI_MSG_CRITICAL,
 				"Incorrect BHI status: %d retry: %d\n",
@@ -131,14 +142,15 @@ static ssize_t bhi_write(struct file *file,
 			break;
 		usleep_range(20000, 25000);
 	}
-	dma_unmap_single(NULL, bhi_ctxt->phy_image_loc,
+	dma_unmap_single(&mhi_dev_ctxt->dev_info->plat_dev->dev,
+			bhi_ctxt->phy_image_loc,
 			bhi_ctxt->image_size, DMA_TO_DEVICE);
 
 	kfree(bhi_ctxt->unaligned_image_loc);
 
 	ret_val = mhi_init_state_transition(mhi_dev_ctxt,
 					STATE_TRANSITION_RESET);
-	if (MHI_STATUS_SUCCESS != ret_val) {
+	if (ret_val) {
 		mhi_log(MHI_MSG_CRITICAL,
 				"Failed to start state change event\n");
 	}
@@ -157,18 +169,12 @@ static const struct file_operations bhi_fops = {
 int bhi_probe(struct mhi_pcie_dev_info *mhi_pcie_device)
 {
 	struct bhi_ctxt_t *bhi_ctxt = &mhi_pcie_device->bhi_ctxt;
-	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
-	u32 pcie_word_val = 0;
+	int ret_val = 0;
 	int r;
 
 	if (NULL == mhi_pcie_device || 0 == mhi_pcie_device->core.bar0_base
 	    || 0 == mhi_pcie_device->core.bar0_end)
 		return -EIO;
-
-	bhi_ctxt->bhi_base = mhi_pcie_device->core.bar0_base;
-	pcie_word_val = mhi_reg_read(bhi_ctxt->bhi_base, BHIOFF);
-	bhi_ctxt->bhi_base += pcie_word_val;
-	wmb();
 
 	mhi_log(MHI_MSG_INFO,
 		"Successfully registered char dev. bhi base is: 0x%p.\n",
@@ -185,7 +191,7 @@ int bhi_probe(struct mhi_pcie_dev_info *mhi_pcie_device)
 		mhi_log(MHI_MSG_CRITICAL,
 			"Failed to instantiate class %d\n",
 			ret_val);
-		r = (int)bhi_ctxt->bhi_class;
+		r = PTR_RET(bhi_ctxt->bhi_class);
 		goto err_class_create;
 	}
 	cdev_init(&bhi_ctxt->cdev, &bhi_fops);
@@ -197,7 +203,7 @@ int bhi_probe(struct mhi_pcie_dev_info *mhi_pcie_device)
 	if (IS_ERR(bhi_ctxt->dev)) {
 		mhi_log(MHI_MSG_CRITICAL,
 				"Failed to add bhi cdev\n");
-		r = (int)bhi_ctxt->dev;
+		r = PTR_RET(bhi_ctxt->dev);
 		goto err_dev_create;
 	}
 	return 0;

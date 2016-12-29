@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,6 +14,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/of_platform.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/ioport.h>
@@ -31,9 +32,6 @@
 #include <soc/qcom/ramdump.h>
 #include <soc/qcom/smem.h>
 #include <soc/qcom/smsm.h>
-#ifdef CONFIG_LGE_HANDLE_PANIC
-#include <soc/qcom/lge/lge_handle_panic.h>
-#endif
 
 #include "peripheral-loader.h"
 #include "pil-q6v5.h"
@@ -41,16 +39,16 @@
 
 #define MAX_VDD_MSS_UV		1150000
 #define PROXY_TIMEOUT_MS	10000
-#define MAX_SSR_REASON_LEN	81U
 #define STOP_ACK_TIMEOUT_MS	1000
 
 #define subsys_to_drv(d) container_of(d, struct modem_data, subsys_desc)
 
-static void log_modem_sfr(void)
+static void log_modem_sfr(struct modem_data *drv)
 {
 	u32 size;
-	char *smem_reason, reason[MAX_SSR_REASON_LEN];
+	char *smem_reason, *reason;
 
+	reason = drv->subsys_desc.last_crash_reason;
 	smem_reason = smem_get_entry_no_rlock(SMEM_SSR_REASON_MSS0, &size, 0,
 							SMEM_ANY_HOST_FLAG);
 	if (!smem_reason || !size) {
@@ -65,17 +63,13 @@ static void log_modem_sfr(void)
 	strlcpy(reason, smem_reason, min(size, MAX_SSR_REASON_LEN));
 	pr_err("modem subsystem failure reason: %s.\n", reason);
 
-#ifdef CONFIG_LGE_HANDLE_PANIC
-	lge_check_crash_skiped(reason);
-#endif
-
 	smem_reason[0] = '\0';
 	wmb();
 }
 
 static void restart_modem(struct modem_data *drv)
 {
-	log_modem_sfr();
+	log_modem_sfr(drv);
 	drv->ignore_errors = true;
 	subsystem_restart_dev(drv->subsys);
 }
@@ -143,7 +137,7 @@ static int modem_powerup(const struct subsys_desc *subsys)
 	 * run concurrently with the watchdog bite error handler, making it safe
 	 * to unset the flag below.
 	 */
-	INIT_COMPLETION(drv->stop_ack);
+	reinit_completion(&drv->stop_ack);
 	drv->subsys_desc.ramdump_disable = 0;
 	drv->ignore_errors = false;
 	drv->q6->desc.fw_name = subsys->fw_name;
@@ -159,13 +153,6 @@ static void modem_crash_shutdown(const struct subsys_desc *subsys)
 		gpio_set_value(subsys->force_stop_gpio, 1);
 		mdelay(STOP_ACK_TIMEOUT_MS);
 	}
-}
-
-static void modem_free_memory(const struct subsys_desc *subsys)
-{
-	struct modem_data *drv = subsys_to_drv(subsys);
-
-	pil_free_memory(&drv->q6->desc);
 }
 
 static int modem_ramdump(int enable, const struct subsys_desc *subsys)
@@ -223,7 +210,6 @@ static int pil_subsys_init(struct modem_data *drv,
 	drv->subsys_desc.shutdown = modem_shutdown;
 	drv->subsys_desc.powerup = modem_powerup;
 	drv->subsys_desc.ramdump = modem_ramdump;
-	drv->subsys_desc.free_memory = modem_free_memory;
 	drv->subsys_desc.crash_shutdown = modem_crash_shutdown;
 	drv->subsys_desc.err_fatal_handler = modem_err_fatal_intr_handler;
 	drv->subsys_desc.stop_ack_handler = modem_stop_ack_intr_handler;
@@ -261,7 +247,7 @@ static int pil_mss_loadable_init(struct modem_data *drv,
 	int ret;
 
 	q6 = pil_q6v5_init(pdev);
-	if (IS_ERR(q6))
+	if (IS_ERR_OR_NULL(q6))
 		return PTR_ERR(q6);
 	drv->q6 = q6;
 	drv->xo = q6->xo;
@@ -277,7 +263,7 @@ static int pil_mss_loadable_init(struct modem_data *drv,
 	if (q6->self_auth) {
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 						    "rmb_base");
-		q6->rmb_base = devm_request_and_ioremap(&pdev->dev, res);
+		q6->rmb_base = devm_ioremap_resource(&pdev->dev, res);
 		if (!q6->rmb_base)
 			return -ENOMEM;
 		drv->rmb_base = q6->rmb_base;
@@ -291,7 +277,7 @@ static int pil_mss_loadable_init(struct modem_data *drv,
 		q6->restart_reg_sec = true;
 	}
 
-	q6->restart_reg = devm_request_and_ioremap(&pdev->dev, res);
+	q6->restart_reg = devm_ioremap_resource(&pdev->dev, res);
 	if (!q6->restart_reg)
 		return -ENOMEM;
 
@@ -342,10 +328,26 @@ static int pil_mss_loadable_init(struct modem_data *drv,
 	if (IS_ERR(q6->rom_clk))
 		return PTR_ERR(q6->rom_clk);
 
+	ret = of_property_read_u32(pdev->dev.of_node,
+					"qcom,pas-id", &drv->pas_id);
+	if (ret)
+		dev_warn(&pdev->dev, "Failed to find the pas_id.\n");
+
+	drv->subsys_desc.pil_mss_memsetup =
+	of_property_read_bool(pdev->dev.of_node, "qcom,pil-mss-memsetup");
+
 	/* Optional. */
 	if (of_property_match_string(pdev->dev.of_node,
 			"qcom,active-clock-names", "gpll0_mss_clk") >= 0)
 		q6->gpll0_mss_clk = devm_clk_get(&pdev->dev, "gpll0_mss_clk");
+
+	if (of_property_match_string(pdev->dev.of_node,
+			"qcom,active-clock-names", "snoc_axi_clk") >= 0)
+		q6->snoc_axi_clk = devm_clk_get(&pdev->dev, "snoc_axi_clk");
+
+	if (of_property_match_string(pdev->dev.of_node,
+			"qcom,active-clock-names", "mnoc_axi_clk") >= 0)
+		q6->mnoc_axi_clk = devm_clk_get(&pdev->dev, "mnoc_axi_clk");
 
 	ret = pil_desc_init(q6_desc);
 
@@ -373,6 +375,11 @@ static int pil_mss_driver_probe(struct platform_device *pdev)
 	}
 	init_completion(&drv->stop_ack);
 
+	/* Probe the MBA mem device if present */
+	ret = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+	if (ret)
+		return ret;
+
 	return pil_subsys_init(drv, pdev);
 }
 
@@ -385,6 +392,33 @@ static int pil_mss_driver_exit(struct platform_device *pdev)
 	pil_desc_release(&drv->q6->desc);
 	return 0;
 }
+
+static int pil_mba_mem_driver_probe(struct platform_device *pdev)
+{
+	struct modem_data *drv;
+
+	if (!pdev->dev.parent) {
+		pr_err("No parent found.\n");
+		return -EINVAL;
+	}
+	drv = dev_get_drvdata(pdev->dev.parent);
+	drv->mba_mem_dev_fixed = &pdev->dev;
+	return 0;
+}
+
+static struct of_device_id mba_mem_match_table[] = {
+	{ .compatible = "qcom,pil-mba-mem" },
+	{}
+};
+
+static struct platform_driver pil_mba_mem_driver = {
+	.probe = pil_mba_mem_driver_probe,
+	.driver = {
+		.name = "pil-mba-mem",
+		.of_match_table = mba_mem_match_table,
+		.owner = THIS_MODULE,
+	},
+};
 
 static struct of_device_id mss_match_table[] = {
 	{ .compatible = "qcom,pil-q6v5-mss" },
@@ -405,7 +439,12 @@ static struct platform_driver pil_mss_driver = {
 
 static int __init pil_mss_init(void)
 {
-	return platform_driver_register(&pil_mss_driver);
+	int ret;
+
+	ret = platform_driver_register(&pil_mba_mem_driver);
+	if (!ret)
+		ret = platform_driver_register(&pil_mss_driver);
+	return ret;
 }
 module_init(pil_mss_init);
 

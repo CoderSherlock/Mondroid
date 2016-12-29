@@ -1,4 +1,4 @@
-/* Copyright (c) 2013 - 2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,8 +24,6 @@
 #include <linux/regulator/consumer.h>
 #include <linux/io.h>
 
-#include <mach/hardware.h>
-
 #include "mdss.h"
 #include "mdss_qpic.h"
 #include "mdss_qpic_panel.h"
@@ -45,7 +43,7 @@ static int panel_io_init(struct qpic_panel_io_desc *panel_io)
 	}
 	if (panel_io->avdd_vreg) {
 		rc = regulator_set_voltage(panel_io->avdd_vreg,
-			2700000, 2700000);
+			2704000, 2704000);
 		if (rc) {
 			pr_err("vdd_vreg->set_voltage failed, rc=%d\n", rc);
 			return -EINVAL;
@@ -78,7 +76,7 @@ static void panel_io_off(struct qpic_panel_io_desc *qpic_panel_io)
 void ili9341_off(struct qpic_panel_io_desc *qpic_panel_io)
 {
 	qpic_send_pkt(OP_SET_DISPLAY_OFF, NULL, 0);
-	/* wait for 20 ms after disply off */
+	/* wait for 20 ms after display off */
 	msleep(20);
 	panel_io_off(qpic_panel_io);
 }
@@ -156,15 +154,12 @@ int ili9341_on(struct qpic_panel_io_desc *qpic_panel_io)
 	ret = panel_io_on(qpic_panel_io);
 	if (ret)
 		return ret;
-
-	if (!qpic_panel_io->splash_screen_transition) {
-		qpic_send_pkt(OP_SOFT_RESET, NULL, 0);
-		/* wait for 120 ms after reset as panel spec suggests */
-		msleep(120);
-		qpic_send_pkt(OP_SET_DISPLAY_OFF, NULL, 0);
-		/* wait for 20 ms after disply off */
-		msleep(20);
-	}
+	qpic_send_pkt(OP_SOFT_RESET, NULL, 0);
+	/* wait for 120 ms after reset as panel spec suggests */
+	msleep(120);
+	qpic_send_pkt(OP_SET_DISPLAY_OFF, NULL, 0);
+	/* wait for 20 ms after disply off */
+	msleep(20);
 
 	/* set memory access control */
 	param[0] = 0x48;
@@ -204,7 +199,8 @@ int ili9341_on(struct qpic_panel_io_desc *qpic_panel_io)
 	qpic_send_pkt(OP_ILI9341_TEARING_EFFECT_LINE_ON, param, 1);
 
 	/* test */
-	pr_debug("Pixel format =%x", qpic_read_data(OP_GET_PIXEL_FORMAT, 2));
+	param[0] = qpic_read_data(OP_GET_PIXEL_FORMAT, 1);
+	pr_debug("Pixel format =%x", param[0]);
 
 	return 0;
 }

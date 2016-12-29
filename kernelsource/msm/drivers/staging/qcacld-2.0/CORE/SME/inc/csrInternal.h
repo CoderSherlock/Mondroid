@@ -45,6 +45,8 @@
 #include "wlan_qct_tl.h"
 #include "vos_utils.h"
 
+#include "csrApi.h"
+
 #ifdef WLAN_FEATURE_NEIGHBOR_ROAMING
 #include "csrNeighborRoam.h"
 #endif
@@ -268,6 +270,7 @@ typedef enum
    eCsrGlobalClassCStats,
    eCsrGlobalClassDStats,
    eCsrPerStaStats,
+   csr_per_chain_rssi_stats,
    eCsrMaxStats
 }eCsrRoamStatsClassTypes;
 
@@ -403,7 +406,7 @@ typedef struct tagScanCmd
         tCsrBGScanRequest bgScanRequest;
     }u;
     //This flag will be set while aborting the scan due to band change
-    tANI_BOOLEAN            abortScanDueToBandChange;
+     eCsrAbortReason        abort_scan_indication;
 }tScanCmd;
 
 typedef struct tagRoamCmd
@@ -623,6 +626,7 @@ typedef struct tagCsrConfig
     //The actual TX power is the lesser of this value and 11d.
     //If 11d is disable, the lesser of this and default setting.
     tANI_U8 nTxPowerCap;
+    tANI_BOOLEAN allow_tpc_from_ap;
     tANI_U32  statsReqPeriodicity;  //stats request frequency from PE while in full power
     tANI_U32  statsReqPeriodicityInPS;//stats request frequency from PE while in power save
     tANI_U32 dtimPeriod;
@@ -1086,6 +1090,7 @@ typedef struct tagCsrRoamStruct
     tCsrGlobalClassCStatsInfo  classCStatsInfo;
     tCsrGlobalClassDStatsInfo  classDStatsInfo;
     tCsrPerStaStatsInfo        perStaStatsInfo[CSR_MAX_STA];
+    struct csr_per_chain_rssi_stats_info  per_chain_rssi_stats;
     tDblLinkList  statsClientReqList;
     tDblLinkList  peStatsReqList;
     tCsrTlStatsReqInfo  tlStatsReqInfo;

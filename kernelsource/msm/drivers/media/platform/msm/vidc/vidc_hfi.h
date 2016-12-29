@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -69,7 +69,6 @@
 
 #define HFI_FLUSH_INPUT (HFI_OX_BASE + 0x1)
 #define HFI_FLUSH_OUTPUT (HFI_OX_BASE + 0x2)
-#define HFI_FLUSH_OUTPUT2 (HFI_OX_BASE + 0x3)
 #define HFI_FLUSH_ALL (HFI_OX_BASE + 0x4)
 
 #define HFI_EXTRADATA_NONE					0x00000000
@@ -86,6 +85,7 @@
 #define HFI_EXTRADATA_STREAM_USERDATA		0x0000000E
 #define HFI_EXTRADATA_FRAME_QP			0x0000000F
 #define HFI_EXTRADATA_FRAME_BITS_INFO		0x00000010
+#define HFI_EXTRADATA_VPX_COLORSPACE		0x00000014
 #define HFI_EXTRADATA_MULTISLICE_INFO		0x7F100000
 #define HFI_EXTRADATA_NUM_CONCEALED_MB		0x7F100001
 #define HFI_EXTRADATA_INDEX					0x7F100002
@@ -93,7 +93,7 @@
 #define HFI_EXTRADATA_METADATA_FILLER		0x7FE00002
 
 #define HFI_INDEX_EXTRADATA_INPUT_CROP		0x0700000E
-#define HFI_INDEX_EXTRADATA_DIGITAL_ZOOM	0x07000010
+#define HFI_INDEX_EXTRADATA_OUTPUT_CROP		0x0700000F
 #define HFI_INDEX_EXTRADATA_ASPECT_RATIO	0x7F100003
 
 struct hfi_buffer_alloc_mode {
@@ -147,8 +147,12 @@ struct hfi_extradata_header {
 	(HFI_PROPERTY_PARAM_OX_START + 0x009)
 #define HFI_PROPERTY_PARAM_ERR_DETECTION_CODE_EXTRADATA \
 	(HFI_PROPERTY_PARAM_OX_START + 0x00A)
-#define  HFI_PROPERTY_PARAM_BUFFER_ALLOC_MODE_SUPPORTED	\
+#define HFI_PROPERTY_PARAM_BUFFER_ALLOC_MODE_SUPPORTED	\
 	(HFI_PROPERTY_PARAM_OX_START + 0x00B)
+#define HFI_PROPERTY_PARAM_BUFFER_SIZE_MINIMUM			\
+	(HFI_PROPERTY_PARAM_OX_START + 0x00C)
+#define HFI_PROPERTY_PARAM_SYNC_BASED_INTERRUPT			\
+	(HFI_PROPERTY_PARAM_OX_START + 0x00E)
 
 #define HFI_PROPERTY_CONFIG_OX_START					\
 	(HFI_DOMAIN_BASE_COMMON + HFI_ARCH_OX_OFFSET + 0x02000)
@@ -214,15 +218,25 @@ struct hfi_extradata_header {
 	(HFI_PROPERTY_PARAM_VDEC_OX_START + 0x01A)
 #define HFI_PROPERTY_PARAM_VUI_DISPLAY_INFO_EXTRADATA \
 	(HFI_PROPERTY_PARAM_VDEC_OX_START + 0x01B)
+#define HFI_PROPERTY_PARAM_VDEC_VQZIP_SEI_EXTRADATA \
+	(HFI_PROPERTY_PARAM_VDEC_OX_START + 0x001C)
+#define HFI_PROPERTY_PARAM_VDEC_VPX_COLORSPACE_EXTRADATA \
+	(HFI_PROPERTY_PARAM_VDEC_OX_START + 0x001D)
+#define HFI_PROPERTY_PARAM_VDEC_MASTERING_DISPLAY_COLOUR_SEI_EXTRADATA \
+	(HFI_PROPERTY_PARAM_VDEC_OX_START + 0x001E)
+#define HFI_PROPERTY_PARAM_VDEC_CONTENT_LIGHT_LEVEL_SEI_EXTRADATA \
+	(HFI_PROPERTY_PARAM_VDEC_OX_START + 0x001F)
 
 #define HFI_PROPERTY_CONFIG_VDEC_OX_START				\
-	(HFI_DOMAIN_BASE_VDEC + HFI_ARCH_OX_OFFSET + 0x0000)
+	(HFI_DOMAIN_BASE_VDEC + HFI_ARCH_OX_OFFSET + 0x4000)
 #define HFI_PROPERTY_CONFIG_VDEC_POST_LOOP_DEBLOCKER	\
 	(HFI_PROPERTY_CONFIG_VDEC_OX_START + 0x001)
 #define HFI_PROPERTY_CONFIG_VDEC_MB_ERROR_MAP_REPORTING	\
 	(HFI_PROPERTY_CONFIG_VDEC_OX_START + 0x002)
 #define HFI_PROPERTY_CONFIG_VDEC_MB_ERROR_MAP			\
 	(HFI_PROPERTY_CONFIG_VDEC_OX_START + 0x003)
+#define HFI_PROPERTY_CONFIG_VDEC_ENTROPY \
+	(HFI_PROPERTY_CONFIG_VDEC_OX_START + 0x004)
 
 #define HFI_PROPERTY_PARAM_VENC_OX_START				\
 	(HFI_DOMAIN_BASE_VENC + HFI_ARCH_OX_OFFSET + 0x5000)
@@ -234,6 +248,12 @@ struct hfi_extradata_header {
 	(HFI_PROPERTY_PARAM_VENC_OX_START + 0x003)
 #define  HFI_PROPERTY_PARAM_VENC_MBI_DUMPING				\
 	(HFI_PROPERTY_PARAM_VENC_OX_START + 0x005)
+#define HFI_PROPERTY_PARAM_VENC_FRAME_QP_EXTRADATA		\
+	(HFI_PROPERTY_PARAM_VENC_OX_START + 0x006)
+#define  HFI_PROPERTY_PARAM_VENC_YUVSTAT_INFO_EXTRADATA		\
+	(HFI_PROPERTY_PARAM_VENC_OX_START + 0x007)
+#define  HFI_PROPERTY_PARAM_VENC_ROI_QP_EXTRADATA		\
+	(HFI_PROPERTY_PARAM_VENC_OX_START + 0x008)
 
 #define HFI_PROPERTY_CONFIG_VENC_OX_START				\
 	(HFI_DOMAIN_BASE_VENC + HFI_ARCH_OX_OFFSET + 0x6000)
@@ -256,6 +276,11 @@ struct hfi_batch_info {
 struct hfi_buffer_count_actual {
 	u32 buffer_type;
 	u32 buffer_count_actual;
+};
+
+struct hfi_buffer_size_minimum {
+	u32 buffer_type;
+	u32 buffer_size;
 };
 
 struct hfi_buffer_requirements {
@@ -368,6 +393,8 @@ struct hfi_uncompressed_plane_actual_constraints_info {
 	(HFI_CMD_SESSION_OX_START + 0x00B)
 #define HFI_CMD_SESSION_RELEASE_RESOURCES	\
 	(HFI_CMD_SESSION_OX_START + 0x00C)
+#define HFI_CMD_SESSION_CONTINUE	(HFI_CMD_SESSION_OX_START + 0x00D)
+#define HFI_CMD_SESSION_SYNC		(HFI_CMD_SESSION_OX_START + 0x00E)
 
 #define HFI_MSG_SYS_OX_START			\
 (HFI_DOMAIN_BASE_COMMON + HFI_ARCH_OX_OFFSET + HFI_MSG_START_OFFSET + 0x0000)
@@ -823,6 +850,18 @@ struct hfi_index_extradata_input_crop_payload {
 	u32 height;
 };
 
+struct hfi_index_extradata_output_crop_payload {
+	u32 size;
+	u32 version;
+	u32 port_index;
+	u32 left;
+	u32 top;
+	u32 display_width;
+	u32 display_height;
+	u32 width;
+	u32 height;
+};
+
 struct hfi_index_extradata_digital_zoom_payload {
 	u32 size;
 	u32 version;
@@ -851,10 +890,18 @@ struct hfi_extradata_recovery_point_sei_payload {
 	u32 flag;
 };
 
+struct hfi_cmd_session_continue_packet {
+	u32 size;
+	u32 packet_type;
+	u32 session_id;
+};
+
 struct hal_session {
 	struct list_head list;
 	void *session_id;
-	u32 is_decoder;
+	bool is_decoder;
+	enum hal_video_codec codec;
+	enum hal_domain domain;
 	void *device;
 };
 
@@ -867,11 +914,16 @@ struct msm_vidc_fw {
 	void *cookie;
 };
 
-u32 hfi_process_msg_packet(msm_vidc_callback callback,
-		u32 device_id, struct vidc_hal_msg_pkt_hdr *msg_hdr,
-		struct list_head *sessions, struct mutex *session_lock);
+int hfi_process_msg_packet(u32 device_id, struct vidc_hal_msg_pkt_hdr *msg_hdr,
+		struct msm_vidc_cb_info *info);
 
-struct hal_session *hfi_process_get_session(
-		struct list_head *sessions, u32 session_id);
+enum vidc_status hfi_process_sys_init_done_prop_read(
+	struct hfi_msg_sys_init_done_packet *pkt,
+	struct vidc_hal_sys_init_done *sys_init_done);
+
+enum vidc_status hfi_process_session_init_done_prop_read(
+	struct hfi_msg_sys_session_init_done_packet *pkt,
+	struct vidc_hal_session_init_done *session_init_done);
+
 #endif
 

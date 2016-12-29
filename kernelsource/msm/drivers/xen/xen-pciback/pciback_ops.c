@@ -3,6 +3,9 @@
  *
  *   Author: Ryan Wilson <hap9@epoch.ncsc.mil>
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/wait.h>
 #include <linux/bitops.h>
@@ -144,7 +147,7 @@ int xen_pcibk_enable_msi(struct xen_pcibk_device *pdev,
 	status = pci_enable_msi(dev);
 
 	if (status) {
-		pr_warn_ratelimited(DRV_NAME ": %s: error enabling MSI for guest %u: err %d\n",
+		pr_warn_ratelimited("%s: error enabling MSI for guest %u: err %d\n",
 				    pci_name(dev), pdev->xdev->otherend_id,
 				    status);
 		op->value = 0;
@@ -194,12 +197,25 @@ int xen_pcibk_enable_msix(struct xen_pcibk_device *pdev,
 	struct xen_pcibk_dev_data *dev_data;
 	int i, result;
 	struct msix_entry *entries;
+	u16 cmd;
 
 	if (unlikely(verbose_request))
 		printk(KERN_DEBUG DRV_NAME ": %s: enable MSI-X\n",
 		       pci_name(dev));
+
 	if (op->value > SH_INFO_MAX_VEC)
 		return -EINVAL;
+
+	if (dev->msix_enabled)
+		return -EALREADY;
+
+	/*
+	 * PCI_COMMAND_MEMORY must be enabled, otherwise we may not be able
+	 * to access the BARs where the MSI-X entries reside.
+	 */
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
+	if (dev->msi_enabled || !(cmd & PCI_COMMAND_MEMORY))
+		return -ENXIO;
 
 	entries = kmalloc(op->value * sizeof(*entries), GFP_KERNEL);
 	if (entries == NULL)
@@ -210,12 +226,11 @@ int xen_pcibk_enable_msix(struct xen_pcibk_device *pdev,
 		entries[i].vector = op->msix_entries[i].vector;
 	}
 
-	result = pci_enable_msix(dev, entries, op->value);
-
+	result = pci_enable_msix_exact(dev, entries, op->value);
 	if (result == 0) {
 		for (i = 0; i < op->value; i++) {
 			op->msix_entries[i].entry = entries[i].entry;
-			if (entries[i].vector)
+			if (entries[i].vector) {
 				op->msix_entries[i].vector =
 					xen_pirq_from_irq(entries[i].vector);
 				if (unlikely(verbose_request))
@@ -223,9 +238,10 @@ int xen_pcibk_enable_msix(struct xen_pcibk_device *pdev,
 						"MSI-X[%d]: %d\n",
 						pci_name(dev), i,
 						op->msix_entries[i].vector);
+			}
 		}
 	} else
-		pr_warn_ratelimited(DRV_NAME ": %s: error enabling MSI-X for guest %u: err %d!\n",
+		pr_warn_ratelimited("%s: error enabling MSI-X for guest %u: err %d!\n",
 				    pci_name(dev), pdev->xdev->otherend_id,
 				    result);
 	kfree(entries);
@@ -295,9 +311,11 @@ void xen_pcibk_do_op(struct work_struct *data)
 		container_of(data, struct xen_pcibk_device, op_work);
 	struct pci_dev *dev;
 	struct xen_pcibk_dev_data *dev_data = NULL;
-	struct xen_pci_op *op = &pdev->sh_info->op;
+	struct xen_pci_op *op = &pdev->op;
 	int test_intx = 0;
 
+	*op = pdev->sh_info->op;
+	barrier();
 	dev = xen_pcibk_get_pci_dev(pdev, op->domain, op->bus, op->devfn);
 
 	if (dev == NULL)
@@ -339,6 +357,17 @@ void xen_pcibk_do_op(struct work_struct *data)
 		if ((dev_data->enable_intx != test_intx))
 			xen_pcibk_control_isr(dev, 0 /* no reset */);
 	}
+	pdev->sh_info->op.err = op->err;
+	pdev->sh_info->op.value = op->value;
+#ifdef CONFIG_PCI_MSI
+	if (op->cmd == XEN_PCI_OP_enable_msix && op->err == 0) {
+		unsigned int i;
+
+		for (i = 0; i < op->value; i++)
+			pdev->sh_info->op.msix_entries[i].vector =
+				op->msix_entries[i].vector;
+	}
+#endif
 	/* Tell the driver domain that we're done. */
 	wmb();
 	clear_bit(_XEN_PCIF_active, (unsigned long *)&pdev->sh_info->flags);
@@ -372,7 +401,7 @@ static irqreturn_t xen_pcibk_guest_interrupt(int irq, void *dev_id)
 		dev_data->handled++;
 		if ((dev_data->handled % 1000) == 0) {
 			if (xen_test_irq_shared(irq)) {
-				printk(KERN_INFO "%s IRQ line is not shared "
+				pr_info("%s IRQ line is not shared "
 					"with other domains. Turning ISR off\n",
 					 dev_data->irq_name);
 				dev_data->ack_intr = 0;

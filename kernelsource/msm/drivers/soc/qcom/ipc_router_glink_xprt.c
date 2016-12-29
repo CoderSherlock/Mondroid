@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -56,7 +56,7 @@ if (ipc_router_glink_xprt_debug_mask) \
  * @xprt: IPC Router XPRT structure to contain XPRT specific info.
  * @ch_hndl: Opaque Channel handle returned by GLink.
  * @xprt_wq: Workqueue to queue read & other XPRT related works.
- * @ss_reset_lock: Lock to protect access to the ss_reset flag.
+ * @ss_reset_rwlock: Read-Write lock to protect access to the ss_reset flag.
  * @ss_reset: flag used to check SSR state.
  * @pil: pil handle to the remote subsystem
  * @sft_close_complete: Variable to indicate completion of SSR handling
@@ -75,7 +75,7 @@ struct ipc_router_glink_xprt {
 	struct msm_ipc_router_xprt xprt;
 	void *ch_hndl;
 	struct workqueue_struct *xprt_wq;
-	struct mutex ss_reset_lock;
+	struct rw_semaphore ss_reset_rwlock;
 	int ss_reset;
 	void *pil;
 	struct completion sft_close_complete;
@@ -135,11 +135,7 @@ struct ipc_router_glink_xprt_config {
 static DEFINE_MUTEX(glink_xprt_list_lock_lha1);
 static LIST_HEAD(glink_xprt_list);
 
-static void pil_vote_load_worker(struct work_struct *work);
-static void pil_vote_unload_worker(struct work_struct *work);
 static struct workqueue_struct *glink_xprt_wq;
-
-static bool is_pil_loading_disabled(char *edge);
 
 static void glink_xprt_link_state_cb(struct glink_link_state_cb_info *cb_info,
 				     void *priv);
@@ -181,6 +177,22 @@ static void *glink_xprt_vbuf_provider(void *iovec, size_t offset,
 		return (void *)skb->data + skb->len - *buf_size;
 	}
 	return NULL;
+}
+
+/**
+ * ipc_router_glink_xprt_set_version() - Set the IPC Router version in transport
+ * @xprt:	Reference to the transport structure.
+ * @version:	The version to be set in transport.
+ */
+static void ipc_router_glink_xprt_set_version(
+	struct msm_ipc_router_xprt *xprt, unsigned version)
+{
+	struct ipc_router_glink_xprt *glink_xprtp;
+
+	if (!xprt)
+		return;
+	glink_xprtp = container_of(xprt, struct ipc_router_glink_xprt, xprt);
+	glink_xprtp->xprt_version = version;
 }
 
 static int ipc_router_glink_xprt_get_version(
@@ -226,14 +238,13 @@ static int ipc_router_glink_xprt_write(void *data, uint32_t len,
 		return -ENOMEM;
 	}
 
-	mutex_lock(&glink_xprtp->ss_reset_lock);
+	down_read(&glink_xprtp->ss_reset_rwlock);
 	if (glink_xprtp->ss_reset) {
-		mutex_unlock(&glink_xprtp->ss_reset_lock);
 		release_pkt(temp_pkt);
 		IPC_RTR_ERR("%s: %s chnl reset\n", __func__, xprt->name);
-		return -ENETRESET;
+		ret = -ENETRESET;
+		goto out_write_data;
 	}
-	mutex_unlock(&glink_xprtp->ss_reset_lock);
 
 	D("%s: Ready to write %d bytes\n", __func__, len);
 	ret = glink_txv(glink_xprtp->ch_hndl, (void *)glink_xprtp,
@@ -242,11 +253,15 @@ static int ipc_router_glink_xprt_write(void *data, uint32_t len,
 	if (ret < 0) {
 		release_pkt(temp_pkt);
 		IPC_RTR_ERR("%s: Error %d while tx\n", __func__, ret);
-		return ret;
+		goto out_write_data;
 	}
+	ret = len;
 	D("%s:%s: TX Complete for %d bytes @ %p\n", __func__,
 	  glink_xprtp->ipc_rtr_xprt_name, len, temp_pkt);
-	return len;
+
+out_write_data:
+	up_read(&glink_xprtp->ss_reset_rwlock);
+	return ret;
 }
 
 static int ipc_router_glink_xprt_close(struct msm_ipc_router_xprt *xprt)
@@ -254,9 +269,9 @@ static int ipc_router_glink_xprt_close(struct msm_ipc_router_xprt *xprt)
 	struct ipc_router_glink_xprt *glink_xprtp =
 		container_of(xprt, struct ipc_router_glink_xprt, xprt);
 
-	mutex_lock(&glink_xprtp->ss_reset_lock);
+	down_write(&glink_xprtp->ss_reset_rwlock);
 	glink_xprtp->ss_reset = 1;
-	mutex_unlock(&glink_xprtp->ss_reset_lock);
+	up_write(&glink_xprtp->ss_reset_rwlock);
 	return glink_close(glink_xprtp->ch_hndl);
 }
 
@@ -315,20 +330,18 @@ static void glink_xprt_read_data(struct work_struct *work)
 	struct read_work *rx_work =
 		container_of(work, struct read_work, work);
 	struct ipc_router_glink_xprt *glink_xprtp = rx_work->glink_xprtp;
+	bool reuse_intent = false;
 
-	mutex_lock(&glink_xprtp->ss_reset_lock);
+	down_read(&glink_xprtp->ss_reset_rwlock);
 	if (glink_xprtp->ss_reset) {
-		mutex_unlock(&glink_xprtp->ss_reset_lock);
 		IPC_RTR_ERR("%s: %s channel reset\n",
 			__func__, glink_xprtp->xprt.name);
 		goto out_read_data;
 	}
-	mutex_unlock(&glink_xprtp->ss_reset_lock);
 
 	D("%s %zu bytes @ %p\n", __func__, rx_work->iovec_size, rx_work->iovec);
 	if (rx_work->iovec_size <= DEFAULT_RX_INTENT_SIZE)
-		glink_queue_rx_intent(glink_xprtp->ch_hndl, (void *)glink_xprtp,
-				      DEFAULT_RX_INTENT_SIZE);
+		reuse_intent = true;
 
 	pkt = glink_xprt_copy_data(rx_work);
 	if (!pkt) {
@@ -340,8 +353,9 @@ static void glink_xprt_read_data(struct work_struct *work)
 				   IPC_ROUTER_XPRT_EVENT_DATA, pkt);
 	release_pkt(pkt);
 out_read_data:
-	glink_rx_done(glink_xprtp->ch_hndl, rx_work->iovec, false);
+	glink_rx_done(glink_xprtp->ch_hndl, rx_work->iovec, reuse_intent);
 	kfree(rx_work);
+	up_read(&glink_xprtp->ss_reset_rwlock);
 }
 
 static void glink_xprt_open_event(struct work_struct *work)
@@ -351,9 +365,6 @@ static void glink_xprt_open_event(struct work_struct *work)
 	struct ipc_router_glink_xprt *glink_xprtp = xprt_work->glink_xprtp;
 	int i;
 
-	mutex_lock(&glink_xprtp->ss_reset_lock);
-	glink_xprtp->ss_reset = 0;
-	mutex_unlock(&glink_xprtp->ss_reset_lock);
 	msm_ipc_router_xprt_notify(&glink_xprtp->xprt,
 				IPC_ROUTER_XPRT_EVENT_OPEN, NULL);
 	D("%s: Notified IPC Router of %s OPEN\n",
@@ -391,33 +402,6 @@ static void glink_xprt_qrx_intent_worker(struct work_struct *work)
 	kfree(qrx_intent_work);
 }
 
-/**
-* is_pil_loading_disabled() - Check if pil loading a subsystem is disabled
-* @pil_edge: Remote subsystem edge name understood by PIL.
-*
-* @return: true if disabled, false if enabled.
-*/
-static bool is_pil_loading_disabled(char *pil_edge)
-{
-	struct ipc_router_glink_xprt *glink_xprtp;
-
-	mutex_lock(&glink_xprt_list_lock_lha1);
-	list_for_each_entry(glink_xprtp, &glink_xprt_list, list) {
-		if (!strcmp(glink_xprtp->pil_edge, pil_edge)) {
-			mutex_unlock(&glink_xprt_list_lock_lha1);
-			return glink_xprtp->disable_pil_loading;
-		}
-	}
-	mutex_unlock(&glink_xprt_list_lock_lha1);
-	return true;
-}
-
-struct pil_vote_info {
-	void *pil_handle;
-	struct work_struct load_work;
-	struct work_struct unload_work;
-};
-
 static void msm_ipc_unload_subsystem(struct ipc_router_glink_xprt *glink_xprtp)
 {
 	if (glink_xprtp->pil) {
@@ -441,104 +425,6 @@ static void *msm_ipc_load_subsystem(struct ipc_router_glink_xprt *glink_xprtp)
 	return pil;
 }
 
-/**
- * pil_vote_load_worker() - Process vote to load the modem
- *
- * @work: Work item to process
- *
- * This function is called to process votes to load the modem that have been
- * queued by msm_ipc_load_default_node().
- */
-static void pil_vote_load_worker(struct work_struct *work)
-{
-	char *peripheral;
-	struct pil_vote_info *vote_info;
-	bool loading_disabled;
-
-	vote_info = container_of(work, struct pil_vote_info, load_work);
-	peripheral = "modem";
-	loading_disabled = is_pil_loading_disabled(peripheral);
-	if (!loading_disabled) {
-		vote_info->pil_handle = subsystem_get(peripheral);
-		if (IS_ERR(vote_info->pil_handle)) {
-			IPC_RTR_ERR("%s: Failed to load %s\n",
-				__func__, peripheral);
-			vote_info->pil_handle = NULL;
-		}
-	} else {
-		vote_info->pil_handle = NULL;
-	}
-}
-
-/**
- * pil_vote_unload_worker() - Process vote to unload the modem
- *
- * @work: Work item to process
- *
- * This function is called to process votes to unload the modem that have been
- * queued by msm_ipc_unload_default_node().
- */
-static void pil_vote_unload_worker(struct work_struct *work)
-{
-	struct pil_vote_info *vote_info;
-
-	vote_info = container_of(work, struct pil_vote_info, unload_work);
-
-	if (vote_info->pil_handle) {
-		subsystem_put(vote_info->pil_handle);
-		vote_info->pil_handle = NULL;
-	}
-	kfree(vote_info);
-}
-
-/**
- * msm_ipc_load_default_node() - Queue a vote to load the modem.
- *
- * @return: PIL vote info structure on success, NULL on failure.
- *
- * This function places a work item that loads the modem on the
- * single-threaded workqueue used for processing PIL votes to load
- * or unload the modem.
- */
-void *msm_ipc_load_default_node(void)
-{
-	struct pil_vote_info *vote_info;
-
-	vote_info = kmalloc(sizeof(struct pil_vote_info), GFP_KERNEL);
-	if (vote_info == NULL) {
-		pr_err("%s: mem alloc for pil_vote_info failed\n", __func__);
-		return NULL;
-	}
-
-	INIT_WORK(&vote_info->load_work, pil_vote_load_worker);
-	queue_work(glink_xprt_wq, &vote_info->load_work);
-
-	return vote_info;
-}
-EXPORT_SYMBOL(msm_ipc_load_default_node);
-
-/**
- * msm_ipc_unload_default_node() - Queue a vote to unload the modem.
- *
- * @pil_vote: PIL vote info structure, containing the PIL handle
- * and work structure.
- *
- * This function places a work item that unloads the modem on the
- * single-threaded workqueue used for processing PIL votes to load
- * or unload the modem.
- */
-void msm_ipc_unload_default_node(void *pil_vote)
-{
-	struct pil_vote_info *vote_info;
-
-	if (pil_vote) {
-		vote_info = (struct pil_vote_info *) pil_vote;
-		INIT_WORK(&vote_info->unload_work, pil_vote_unload_worker);
-		queue_work(glink_xprt_wq, &vote_info->unload_work);
-	}
-}
-EXPORT_SYMBOL(msm_ipc_unload_default_node);
-
 static void glink_xprt_notify_rxv(void *handle, const void *priv,
 	const void *pkt_priv, void *ptr, size_t size,
 	void * (*vbuf_provider)(void *iovec, size_t offset, size_t *size),
@@ -548,7 +434,7 @@ static void glink_xprt_notify_rxv(void *handle, const void *priv,
 		(struct ipc_router_glink_xprt *)priv;
 	struct read_work *rx_work;
 
-	rx_work = kmalloc(sizeof(struct read_work), GFP_KERNEL);
+	rx_work = kmalloc(sizeof(*rx_work), GFP_ATOMIC);
 	if (!rx_work) {
 		IPC_RTR_ERR("%s: couldn't allocate read_work\n", __func__);
 		glink_rx_done(glink_xprtp->ch_hndl, ptr, true);
@@ -582,8 +468,11 @@ static bool glink_xprt_notify_rx_intent_req(void *handle, const void *priv,
 	struct ipc_router_glink_xprt *glink_xprtp =
 		(struct ipc_router_glink_xprt *)priv;
 
+	if (sz <= DEFAULT_RX_INTENT_SIZE)
+		return true;
+
 	qrx_intent_work = kmalloc(sizeof(struct queue_rx_intent_work),
-				  GFP_KERNEL);
+				  GFP_ATOMIC);
 	if (!qrx_intent_work) {
 		IPC_RTR_ERR("%s: Couldn't queue rx_intent of %zu bytes\n",
 			    __func__, sz);
@@ -603,8 +492,15 @@ static void glink_xprt_notify_state(void *handle, const void *priv,
 	struct ipc_router_glink_xprt *glink_xprtp =
 		(struct ipc_router_glink_xprt *)priv;
 
+	D("%s: %s:%s - State %d\n",
+	  __func__, glink_xprtp->edge, glink_xprtp->transport, event);
 	switch (event) {
 	case GLINK_CONNECTED:
+		if (IS_ERR_OR_NULL(glink_xprtp->ch_hndl))
+			glink_xprtp->ch_hndl = handle;
+		down_write(&glink_xprtp->ss_reset_rwlock);
+		glink_xprtp->ss_reset = 0;
+		up_write(&glink_xprtp->ss_reset_rwlock);
 		xprt_work = kmalloc(sizeof(struct ipc_router_glink_xprt_work),
 				    GFP_ATOMIC);
 		if (!xprt_work) {
@@ -620,9 +516,13 @@ static void glink_xprt_notify_state(void *handle, const void *priv,
 
 	case GLINK_LOCAL_DISCONNECTED:
 	case GLINK_REMOTE_DISCONNECTED:
-		mutex_lock(&glink_xprtp->ss_reset_lock);
+		down_write(&glink_xprtp->ss_reset_rwlock);
+		if (glink_xprtp->ss_reset) {
+			up_write(&glink_xprtp->ss_reset_rwlock);
+			break;
+		}
 		glink_xprtp->ss_reset = 1;
-		mutex_unlock(&glink_xprtp->ss_reset_lock);
+		up_write(&glink_xprtp->ss_reset_rwlock);
 		xprt_work = kmalloc(sizeof(struct ipc_router_glink_xprt_work),
 				    GFP_ATOMIC);
 		if (!xprt_work) {
@@ -646,6 +546,7 @@ static void glink_xprt_ch_open(struct ipc_router_glink_xprt *glink_xprtp)
 		return;
 
 	open_cfg.transport = glink_xprtp->transport;
+	open_cfg.options |= GLINK_OPT_INITIAL_XPORT;
 	open_cfg.edge = glink_xprtp->edge;
 	open_cfg.name = glink_xprtp->ch_name;
 	open_cfg.notify_rx = NULL;
@@ -700,6 +601,7 @@ static void glink_xprt_link_state_worker(struct work_struct *work)
 			    || IS_ERR_OR_NULL(glink_xprtp->ch_hndl))
 				continue;
 			glink_close(glink_xprtp->ch_hndl);
+			glink_xprtp->ch_hndl = NULL;
 			msm_ipc_unload_subsystem(glink_xprtp);
 		}
 		mutex_unlock(&glink_xprt_list_lock_lha1);
@@ -784,6 +686,7 @@ static int ipc_router_glink_config_init(
 	glink_xprtp->xprt.name = glink_xprtp->ipc_rtr_xprt_name;
 
 	glink_xprtp->xprt.get_version =	ipc_router_glink_xprt_get_version;
+	glink_xprtp->xprt.set_version =	ipc_router_glink_xprt_set_version;
 	glink_xprtp->xprt.get_option = ipc_router_glink_xprt_get_option;
 	glink_xprtp->xprt.read_avail = NULL;
 	glink_xprtp->xprt.read = NULL;
@@ -793,7 +696,7 @@ static int ipc_router_glink_config_init(
 	glink_xprtp->xprt.sft_close_done = glink_xprt_sft_close_done;
 	glink_xprtp->xprt.priv = NULL;
 
-	mutex_init(&glink_xprtp->ss_reset_lock);
+	init_rwsem(&glink_xprtp->ss_reset_rwlock);
 	glink_xprtp->ss_reset = 0;
 
 	scnprintf(xprt_wq_name, GLINK_NAME_SIZE, "%s_%s_%s",
@@ -813,6 +716,7 @@ static int ipc_router_glink_config_init(
 	list_add(&glink_xprtp->list, &glink_xprt_list);
 	mutex_unlock(&glink_xprt_list_lock_lha1);
 
+	glink_xprt_link_info.edge = glink_xprt_config->edge;
 	glink_xprt_link_state_notif_handle = glink_register_link_state_cb(
 						&glink_xprt_link_info, NULL);
 	return 0;

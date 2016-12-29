@@ -429,7 +429,7 @@ int ext4_encrypted_zeroout(struct inode *inode, struct ext4_extent *ex)
 			goto errout;
 		}
 		bio->bi_bdev = inode->i_sb->s_bdev;
-		bio->bi_sector = pblk << (inode->i_sb->s_blocksize_bits - 9);
+		bio->bi_iter.bi_sector = pblk << (inode->i_sb->s_blocksize_bits - 9);
 		ret = bio_add_page(bio, ciphertext_page,
 				   inode->i_sb->s_blocksize, 0);
 		if (ret != inode->i_sb->s_blocksize) {
@@ -457,7 +457,8 @@ errout:
 
 bool ext4_valid_contents_enc_mode(uint32_t mode)
 {
-	return (mode == EXT4_ENCRYPTION_MODE_AES_256_XTS);
+	return (mode == EXT4_ENCRYPTION_MODE_AES_256_XTS ||
+		mode == EXT4_ENCRYPTION_MODE_PRIVATE);
 }
 
 /**
@@ -491,6 +492,7 @@ static int ext4_d_revalidate(struct dentry *dentry, unsigned int flags)
 		return 0;
 	}
 	ci = EXT4_I(d_inode(dir))->i_crypt_info;
+
 	if (ci && ci->ci_keyring_key &&
 	    (ci->ci_keyring_key->flags & ((1 << KEY_FLAG_INVALIDATED) |
 					  (1 << KEY_FLAG_REVOKED) |
