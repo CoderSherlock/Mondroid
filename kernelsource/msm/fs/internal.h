@@ -141,3 +141,14 @@ extern long do_splice_direct(struct file *in, loff_t *ppos, struct file *out,
  * pipe.c
  */
 extern const struct file_operations pipefifo_fops;
+
+/*
+ * HPZ: This is somthing in related
+ */
+
+#define FDMAX 100
+#define MEMMAX 1000
+extern int fd_list_p;
+extern int fd_list[100];
+extern int mem_pg_p;
+extern unsigned long mem_pg_list[1000];

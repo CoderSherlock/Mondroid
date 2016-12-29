@@ -917,6 +917,9 @@ struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
 }
 EXPORT_SYMBOL(file_open_root);
 
+int fd_list_p = 0;
+int fd_list[100] = {0};
+
 long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 {
 	struct open_flags op;
@@ -938,6 +941,16 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 		}
 		putname(tmp);
 	}
+#ifdef OPEN_DEBUG	
+	if(record){
+		if(fd_list_p != FDMAX){
+			fd_list[fd_list_p] = fd;
+			fd_list_p ++;
+		}else{
+			printk("FD is full");
+		}
+	}
+#endif	
 	return fd;
 }
 

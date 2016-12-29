@@ -1436,6 +1436,22 @@ int generic_segment_checks(const struct iovec *iov,
 }
 EXPORT_SYMBOL(generic_segment_checks);
 
+
+
+/*********************************
+* HPZ: Small trigger function    *
+**********************************/
+
+unsigned long mem_pg_list[1000] = {0};
+int mem_pg_p = 0;
+
+static int check_and_print(void){
+	mem_pg_list[0] = 1L;
+    return 1;
+}
+
+
+
 /**
  * generic_file_aio_read - generic filesystem read routine
  * @iocb:	kernel I/O control block
@@ -1533,9 +1549,12 @@ generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 			break;
 	}
 out:
+	check_and_print();
 	return retval;
 }
 EXPORT_SYMBOL(generic_file_aio_read);
+
+
 
 #ifdef CONFIG_MMU
 /**
