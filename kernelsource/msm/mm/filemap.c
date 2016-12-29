@@ -1152,6 +1152,8 @@ static void do_generic_file_read(struct file *filp, loff_t *ppos,
 	unsigned long offset;      /* offset into pagecache page */
 	unsigned int prev_offset;
 	int error;
+	//int fd_p_tmp = -1;
+	//int mem_p_tmp = -1;
 
 	trace_mm_filemap_do_generic_file_read(filp, *ppos, desc->count, 1);
 
@@ -1288,9 +1290,14 @@ readpage:
 		 * PG_error will be set again if readpage fails.
 		 */
 		ClearPageError(page);
+		
+		//for(fd_p_tmp = 0; fd_p_tmp < fd_list_p ; fd_p_tmp++ ){
+			//if (fd_list[fd_p_tmp] == page->mapping->
+			printk("[HPZ]\tPAGE:%lu----------HPZ\n", page->index);
+		//}
 		/* Start the actual read. The read will unlock the page. */
 		error = mapping->a_ops->readpage(filp, page);
-
+		
 		if (unlikely(error)) {
 			if (error == AOP_TRUNCATED_PAGE) {
 				page_cache_release(page);

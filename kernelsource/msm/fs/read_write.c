@@ -495,7 +495,7 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
-#define READ_DEBUG
+//#define READ_DEBUG
 #ifdef READ_DEBUG
 #define h_dentry f.file->f_path.dentry
                 int length = strlen(h_dentry->d_name.name);

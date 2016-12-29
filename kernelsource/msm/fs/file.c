@@ -23,6 +23,8 @@
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
 
+#include "internal.h"
+
 int sysctl_nr_open __read_mostly = 1024*1024;
 int sysctl_nr_open_min = BITS_PER_LONG;
 int sysctl_nr_open_max = 1024 * 1024; /* raised later */
@@ -603,6 +605,30 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	__clear_close_on_exec(fd, fdt);
 	__put_unused_fd(files, fd);
 	spin_unlock(&files->file_lock);
+	/*
+	if(fd >= 0){
+		int i = 0, j = 0;
+		mutex_lock(&fd_list_lock);
+		for(i = 0; i < fd_list_p; i++){
+			if(fd_list[i] == fd){
+				if(i == 0){
+					fd_list[i] = -1;
+				} 
+				else {
+					for(j = i; j < fd_list_p - 1; j++){
+						fd_list[j] = fd_list[j+1];
+					}
+				}
+				fd_list_p--;
+				break;
+			}
+		}
+		for(i = 0; i < fd_list_p; i++){
+			printk("[HPZ-FD]: %d\n", fd_list[i]);
+		}
+		mutex_unlock(&fd_list_lock);
+	}
+	*/
 	return filp_close(file, files);
 
 out_unlock:
