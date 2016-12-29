@@ -36,35 +36,26 @@
 #include <linux/mtd/ubi.h>
 #include <linux/pagemap.h>
 #include <linux/backing-dev.h>
-#include <linux/security.h>
 #include "ubifs-media.h"
 
 /* Version of this UBIFS implementation */
 #define UBIFS_VERSION 1
 
 /* Normal UBIFS messages */
-#define ubifs_msg(c, fmt, ...)                                      \
-	pr_notice("UBIFS (ubi%d:%d): " fmt "\n",                    \
-		  (c)->vi.ubi_num, (c)->vi.vol_id, ##__VA_ARGS__)
+#define ubifs_msg(fmt, ubi_num, ...)				\
+		pr_notice("UBIFS-%d: " fmt "\n",		\
+		ubi_num, ##__VA_ARGS__)
 /* UBIFS error messages */
-#define ubifs_err(c, fmt, ...)                                      \
-	pr_err("UBIFS error (ubi%d:%d pid %d): %s: " fmt "\n",      \
-	       (c)->vi.ubi_num, (c)->vi.vol_id, current->pid,       \
-	       __func__, ##__VA_ARGS__)
+#define ubifs_err(fmt, ubi_num, ...)				\
+	pr_err("UBIFS-%d error (pid %d): %s: " fmt "\n",	\
+		ubi_num, current->pid, __func__, ##__VA_ARGS__)
 /* UBIFS warning messages */
-#define ubifs_warn(c, fmt, ...)                                     \
-	pr_warn("UBIFS warning (ubi%d:%d pid %d): %s: " fmt "\n",   \
-		(c)->vi.ubi_num, (c)->vi.vol_id, current->pid,      \
-		__func__, ##__VA_ARGS__)
-/*
- * A variant of 'ubifs_err()' which takes the UBIFS file-sytem description
- * object as an argument.
- */
-#define ubifs_errc(c, fmt, ...)                                     \
-	do {                                                        \
-		if (!(c)->probing)                                  \
-			ubifs_err(c, fmt, ##__VA_ARGS__);           \
-	} while (0)
+#define ubifs_warn(fmt, ubi_num, ...)				\
+	pr_warn("UBIFS-%d warning (pid %d): %s: " fmt "\n",	\
+		ubi_num, current->pid, __func__, ##__VA_ARGS__)
+
+/* Used when device number is unknown or irrelevant */
+#define UBIFS_UNKNOWN_DEV_NUM -1
 
 /* UBIFS file system VFS magic number */
 #define UBIFS_SUPER_MAGIC 0x24051905
@@ -162,7 +153,7 @@
 #define WORST_COMPR_FACTOR 2
 
 /*
- * How much memory is needed for a buffer where we compress a data node.
+ * How much memory is needed for a buffer where we comress a data node.
  */
 #define COMPRESSED_DATA_NODE_BUF_SZ \
 	(UBIFS_DATA_NODE_SZ + UBIFS_BLOCK_SIZE * WORST_COMPR_FACTOR)
@@ -319,6 +310,7 @@ struct ubifs_scan_node {
  * @nodes_cnt: number of nodes scanned
  * @nodes: list of struct ubifs_scan_node
  * @endpt: end point (and therefore the start of empty space)
+ * @ecc: read returned -EBADMSG
  * @buf: buffer containing entire LEB scanned
  */
 struct ubifs_scan_leb {
@@ -326,6 +318,7 @@ struct ubifs_scan_leb {
 	int nodes_cnt;
 	struct list_head nodes;
 	int endpt;
+	int ecc;
 	void *buf;
 };
 
@@ -668,7 +661,7 @@ typedef int (*ubifs_lpt_scan_callback)(struct ubifs_info *c,
  * @lock: serializes @buf, @lnum, @offs, @avail, @used, @next_ino and @inodes
  *        fields
  * @softlimit: soft write-buffer timeout interval
- * @delta: hard and soft timeouts delta (the timer expire interval is @softlimit
+ * @delta: hard and soft timeouts delta (the timer expire inteval is @softlimit
  *         and @softlimit + @delta)
  * @timer: write-buffer timer
  * @no_timer: non-zero if this write-buffer does not have a timer
@@ -858,9 +851,9 @@ struct ubifs_compressor {
  * @mod_dent: non-zero if the operation removes or modifies an existing
  *            directory entry
  * @new_ino: non-zero if the operation adds a new inode
- * @new_ino_d: how much data newly created inode contains
+ * @new_ino_d: now much data newly created inode contains
  * @dirtied_ino: how many inodes the operation makes dirty
- * @dirtied_ino_d: how much data dirtied inode contains
+ * @dirtied_ino_d: now much data dirtied inode contains
  * @idx_growth: how much the index will supposedly grow
  * @data_growth: how much new data the operation will supposedly add
  * @dd_growth: how much data that makes other data dirty the operation will
@@ -934,9 +927,9 @@ struct ubifs_orphan {
 /**
  * struct ubifs_mount_opts - UBIFS-specific mount options information.
  * @unmount_mode: selected unmount mode (%0 default, %1 normal, %2 fast)
- * @bulk_read: enable/disable bulk-reads (%0 default, %1 disable, %2 enable)
+ * @bulk_read: enable/disable bulk-reads (%0 default, %1 disabe, %2 enable)
  * @chk_data_crc: enable/disable CRC data checking when reading data nodes
- *                (%0 default, %1 disable, %2 enable)
+ *                (%0 default, %1 disabe, %2 enable)
  * @override_compr: override default compressor (%0 - do not override and use
  *                  superblock compressor, %1 - override and use compressor
  *                  specified in @compr_type)
@@ -966,9 +959,9 @@ struct ubifs_mount_opts {
  *           optimization)
  * @nospace_rp: the same as @nospace, but additionally means that even reserved
  *              pool is full
- * @page_budget: budget for a page (constant, never changed after mount)
- * @inode_budget: budget for an inode (constant, never changed after mount)
- * @dent_budget: budget for a directory entry (constant, never changed after
+ * @page_budget: budget for a page (constant, nenver changed after mount)
+ * @inode_budget: budget for an inode (constant, nenver changed after mount)
+ * @dent_budget: budget for a directory entry (constant, nenver changed after
  *               mount)
  */
 struct ubifs_budg_info {
@@ -1220,7 +1213,6 @@ struct ubifs_debug_info;
  * @need_recovery: %1 if the file-system needs recovery
  * @replaying: %1 during journal replay
  * @mounting: %1 while mounting
- * @probing: %1 while attempting to mount if MS_SILENT mount flag is set
  * @remounting_rw: %1 while re-mounting from R/O mode to R/W mode
  * @replay_list: temporary list used during journal replay
  * @replay_buds: list of buds to replay
@@ -1452,7 +1444,6 @@ struct ubifs_info {
 	unsigned int replaying:1;
 	unsigned int mounting:1;
 	unsigned int remounting_rw:1;
-	unsigned int probing:1;
 	struct list_head replay_list;
 	struct list_head replay_buds;
 	unsigned long long cs_sqnum;
@@ -1636,10 +1627,7 @@ int ubifs_tnc_start_commit(struct ubifs_info *c, struct ubifs_zbranch *zroot);
 int ubifs_tnc_end_commit(struct ubifs_info *c);
 
 /* shrinker.c */
-unsigned long ubifs_shrink_scan(struct shrinker *shrink,
-				struct shrink_control *sc);
-unsigned long ubifs_shrink_count(struct shrinker *shrink,
-				 struct shrink_control *sc);
+int ubifs_shrinker(struct shrinker *shrink, struct shrink_control *sc);
 
 /* commit.c */
 int ubifs_bg_thread(void *info);
@@ -1745,9 +1733,6 @@ int ubifs_calc_dark(const struct ubifs_info *c, int spc);
 /* file.c */
 int ubifs_fsync(struct file *file, loff_t start, loff_t end, int datasync);
 int ubifs_setattr(struct dentry *dentry, struct iattr *attr);
-#ifdef CONFIG_UBIFS_ATIME_SUPPORT
-int ubifs_update_time(struct inode *inode, struct timespec *time, int flags);
-#endif
 
 /* dir.c */
 struct inode *ubifs_new_inode(struct ubifs_info *c, const struct inode *dir,
@@ -1762,8 +1747,6 @@ ssize_t ubifs_getxattr(struct dentry *dentry, const char *name, void *buf,
 		       size_t size);
 ssize_t ubifs_listxattr(struct dentry *dentry, char *buffer, size_t size);
 int ubifs_removexattr(struct dentry *dentry, const char *name);
-int ubifs_init_security(struct inode *dentry, struct inode *inode,
-			const struct qstr *qstr);
 
 /* super.c */
 struct inode *ubifs_iget(struct super_block *sb, unsigned long inum);
@@ -1793,10 +1776,10 @@ long ubifs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 /* compressor.c */
 int __init ubifs_compressors_init(void);
 void ubifs_compressors_exit(void);
-void ubifs_compress(const struct ubifs_info *c, const void *in_buf, int in_len,
+void ubifs_compress(struct ubifs_info *c, const void *in_buf, int in_len,
 		    void *out_buf, int *out_len, int *compr_type);
-int ubifs_decompress(const struct ubifs_info *c, const void *buf, int len,
-		     void *out, int *out_len, int compr_type);
+int ubifs_decompress(struct ubifs_info *c, const void *buf, int len, void *out,
+		     int *out_len, int compr_type);
 
 #include "debug.h"
 #include "misc.h"

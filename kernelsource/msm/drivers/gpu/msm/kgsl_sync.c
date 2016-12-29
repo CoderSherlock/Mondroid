@@ -115,10 +115,8 @@ static int _add_fence_event(struct kgsl_device *device,
 	 * Increase the refcount for the context to keep it through the
 	 * callback
 	 */
-	if (!_kgsl_context_get(context)) {
-		kfree(event);
-		return -ENOENT;
-	}
+
+	_kgsl_context_get(context);
 
 	event->context = context;
 	event->timestamp = timestamp;
@@ -165,19 +163,21 @@ int kgsl_add_fence_event(struct kgsl_device *device,
 	if (len != sizeof(priv))
 		return -EINVAL;
 
+	mutex_lock(&device->mutex);
+
 	context = kgsl_context_get_owner(owner, context_id);
 
 	if (context == NULL)
-		return -EINVAL;
+		goto unlock;
 
 	if (test_bit(KGSL_CONTEXT_PRIV_INVALID, &context->priv))
-		goto out;
+		goto unlock;
 
 	pt = kgsl_sync_pt_create(context->timeline, context, timestamp);
 	if (pt == NULL) {
 		KGSL_DRV_CRIT_RATELIMIT(device, "kgsl_sync_pt_create failed\n");
 		ret = -ENOMEM;
-		goto out;
+		goto unlock;
 	}
 	snprintf(fence_name, sizeof(fence_name),
 		"%s-pid-%d-ctx-%d-ts-%d",
@@ -191,7 +191,7 @@ int kgsl_add_fence_event(struct kgsl_device *device,
 		kgsl_sync_pt_destroy(pt);
 		KGSL_DRV_CRIT_RATELIMIT(device, "sync_fence_create failed\n");
 		ret = -ENOMEM;
-		goto out;
+		goto unlock;
 	}
 
 	priv.fence_fd = get_unused_fd_flags(0);
@@ -200,8 +200,9 @@ int kgsl_add_fence_event(struct kgsl_device *device,
 			"Unable to get a file descriptor: %d\n",
 			priv.fence_fd);
 		ret = priv.fence_fd;
-		goto out;
+		goto unlock;
 	}
+	sync_fence_install(fence, priv.fence_fd);
 
 	/*
 	 * If the timestamp hasn't expired yet create an event to trigger it.
@@ -211,29 +212,37 @@ int kgsl_add_fence_event(struct kgsl_device *device,
 
 	kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_RETIRED, &cur);
 
-	if (timestamp_cmp(cur, timestamp) >= 0) {
-		ret = 0;
+	if (timestamp_cmp(cur, timestamp) >= 0)
 		kgsl_sync_timeline_signal(context->timeline, cur);
-	} else {
+	else {
 		ret = _add_fence_event(device, context, timestamp);
 		if (ret)
-			goto out;
+			goto unlock;
 	}
+
+	kgsl_context_put(context);
+
+	/* Unlock the mutex before copying to user */
+	mutex_unlock(&device->mutex);
 
 	if (copy_to_user(data, &priv, sizeof(priv))) {
 		ret = -EFAULT;
 		goto out;
 	}
-	sync_fence_install(fence, priv.fence_fd);
-out:
-	kgsl_context_put(context);
-	if (ret) {
-		if (priv.fence_fd >= 0)
-			put_unused_fd(priv.fence_fd);
 
-		if (fence)
-			sync_fence_put(fence);
-	}
+	return 0;
+
+unlock:
+	kgsl_context_put(context);
+	mutex_unlock(&device->mutex);
+
+out:
+	if (priv.fence_fd >= 0)
+		put_unused_fd(priv.fence_fd);
+
+	if (fence)
+		sync_fence_put(fence);
+
 	return ret;
 }
 
@@ -241,12 +250,8 @@ static unsigned int kgsl_sync_get_timestamp(
 	struct kgsl_sync_timeline *ktimeline, enum kgsl_timestamp_type type)
 {
 	unsigned int ret = 0;
-	struct kgsl_context *context;
 
-	if (ktimeline->device == NULL)
-		return 0;
-
-	context = kgsl_context_get(ktimeline->device,
+	struct kgsl_context *context = kgsl_context_get(ktimeline->device,
 			ktimeline->context_id);
 
 	if (context)
@@ -261,22 +266,16 @@ static void kgsl_sync_timeline_value_str(struct sync_timeline *sync_timeline,
 {
 	struct kgsl_sync_timeline *ktimeline =
 		(struct kgsl_sync_timeline *) sync_timeline;
-
-	/*
-	 * This callback can be called before the device and spinlock are
-	 * initialized in struct kgsl_sync_timeline. kgsl_sync_get_timestamp()
-	 * will check if device is NULL and return 0. Queued and retired
-	 * timestamp of the context will be reported as 0, which is correct
-	 * because the context and timeline are just getting initialized.
-	 */
 	unsigned int timestamp_retired = kgsl_sync_get_timestamp(ktimeline,
 		KGSL_TIMESTAMP_RETIRED);
 	unsigned int timestamp_queued = kgsl_sync_get_timestamp(ktimeline,
 		KGSL_TIMESTAMP_QUEUED);
 
+	spin_lock(&ktimeline->lock);
 	snprintf(str, size, "%u queued:%u retired:%u",
 		ktimeline->last_timestamp,
 		timestamp_queued, timestamp_retired);
+	spin_unlock(&ktimeline->lock);
 }
 
 static void kgsl_sync_pt_value_str(struct sync_pt *sync_pt,
@@ -607,9 +606,6 @@ out:
 	if (ret) {
 		if (fence)
 			sync_fence_put(fence);
-		if (fd >= 0)
-			put_unused_fd(fd);
-
 	}
 	kgsl_syncsource_put(syncsource);
 	return ret;

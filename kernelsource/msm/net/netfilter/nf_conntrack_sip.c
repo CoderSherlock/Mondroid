@@ -1,6 +1,6 @@
 /* SIP extension for IP connection tracking.
  *
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
  * (C) 2005 by Christian Hentschel <chentschel@arnet.com.ar>
  * based on RR's ip_conntrack_ftp.c and other modules.
  * (C) 2007 United Security Providers
@@ -53,20 +53,12 @@ module_param(sip_direct_signalling, int, 0600);
 MODULE_PARM_DESC(sip_direct_signalling, "expect incoming calls from registrar "
 					"only (default 1)");
 
-const struct nf_nat_sip_hooks *nf_nat_sip_hooks;
-EXPORT_SYMBOL_GPL(nf_nat_sip_hooks);
 static struct ctl_table_header *sip_sysctl_header;
 static unsigned nf_ct_disable_sip_alg;
 static int sip_direct_media = 1;
-static unsigned nf_ct_enable_sip_segmentation;
 static int packet_count;
-static bool split_skb;
 
-static
-int proc_sip_segment(struct ctl_table *ctl, int write,
-		     void __user *buffer, size_t *lenp, loff_t *ppos);
-
-static struct ctl_table sip_sysctl_tbl[] = {
+static ctl_table sip_sysctl_tbl[] = {
 	{
 		.procname     = "nf_conntrack_disable_sip_alg",
 		.data         = &nf_ct_disable_sip_alg,
@@ -81,13 +73,6 @@ static struct ctl_table sip_sysctl_tbl[] = {
 		.mode         = 0644,
 		.proc_handler = proc_dointvec,
 	},
-	{
-		.procname     = "nf_conntrack_enable_sip_segmentation",
-		.data         = &nf_ct_enable_sip_segmentation,
-		.maxlen       = sizeof(unsigned int),
-		.mode         = 0644,
-		.proc_handler = proc_sip_segment,
-	},
 	{}
 };
 
@@ -95,43 +80,12 @@ unsigned int (*nf_nat_sip_hook)(struct sk_buff *skb, unsigned int protoff,
 				unsigned int dataoff, const char **dptr,
 				unsigned int *datalen) __read_mostly;
 
-static void sip_calculate_parameters(s16 *diff, s16 *tdiff,
-				     unsigned int *dataoff, const char **dptr,
-				     unsigned int *datalen,
-				     unsigned int msglen, unsigned int origlen)
-{
-	*diff	 = msglen - origlen;
-	*tdiff	+= *diff;
-	*dataoff += msglen;
-	*dptr	+= msglen;
-	*datalen  = *datalen + *diff - msglen;
-}
-
-static void sip_update_params(enum ip_conntrack_dir dir,
-			      unsigned int *msglen, unsigned int *origlen,
-			      const char **dptr, unsigned int *datalen,
-			      bool skb_is_combined, struct nf_conn *ct)
-{
-	if (skb_is_combined) {
-		/* The msglen of first skb has the total msg length of
-		 * the two fragments. hence after combining,we update
-		 * the msglen to that of the msglen of first skb
-		 */
-		*msglen = (dir == IP_CT_DIR_ORIGINAL) ?
-		  ct->segment.msg_length[0] : ct->segment.msg_length[1];
-		*origlen = *msglen;
-		*dptr = ct->dptr_prev;
-		*datalen = *msglen;
-	}
-}
-
 /* This function is to save all the information of the first segment
  * that will be needed for combining the two segments
  */
 static bool sip_save_segment_info(struct nf_conn *ct, struct sk_buff *skb,
-				  unsigned int msglen, unsigned int datalen,
-				  unsigned int datalen_orig, const char *dptr,
-				  enum ip_conntrack_info ctinfo)
+		   unsigned int msglen, unsigned int datalen, const char *dptr,
+		enum ip_conntrack_info ctinfo)
 {
 	enum ip_conntrack_dir dir = IP_CT_DIR_MAX;
 	bool skip = false;
@@ -141,7 +95,9 @@ static bool sip_save_segment_info(struct nf_conn *ct, struct sk_buff *skb,
 	 * complete message leaves the kernel, only then the next fragmented
 	 * segment will reach the kernel
 	 */
-	dir = CTINFO2DIR(ctinfo);
+	if (ct)
+		dir = CTINFO2DIR(ctinfo);
+
 	if (dir == IP_CT_DIR_ORIGINAL) {
 		/* here we check if there is already an element queued for this
 		 * direction, in that case we do not queue the next element,we
@@ -153,97 +109,31 @@ static bool sip_save_segment_info(struct nf_conn *ct, struct sk_buff *skb,
 			ct->segment.msg_length[0] = msglen;
 			ct->segment.data_len[0] = datalen;
 			ct->segment.skb_len[0] = skb->len;
-			ct->segment.orig_data_len[0] = datalen_orig;
 			ct->dptr_prev = dptr;
-			ct->dir_prev = dir;
 			ct->sip_original_dir = 1;
 			skip = false;
 		}
 	} else {
 		if (ct->sip_reply_dir == 1) {
-			skip = true;
+			skip = 1;
 		} else {
 			ct->segment.msg_length[1] = msglen;
 			ct->segment.data_len[1] = datalen;
 			ct->segment.skb_len[1] = skb->len;
-			ct->segment.orig_data_len[1] = datalen_orig;
 			ct->dptr_prev = dptr;
-			ct->dir_prev = dir;
 			ct->sip_reply_dir = 1;
 			skip = false;
 		}
 	}
-	return skip;
-}
+return skip;
 
-static bool sip_calculate_sequence_num(struct nf_conn *ct,
-				       struct sk_buff **skb_ref,
-				       enum ip_conntrack_info ctinfo)
-{
-	struct list_head *list_trav_node;
-	struct list_head *list_backup_node;
-	struct nf_conn *ct_list;
-	enum ip_conntrack_info ctinfo_list;
-	enum ip_conntrack_dir dir_list;
-	enum ip_conntrack_dir dir = IP_CT_DIR_MAX;
-	const struct tcphdr *th_old;
-	unsigned int prev_data_len;
-	unsigned int seq_no, seq_old, exp_seq_no;
-	const struct tcphdr *th_new;
-	struct sip_list *sip_entry = NULL;
-	int orig_data_len = 0;
-	int reply_data_len = 0;
-
-	th_new = (struct tcphdr *)(skb_network_header(*skb_ref) +
-		ip_hdrlen(*skb_ref));
-	seq_no = ntohl(th_new->seq);
-	dir = CTINFO2DIR(ctinfo);
-	/* traverse the list it would have 1 or 2 elements. 1 element per
-	 * direction at max
-	 */
-	list_for_each_safe(list_trav_node, list_backup_node,
-			   &ct->sip_segment_list){
-		sip_entry = list_entry(list_trav_node, struct sip_list, list);
-		ct_list = nf_ct_get(sip_entry->entry->skb, &ctinfo_list);
-		dir_list = CTINFO2DIR(ctinfo_list);
-		/* take an element and check if its direction matches with the
-		 * current one
-		 */
-		if (dir_list == dir) {
-			/* once we have the two elements to be combined we do
-			 * another check. match the next expected seq no of the
-			 * packet in the list with the seq no of the current
-			 * packet.this is to be protected  against out of order
-			 * fragments
-			 */
-			th_old = ((struct tcphdr *)(skb_network_header
-				(sip_entry->entry->skb) +
-				ip_hdrlen(sip_entry->entry->skb)));
-			orig_data_len = ct->segment.orig_data_len[0];
-			reply_data_len = ct->segment.orig_data_len[1];
-
-			prev_data_len = (dir == IP_CT_DIR_ORIGINAL) ?
-			 orig_data_len : reply_data_len;
-			seq_old = (ntohl(th_old->seq));
-			exp_seq_no = seq_old+prev_data_len;
-
-			if (exp_seq_no == seq_no)
-				return true;
-			else
-				return false;
-		}
-	}
-	return false;
 }
 
 static struct sip_list *sip_coalesce_segments(struct nf_conn *ct,
-					      struct sk_buff **skb_ref,
-					      unsigned int dataoff,
-					      struct sk_buff **combined_skb_ref,
-					      bool *skip_sip_process,
-					      bool do_not_process,
-					      enum ip_conntrack_info ctinfo,
-					      bool *success)
+			struct sk_buff **skb_ref, unsigned int dataoff,
+			struct sk_buff **combined_skb_ref,
+			bool *skip_sip_process, bool do_not_process,
+			enum ip_conntrack_info ctinfo, bool *success)
 
 {
 	struct list_head *list_trav_node;
@@ -259,18 +149,19 @@ static struct sip_list *sip_coalesce_segments(struct nf_conn *ct,
 	bool fragstolen = false;
 	int delta_truesize = 0;
 	struct sip_list *sip_entry = NULL;
-	int orig_data_len = 0;
-	int reply_data_len = 0;
 
 	th_new = (struct tcphdr *)(skb_network_header(*skb_ref) +
 		ip_hdrlen(*skb_ref));
 	seq_no = ntohl(th_new->seq);
-	dir = CTINFO2DIR(ctinfo);
+
+	if (ct)
+		dir = CTINFO2DIR(ctinfo);
 	/* traverse the list it would have 1 or 2 elements. 1 element per
 	 * direction at max
 	 */
 	list_for_each_safe(list_trav_node, list_backup_node,
-			   &ct->sip_segment_list){
+			&(ct->sip_segment_list))
+	{
 		sip_entry = list_entry(list_trav_node, struct sip_list, list);
 		ct_list = nf_ct_get(sip_entry->entry->skb, &ctinfo_list);
 		dir_list = CTINFO2DIR(ctinfo_list);
@@ -287,11 +178,9 @@ static struct sip_list *sip_coalesce_segments(struct nf_conn *ct,
 			th_old = ((struct tcphdr *)(skb_network_header
 				(sip_entry->entry->skb) +
 				ip_hdrlen(sip_entry->entry->skb)));
-			orig_data_len = ct->segment.orig_data_len[0];
-			reply_data_len = ct->segment.orig_data_len[1];
 
 			prev_data_len = (dir == IP_CT_DIR_ORIGINAL) ?
-			 orig_data_len : reply_data_len;
+			 ct->segment.data_len[0] : ct->segment.data_len[1];
 			seq_old = (ntohl(th_old->seq));
 			exp_seq_no = seq_old+prev_data_len;
 
@@ -307,20 +196,17 @@ static struct sip_list *sip_coalesce_segments(struct nf_conn *ct,
 				 */
 				skb_pull(*skb_ref, dataoff);
 				if (skb_try_coalesce(sip_entry->entry->skb,
-						     *skb_ref, &fragstolen,
+							*skb_ref, &fragstolen,
 							&delta_truesize)) {
-					pr_debug(" Combining segments\n");
 					*combined_skb_ref =
 							  sip_entry->entry->skb;
 					*success = true;
 					list_del(list_trav_node);
-					} else{
-					skb_push(*skb_ref, dataoff);
-					}
+					} else
+						skb_push(*skb_ref, dataoff);
 			}
-		} else if (do_not_process) {
+		} else if (do_not_process)
 			*skip_sip_process = true;
-		}
 	}
 	return sip_entry;
 }
@@ -337,21 +223,26 @@ static void recalc_header(struct sk_buff *skb, unsigned int skblen,
 			/* fix IP hdr checksum information */
 			ip_hdr(skb)->tot_len = htons(skblen);
 			ip_send_check(ip_hdr(skb));
-	} else {
-		ipv6_hdr(skb)->payload_len =
-				htons(skblen - sizeof(struct ipv6hdr));
-	}
-	datalen = skb->len - protoff;
-	tcph = (struct tcphdr *)((void *)skb->data + protoff);
-	l3proto = __nf_nat_l3proto_find(nf_ct_l3num
+		} else {
+			ipv6_hdr(skb)->payload_len =
+					 htons(skblen - sizeof(struct ipv6hdr));
+		}
+		datalen = skb->len - protoff;
+		tcph = (struct tcphdr *)((void *)skb->data + protoff);
+		l3proto = __nf_nat_l3proto_find(nf_ct_l3num
 					((struct nf_conn *)skb->nfct));
-	l3proto->csum_recalc(skb, IPPROTO_TCP, tcph, &tcph->check,
-			     datalen, oldlen);
+		l3proto->csum_recalc(skb, IPPROTO_TCP, tcph, &tcph->check,
+					datalen, oldlen);
 }
-EXPORT_SYMBOL(nf_nat_sip_hook);
+
+
+
+EXPORT_SYMBOL_GPL(nf_nat_sip_hook);
+
 void (*nf_nat_sip_seq_adjust_hook)(struct sk_buff *skb, unsigned int protoff,
 				   s16 off) __read_mostly;
-EXPORT_SYMBOL(nf_nat_sip_seq_adjust_hook);
+EXPORT_SYMBOL_GPL(nf_nat_sip_seq_adjust_hook);
+
 unsigned int (*nf_nat_sip_expect_hook)(struct sk_buff *skb,
 				       unsigned int protoff,
 				       unsigned int dataoff,
@@ -360,7 +251,7 @@ unsigned int (*nf_nat_sip_expect_hook)(struct sk_buff *skb,
 				       struct nf_conntrack_expect *exp,
 				       unsigned int matchoff,
 				       unsigned int matchlen) __read_mostly;
-EXPORT_SYMBOL(nf_nat_sip_expect_hook);
+EXPORT_SYMBOL_GPL(nf_nat_sip_expect_hook);
 
 unsigned int (*nf_nat_sdp_addr_hook)(struct sk_buff *skb, unsigned int protoff,
 				     unsigned int dataoff,
@@ -371,7 +262,7 @@ unsigned int (*nf_nat_sdp_addr_hook)(struct sk_buff *skb, unsigned int protoff,
 				     enum sdp_header_types term,
 				     const union nf_inet_addr *addr)
 				     __read_mostly;
-EXPORT_SYMBOL(nf_nat_sdp_addr_hook);
+EXPORT_SYMBOL_GPL(nf_nat_sdp_addr_hook);
 
 unsigned int (*nf_nat_sdp_port_hook)(struct sk_buff *skb, unsigned int protoff,
 				     unsigned int dataoff,
@@ -380,7 +271,7 @@ unsigned int (*nf_nat_sdp_port_hook)(struct sk_buff *skb, unsigned int protoff,
 				     unsigned int matchoff,
 				     unsigned int matchlen,
 				     u_int16_t port) __read_mostly;
-EXPORT_SYMBOL(nf_nat_sdp_port_hook);
+EXPORT_SYMBOL_GPL(nf_nat_sdp_port_hook);
 
 unsigned int (*nf_nat_sdp_session_hook)(struct sk_buff *skb,
 					unsigned int protoff,
@@ -390,7 +281,7 @@ unsigned int (*nf_nat_sdp_session_hook)(struct sk_buff *skb,
 					unsigned int sdpoff,
 					const union nf_inet_addr *addr)
 					__read_mostly;
-EXPORT_SYMBOL(nf_nat_sdp_session_hook);
+EXPORT_SYMBOL_GPL(nf_nat_sdp_session_hook);
 
 unsigned int (*nf_nat_sdp_media_hook)(struct sk_buff *skb, unsigned int protoff,
 				      unsigned int dataoff,
@@ -402,7 +293,7 @@ unsigned int (*nf_nat_sdp_media_hook)(struct sk_buff *skb, unsigned int protoff,
 				      unsigned int medialen,
 				      union nf_inet_addr *rtp_addr)
 				      __read_mostly;
-EXPORT_SYMBOL(nf_nat_sdp_media_hook);
+EXPORT_SYMBOL_GPL(nf_nat_sdp_media_hook);
 
 static int string_len(const struct nf_conn *ct, const char *dptr,
 		      const char *limit, int *shift)
@@ -416,50 +307,29 @@ static int string_len(const struct nf_conn *ct, const char *dptr,
 	return len;
 }
 
+
+
 static int nf_sip_enqueue_packet(struct nf_queue_entry *entry,
-				 unsigned int queuenum)
+		  unsigned int queuenum)
 {
 	enum ip_conntrack_info ctinfo_list;
 	struct nf_conn *ct_temp;
-	struct sip_list *node = kzalloc(sizeof(*node),
+	struct sip_list *node = kzalloc(sizeof(struct sip_list),
 			GFP_ATOMIC | __GFP_NOWARN);
-	if (!node)
+	if (!node) {
+		pr_err("KERNEL MALLOC FAIL\n");
 		return XT_CONTINUE;
+	}
 
 	ct_temp = nf_ct_get(entry->skb, &ctinfo_list);
 	node->entry = entry;
-	list_add(&node->list, &ct_temp->sip_segment_list);
+	list_add(&(node->list), &(ct_temp->sip_segment_list));
 	return 0;
-}
-
-static void nf_hook_drop_sip(struct net *net, struct nf_hook_ops *hook)
-{
 }
 
 static const struct nf_queue_handler nf_sip_qh = {
 	.outfn	= &nf_sip_enqueue_packet,
-	.nf_hook_drop	= &nf_hook_drop_sip,
 };
-
-static
-int proc_sip_segment(struct ctl_table *ctl, int write,
-		     void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	int ret;
-	unsigned sip_segmentation_status = nf_ct_enable_sip_segmentation;
-	ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
-	/* If there is no change in value just return. */
-	if (sip_segmentation_status == nf_ct_enable_sip_segmentation)
-		return ret;
-	if (nf_ct_enable_sip_segmentation) {
-		pr_debug("registering queue handler\n");
-		nf_register_queue_handler(&nf_sip_qh);
-	} else {
-		pr_debug("de-registering queue handler\n");
-		nf_unregister_queue_handler();
-	}
-	return ret;
-}
 
 static int digits_len(const struct nf_conn *ct, const char *dptr,
 		      const char *limit, int *shift)
@@ -641,7 +511,7 @@ int ct_sip_parse_request(const struct nf_conn *ct,
 	for (; dptr < limit - strlen("sip:"); dptr++) {
 		if (*dptr == '\r' || *dptr == '\n')
 			return -1;
-		if (strncasecmp(dptr, "sip:", strlen("sip:")) == 0) {
+		if (strnicmp(dptr, "sip:", strlen("sip:")) == 0) {
 			dptr += strlen("sip:");
 			break;
 		}
@@ -744,7 +614,7 @@ static const char *ct_sip_header_search(const char *dptr, const char *limit,
 			continue;
 		}
 
-		if (strncasecmp(dptr, needle, len) == 0)
+		if (strnicmp(dptr, needle, len) == 0)
 			return dptr;
 	}
 	return NULL;
@@ -777,10 +647,10 @@ int ct_sip_get_header(const struct nf_conn *ct, const char *dptr,
 		/* Find header. Compact headers must be followed by a
 		 * non-alphabetic character to avoid mismatches. */
 		if (limit - dptr >= hdr->len &&
-		    strncasecmp(dptr, hdr->name, hdr->len) == 0)
+		    strnicmp(dptr, hdr->name, hdr->len) == 0)
 			dptr += hdr->len;
 		else if (hdr->cname && limit - dptr >= hdr->clen + 1 &&
-			 strncasecmp(dptr, hdr->cname, hdr->clen) == 0 &&
+			 strnicmp(dptr, hdr->cname, hdr->clen) == 0 &&
 			 !isalpha(*(dptr + hdr->clen)))
 			dptr += hdr->clen;
 		else
@@ -1014,9 +884,9 @@ static int ct_sip_parse_transport(struct nf_conn *ct, const char *dptr,
 
 	if (ct_sip_parse_param(ct, dptr, dataoff, datalen, "transport=",
 			       &matchoff, &matchlen)) {
-		if (!strncasecmp(dptr + matchoff, "TCP", strlen("TCP")))
+		if (!strnicmp(dptr + matchoff, "TCP", strlen("TCP")))
 			*proto = IPPROTO_TCP;
-		else if (!strncasecmp(dptr + matchoff, "UDP", strlen("UDP")))
+		else if (!strnicmp(dptr + matchoff, "UDP", strlen("UDP")))
 			*proto = IPPROTO_UDP;
 		else
 			return 0;
@@ -1137,10 +1007,10 @@ int ct_sip_get_sdp_header(const struct nf_conn *ct, const char *dptr,
 
 		if (term != SDP_HDR_UNSPEC &&
 		    limit - dptr >= thdr->len &&
-		    strncasecmp(dptr, thdr->name, thdr->len) == 0)
+		    strnicmp(dptr, thdr->name, thdr->len) == 0)
 			break;
 		else if (limit - dptr >= hdr->len &&
-			 strncasecmp(dptr, hdr->name, hdr->len) == 0)
+			 strnicmp(dptr, hdr->name, hdr->len) == 0)
 			dptr += hdr->len;
 		else
 			continue;
@@ -1194,7 +1064,7 @@ static int refresh_signalling_expectation(struct nf_conn *ct,
 	struct hlist_node *next;
 	int found = 0;
 
-	spin_lock_bh(&nf_conntrack_expect_lock);
+	spin_lock_bh(&nf_conntrack_lock);
 	hlist_for_each_entry_safe(exp, next, &help->expectations, lnode) {
 		if (exp->class != SIP_EXPECT_SIGNALLING ||
 		    !nf_inet_addr_cmp(&exp->tuple.dst.u3, addr) ||
@@ -1209,7 +1079,7 @@ static int refresh_signalling_expectation(struct nf_conn *ct,
 		found = 1;
 		break;
 	}
-	spin_unlock_bh(&nf_conntrack_expect_lock);
+	spin_unlock_bh(&nf_conntrack_lock);
 	return found;
 }
 
@@ -1219,7 +1089,7 @@ static void flush_expectations(struct nf_conn *ct, bool media)
 	struct nf_conntrack_expect *exp;
 	struct hlist_node *next;
 
-	spin_lock_bh(&nf_conntrack_expect_lock);
+	spin_lock_bh(&nf_conntrack_lock);
 	hlist_for_each_entry_safe(exp, next, &help->expectations, lnode) {
 		if ((exp->class != SIP_EXPECT_SIGNALLING) ^ media)
 			continue;
@@ -1230,7 +1100,7 @@ static void flush_expectations(struct nf_conn *ct, bool media)
 		if (!media)
 			break;
 	}
-	spin_unlock_bh(&nf_conntrack_expect_lock);
+	spin_unlock_bh(&nf_conntrack_lock);
 }
 
 static int set_expected_rtp_rtcp(struct sk_buff *skb, unsigned int protoff,
@@ -1250,7 +1120,8 @@ static int set_expected_rtp_rtcp(struct sk_buff *skb, unsigned int protoff,
 	int direct_rtp = 0, skip_expect = 0, ret = NF_DROP;
 	u_int16_t base_port;
 	__be16 rtp_port, rtcp_port;
-	const struct nf_nat_sip_hooks *hooks;
+	typeof(nf_nat_sdp_port_hook) nf_nat_sdp_port;
+	typeof(nf_nat_sdp_media_hook) nf_nat_sdp_media;
 
 	saddr = NULL;
 	if (sip_direct_media) {
@@ -1301,23 +1172,22 @@ static int set_expected_rtp_rtcp(struct sk_buff *skb, unsigned int protoff,
 #endif
 			skip_expect = 1;
 	} while (!skip_expect);
+	rcu_read_unlock();
 
 	base_port = ntohs(tuple.dst.u.udp.port) & ~1;
 	rtp_port = htons(base_port);
 	rtcp_port = htons(base_port + 1);
 
 	if (direct_rtp) {
-		hooks = rcu_dereference(nf_nat_sip_hooks);
-		if (hooks &&
-		    !hooks->sdp_port(skb, protoff, dataoff, dptr, datalen,
+		nf_nat_sdp_port = rcu_dereference(nf_nat_sdp_port_hook);
+		if (nf_nat_sdp_port &&
+		    !nf_nat_sdp_port(skb, protoff, dataoff, dptr, datalen,
 				     mediaoff, medialen, ntohs(rtp_port)))
 			goto err1;
 	}
 
-	if (skip_expect) {
-		rcu_read_unlock();
+	if (skip_expect)
 		return NF_ACCEPT;
-	}
 
 	rtp_exp = nf_ct_expect_alloc(ct);
 	if (rtp_exp == NULL)
@@ -1331,10 +1201,10 @@ static int set_expected_rtp_rtcp(struct sk_buff *skb, unsigned int protoff,
 	nf_ct_expect_init(rtcp_exp, class, nf_ct_l3num(ct), saddr, daddr,
 			  IPPROTO_UDP, NULL, &rtcp_port);
 
-	hooks = rcu_dereference(nf_nat_sip_hooks);
-	if (hooks && ct->status & IPS_NAT_MASK && !direct_rtp)
-		ret = hooks->sdp_media(skb, protoff, dataoff, dptr,
-				       datalen, rtp_exp, rtcp_exp,
+	nf_nat_sdp_media = rcu_dereference(nf_nat_sdp_media_hook);
+	if (nf_nat_sdp_media && ct->status & IPS_NAT_MASK && !direct_rtp)
+		ret = nf_nat_sdp_media(skb, protoff, dataoff, dptr, datalen,
+				       rtp_exp, rtcp_exp,
 				       mediaoff, medialen, daddr);
 	else {
 		if (nf_ct_expect_related(rtp_exp) == 0) {
@@ -1348,7 +1218,6 @@ static int set_expected_rtp_rtcp(struct sk_buff *skb, unsigned int protoff,
 err2:
 	nf_ct_expect_put(rtp_exp);
 err1:
-	rcu_read_unlock();
 	return ret;
 }
 
@@ -1388,12 +1257,13 @@ static int process_sdp(struct sk_buff *skb, unsigned int protoff,
 	unsigned int caddr_len, maddr_len;
 	unsigned int i;
 	union nf_inet_addr caddr, maddr, rtp_addr;
-	const struct nf_nat_sip_hooks *hooks;
 	unsigned int port;
 	const struct sdp_media_type *t;
 	int ret = NF_ACCEPT;
+	typeof(nf_nat_sdp_addr_hook) nf_nat_sdp_addr;
+	typeof(nf_nat_sdp_session_hook) nf_nat_sdp_session;
 
-	hooks = rcu_dereference(nf_nat_sip_hooks);
+	nf_nat_sdp_addr = rcu_dereference(nf_nat_sdp_addr_hook);
 
 	/* Find beginning of session description */
 	if (ct_sip_get_sdp_header(ct, *dptr, 0, *datalen,
@@ -1461,11 +1331,10 @@ static int process_sdp(struct sk_buff *skb, unsigned int protoff,
 		}
 
 		/* Update media connection address if present */
-		if (maddr_len && hooks && ct->status & IPS_NAT_MASK) {
-			ret = hooks->sdp_addr(skb, protoff, dataoff,
+		if (maddr_len && nf_nat_sdp_addr && ct->status & IPS_NAT_MASK) {
+			ret = nf_nat_sdp_addr(skb, protoff, dataoff,
 					      dptr, datalen, mediaoff,
-					      SDP_HDR_CONNECTION,
-					      SDP_HDR_MEDIA,
+					      SDP_HDR_CONNECTION, SDP_HDR_MEDIA,
 					      &rtp_addr);
 			if (ret != NF_ACCEPT) {
 				nf_ct_helper_log(skb, ct, "cannot mangle SDP");
@@ -1476,11 +1345,10 @@ static int process_sdp(struct sk_buff *skb, unsigned int protoff,
 	}
 
 	/* Update session connection and owner addresses */
-	hooks = rcu_dereference(nf_nat_sip_hooks);
-	if (hooks && ct->status & IPS_NAT_MASK)
-		ret = hooks->sdp_session(skb, protoff, dataoff,
-					 dptr, datalen, sdpoff,
-					 &rtp_addr);
+	nf_nat_sdp_session = rcu_dereference(nf_nat_sdp_session_hook);
+	if (nf_nat_sdp_session && ct->status & IPS_NAT_MASK)
+		ret = nf_nat_sdp_session(skb, protoff, dataoff,
+					 dptr, datalen, sdpoff, &rtp_addr);
 
 	return ret;
 }
@@ -1580,11 +1448,11 @@ static int process_register_request(struct sk_buff *skb, unsigned int protoff,
 	unsigned int matchoff, matchlen;
 	struct nf_conntrack_expect *exp;
 	union nf_inet_addr *saddr, daddr;
-	const struct nf_nat_sip_hooks *hooks;
 	__be16 port;
 	u8 proto;
 	unsigned int expires = 0;
 	int ret;
+	typeof(nf_nat_sip_expect_hook) nf_nat_sip_expect;
 
 	/* Expected connections can not register again. */
 	if (ct->status & IPS_EXPECTED)
@@ -1647,10 +1515,10 @@ static int process_register_request(struct sk_buff *skb, unsigned int protoff,
 	exp->helper = nfct_help(ct)->helper;
 	exp->flags = NF_CT_EXPECT_PERMANENT | NF_CT_EXPECT_INACTIVE;
 
-	hooks = rcu_dereference(nf_nat_sip_hooks);
-	if (hooks && ct->status & IPS_NAT_MASK)
-		ret = hooks->expect(skb, protoff, dataoff, dptr, datalen,
-				    exp, matchoff, matchlen);
+	nf_nat_sip_expect = rcu_dereference(nf_nat_sip_expect_hook);
+	if (nf_nat_sip_expect && ct->status & IPS_NAT_MASK)
+		ret = nf_nat_sip_expect(skb, protoff, dataoff, dptr, datalen,
+					exp, matchoff, matchlen);
 	else {
 		if (nf_ct_expect_related(exp) != 0) {
 			nf_ct_helper_log(skb, ct, "cannot add expectation");
@@ -1788,7 +1656,7 @@ static int process_sip_response(struct sk_buff *skb, unsigned int protoff,
 		if (handler->response == NULL)
 			continue;
 		if (*datalen < matchend + handler->len ||
-		    strncasecmp(*dptr + matchend, handler->method, handler->len))
+		    strnicmp(*dptr + matchend, handler->method, handler->len))
 			continue;
 		return handler->response(skb, protoff, dataoff, dptr, datalen,
 					 cseq, code);
@@ -1819,8 +1687,7 @@ static int process_sip_request(struct sk_buff *skb, unsigned int protoff,
 				    SIP_HDR_VIA_UDP, NULL, &matchoff,
 				    &matchlen, &addr, &port) > 0 &&
 	    port != ct->tuplehash[dir].tuple.src.u.udp.port &&
-	    nf_inet_addr_cmp(&addr, &ct->tuplehash[dir].tuple.src.u3) &&
-		(dir == IP_CT_DIR_ORIGINAL))
+	    nf_inet_addr_cmp(&addr, &ct->tuplehash[dir].tuple.src.u3))
 		ct_sip_info->forced_dport = port;
 
 	for (i = 0; i < ARRAY_SIZE(sip_handlers); i++) {
@@ -1830,7 +1697,7 @@ static int process_sip_request(struct sk_buff *skb, unsigned int protoff,
 		if (handler->request == NULL)
 			continue;
 		if (*datalen < handler->len ||
-		    strncasecmp(*dptr, handler->method, handler->len))
+		    strnicmp(*dptr, handler->method, handler->len))
 			continue;
 
 		if (ct_sip_get_header(ct, *dptr, 0, *datalen, SIP_HDR_CSEQ,
@@ -1854,18 +1721,18 @@ static int process_sip_msg(struct sk_buff *skb, struct nf_conn *ct,
 			   unsigned int protoff, unsigned int dataoff,
 			   const char **dptr, unsigned int *datalen)
 {
-	const struct nf_nat_sip_hooks *hooks;
+	typeof(nf_nat_sip_hook) nf_nat_sip;
 	int ret;
 
-	if (strncasecmp(*dptr, "SIP/2.0 ", strlen("SIP/2.0 ")) != 0)
+	if (strnicmp(*dptr, "SIP/2.0 ", strlen("SIP/2.0 ")) != 0)
 		ret = process_sip_request(skb, protoff, dataoff, dptr, datalen);
 	else
 		ret = process_sip_response(skb, protoff, dataoff, dptr, datalen);
 
 	if (ret == NF_ACCEPT && ct->status & IPS_NAT_MASK) {
-		hooks = rcu_dereference(nf_nat_sip_hooks);
-		if (hooks && !hooks->msg(skb, protoff, dataoff,
-					 dptr, datalen)) {
+		nf_nat_sip = rcu_dereference(nf_nat_sip_hook);
+		if (nf_nat_sip && !nf_nat_sip(skb, protoff, dataoff,
+					      dptr, datalen)) {
 			nf_ct_helper_log(skb, ct, "cannot NAT SIP message");
 			ret = NF_DROP;
 		}
@@ -1884,8 +1751,8 @@ static int sip_help_tcp(struct sk_buff *skb, unsigned int protoff,
 	s16 diff, tdiff = 0;
 	int ret = NF_ACCEPT;
 	bool term;
-	unsigned int datalen = 0, msglen = 0, origlen = 0, partialdatalen = 0;
-	unsigned int dataoff_orig = 0, datalen_orig = 0;
+	unsigned int datalen = 0, msglen = 0, origlen = 0;
+	unsigned int dataoff_orig = 0;
 	unsigned int splitlen, oldlen, oldlen1;
 	struct sip_list *sip_entry = NULL;
 	bool skip_sip_process = false;
@@ -1893,13 +1760,14 @@ static int sip_help_tcp(struct sk_buff *skb, unsigned int protoff,
 	bool skip = false;
 	bool skb_is_combined = false;
 	enum ip_conntrack_dir dir = IP_CT_DIR_MAX;
-	struct sk_buff *combined_skb = NULL, *tskb = NULL;
+	struct sk_buff *combined_skb = NULL;
 	bool content_len_exists = 1;
-	unsigned int len_skb = 0;
-	struct sk_buff *nskb = NULL;
+
+	typeof(nf_nat_sip_seq_adjust_hook) nf_nat_sip_seq_adjust;
 
 	packet_count++;
 	pr_debug("packet count %d\n", packet_count);
+
 
 	if (nf_ct_disable_sip_alg)
 		return NF_ACCEPT;
@@ -1912,12 +1780,10 @@ static int sip_help_tcp(struct sk_buff *skb, unsigned int protoff,
 	th = skb_header_pointer(skb, protoff, sizeof(_tcph), &_tcph);
 	if (th == NULL)
 		return NF_ACCEPT;
+
 	dataoff = protoff + th->doff * 4;
 	if (dataoff >= skb->len)
 		return NF_ACCEPT;
-
-	if (!ct)
-		return NF_DROP;
 
 	nf_ct_refresh(ct, skb, sip_timeout * HZ);
 
@@ -1926,10 +1792,10 @@ static int sip_help_tcp(struct sk_buff *skb, unsigned int protoff,
 
 	dptr = skb->data + dataoff;
 	datalen = skb->len - dataoff;
-	datalen_orig = datalen;
 
 	if (datalen < strlen("SIP/2.0 200"))
 		return NF_ACCEPT;
+
 
 	/* here we save the original datalength and data offset of the skb, this
 	 * is needed later to split combined skbs
@@ -1937,39 +1803,17 @@ static int sip_help_tcp(struct sk_buff *skb, unsigned int protoff,
 	oldlen1 = skb->len - protoff;
 	dataoff_orig = dataoff;
 
-	dir = CTINFO2DIR(ctinfo);
 
-sip_header_process:
 	while (1) {
 		if (ct_sip_get_header(ct, dptr, 0, datalen,
 				      SIP_HDR_CONTENT_LENGTH,
 				      &matchoff, &matchlen) <= 0){
-			if (nf_ct_enable_sip_segmentation) {
-				do_not_process = true;
-				content_len_exists = 0;
-				goto destination;
-			} else {
-				break;
-			}
+			do_not_process = true;
+			content_len_exists = 0;
+			goto destination;
 		}
-		/* If the below condition is true it indicates packet
-		 * is already present in Queue and we ve received a
-		 * packet with content length field present which needs
-		 * special handling.
-		 */
-		if ((dir == ct->dir_prev) &&
-		    (ct->sip_original_dir || ct->sip_reply_dir) &&
-		    sip_calculate_sequence_num(ct, &skb, ctinfo)) {
-				/* Make a Copy of the skb for further
-				 * use and make sure to free it
-				 */
-				nskb = skb_copy(skb, GFP_ATOMIC);
-				if (!nskb) {
-					pr_err("Cannot create SKB copy\n");
-					return NF_DROP;
-				}
-				split_skb = true;
-		}
+
+
 		clen = simple_strtoul(dptr + matchoff, (char **)&end, 10);
 		if (dptr + matchoff == end) {
 			break;
@@ -1988,81 +1832,63 @@ sip_header_process:
 
 		end += strlen("\r\n\r\n") + clen;
 destination:
-		if (content_len_exists == 0) {
-			origlen = datalen;
-			msglen = origlen;
-		} else {
-			origlen = end - dptr;
-			msglen = origlen;
-		}
-		pr_debug("mslgen %d datalen %d\n", msglen, datalen);
-		if (!strncasecmp(dptr, "MESSAGE", strlen("MESSAGE")))
-			return NF_ACCEPT;
-		dir = CTINFO2DIR(ctinfo);
+		if (content_len_exists == 0)
+			msglen = origlen = datalen;
+		else
+			msglen = origlen = end - dptr;
+		if (ct)
+			dir = CTINFO2DIR(ctinfo);
 		combined_skb = skb;
-		if (nf_ct_enable_sip_segmentation) {
-			/* Segmented Packet */
-			if (msglen > datalen) {
-				skip = sip_save_segment_info(ct, skb, msglen,
-							     datalen,
-							     datalen_orig,
-							     dptr,
-							     ctinfo);
-				if (!skip)
-					return NF_QUEUE;
-			}
-			/* Traverse list to find prev segment */
-			/*Traverse the list if list non empty */
-			if (((&ct->sip_segment_list)->next) !=
-				(&ct->sip_segment_list)) {
-				/* Combine segments if they are
-				 * fragments of the same message.
-				 */
-				tskb = skb;
 
-				if (split_skb) {
-					/* Adjust the second skb length
-					 * and datalength to have only the
-					 * trailing part of the fragmented
-					 * SIP message
-					 */
-					partialdatalen =
-					ct->segment.msg_length[dir] -
-					ct->segment.data_len[dir];
-					skb_trim(nskb, dataoff+partialdatalen);
-					tskb = nskb;
-				}
-
-				sip_entry = sip_coalesce_segments(ct, &tskb,
-								  dataoff,
-								  &combined_skb,
-							 &skip_sip_process,
-							 do_not_process,
-								  ctinfo,
-							 &skb_is_combined);
-
-				sip_update_params(dir, &msglen, &origlen, &dptr,
-						  &datalen,
-						  skb_is_combined, ct);
-
-				if (skip_sip_process)
-					goto here;
-				} else if (do_not_process) {
-					goto here;
-				}
-		} else if (msglen > datalen) {
-			return NF_ACCEPT;
+		/* Segmented Packet */
+		if (msglen > datalen) {
+			skip = sip_save_segment_info(ct, skb, msglen, datalen,
+				dptr, ctinfo);
+			if (!skip)
+				return NF_QUEUE;
 		}
+		/* Traverse list to find prev segment */
+		/*Traverse the list if list non empty */
+		if (((&(ct->sip_segment_list))->next) !=
+			(&(ct->sip_segment_list))) {
+			/* Combine segments if they are fragments of the same
+			 * message.
+			 */
+			sip_entry = sip_coalesce_segments(ct, &skb,
+					dataoff, &combined_skb,
+					&skip_sip_process, do_not_process,
+					ctinfo, &skb_is_combined);
+
+		if (skb_is_combined) {
+			/* The msglen of first skb has the total msg length of
+			 * the two fragments. hence after combining,we update
+			 * the msglen to that of the msglen of first skb
+			 */
+			msglen = (dir == IP_CT_DIR_ORIGINAL) ?
+			  ct->segment.msg_length[0] : ct->segment.msg_length[1];
+			origlen = msglen;
+			dptr = ct->dptr_prev;
+			datalen = msglen;
+		}
+		if (skip_sip_process)
+			goto here;
+
+		} else if (do_not_process)
+			goto here;
 		/* process the combined skb having the complete SIP message */
 		ret = process_sip_msg(combined_skb, ct, protoff, dataoff,
-				      &dptr, &msglen);
+								&dptr, &msglen);
 
 		/* process_sip_* functions report why this packet is dropped */
 		if (ret != NF_ACCEPT)
 			break;
-		sip_calculate_parameters(&diff, &tdiff, &dataoff, &dptr,
-					 &datalen, msglen, origlen);
-		if (nf_ct_enable_sip_segmentation && skb_is_combined)
+
+		diff	 = msglen - origlen;
+		tdiff	+= diff;
+		dataoff += msglen;
+		dptr	+= msglen;
+		datalen  = datalen + diff - msglen;
+		if (skb_is_combined)
 			break;
 	}
 	if (skb_is_combined) {
@@ -2074,44 +1900,15 @@ destination:
 		splitlen = (dir == IP_CT_DIR_ORIGINAL) ?
 				ct->segment.skb_len[0] : ct->segment.skb_len[1];
 		oldlen = combined_skb->len - protoff;
-		if (unlikely(skb_linearize(combined_skb))) {
-			pr_debug("Dropping SKB:\n");
-			return NF_DROP;
-		}
-		len_skb = combined_skb->len - splitlen;
-		pr_debug("len to copy is %d\n", len_skb);
-
-		if (!split_skb)
-			skb_copy_from_linear_data_offset(combined_skb,
-							 splitlen, skb->data,
-							 len_skb);
-
-		/* Update the first SIP segment details */
-		combined_skb->data_len = 0;
-		combined_skb->len = splitlen;
-		skb_set_tail_pointer(combined_skb, splitlen);
-
+		skb_split(combined_skb, skb, splitlen);
 		/* Headers need to be recalculated since during SIP processing
 		 * headers are calculated based on the change in length of the
 		 * combined message
 		 */
 		recalc_header(combined_skb, splitlen, oldlen, protoff);
 		/* Reinject the first skb now that the processing is complete */
-		if (sip_entry) {
-			nf_reinject(sip_entry->entry, NF_ACCEPT);
-			kfree(sip_entry);
-		}
-
-		if (split_skb) {
-			if (dir == IP_CT_DIR_ORIGINAL)
-				ct->sip_original_dir = 0;
-			else
-				ct->sip_reply_dir = 0;
-			kfree_skb(nskb);
-			split_skb =  false;
-			goto sip_header_process;
-		}
-
+		nf_reinject(sip_entry->entry, NF_ACCEPT);
+		kfree(sip_entry);
 		skb->len = (oldlen1 + protoff) + tdiff - dataoff_orig;
 		/* After splitting, push the headers back to the first skb which
 		 * were removed before combining the skbs.This moves the skb
@@ -2136,11 +1933,10 @@ destination:
 here:
 
 	if (ret == NF_ACCEPT && ct->status & IPS_NAT_MASK) {
-		const struct nf_nat_sip_hooks *hooks;
-
-		hooks = rcu_dereference(nf_nat_sip_hooks);
-		if (hooks)
-			hooks->seq_adjust(skb, protoff, tdiff);
+		nf_nat_sip_seq_adjust =
+				    rcu_dereference(nf_nat_sip_seq_adjust_hook);
+		if (nf_nat_sip_seq_adjust)
+			nf_nat_sip_seq_adjust(skb, protoff, tdiff);
 	}
 
 	return ret;
@@ -2269,6 +2065,9 @@ static int __init nf_conntrack_sip_init(void)
 			}
 		}
 	}
+
+	nf_register_queue_handler(&nf_sip_qh);
+
 	return 0;
 }
 

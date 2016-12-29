@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,20 +24,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/workqueue.h>
 #include <linux/power_supply.h>
-#include <linux/qpnp/qpnp-adc.h>
-#include <linux/qpnp/qpnp-revid.h>
 #include "leds.h"
-#include <linux/debugfs.h>
-#include <linux/uaccess.h>
-#include <linux/htc_flashlight.h>
-#include <linux/of_gpio.h>
-
-#define FLT_DBG_LOG(fmt, ...) \
-		printk(KERN_DEBUG "[FLT][DBG] " fmt, ##__VA_ARGS__)
-#define FLT_INFO_LOG(fmt, ...) \
-		printk(KERN_INFO "[FLT] " fmt, ##__VA_ARGS__)
-#define FLT_ERR_LOG(fmt, ...) \
-		printk(KERN_ERR "[FLT][ERR] " fmt, ##__VA_ARGS__)
 
 #define FLASH_LED_PERIPHERAL_SUBTYPE(base)			(base + 0x05)
 #define FLASH_SAFETY_TIMER(base)				(base + 0x40)
@@ -59,16 +46,7 @@
 #define	FLASH_HDRM_SNS_ENABLE_CTRL0(base)			(base + 0x5C)
 #define	FLASH_HDRM_SNS_ENABLE_CTRL1(base)			(base + 0x5D)
 #define	FLASH_LED_UNLOCK_SECURE(base)				(base + 0xD0)
-#define FLASH_PERPH_RESET_CTRL(base)				(base + 0xDA)
 #define	FLASH_TORCH(base)					(base + 0xE4)
-
-#define FLASH_STATUS_REG_MASK					0xFF
-#define FLASH_LED_FAULT_STATUS(base)				(base + 0x08)
-#define INT_LATCHED_STS(base)					(base + 0x18)
-#define IN_POLARITY_HIGH(base)					(base + 0x12)
-#define INT_SET_TYPE(base)					(base + 0x11)
-#define INT_EN_SET(base)					(base + 0x15)
-#define INT_LATCHED_CLR(base)					(base + 0x14)
 
 #define	FLASH_HEADROOM_MASK					0x03
 #define FLASH_STARTUP_DLY_MASK					0x03
@@ -87,7 +65,6 @@
 #define FLASH_VPH_PWR_DROOP_MASK				0xF3
 #define FLASH_LED_HDRM_SNS_ENABLE_MASK				0x81
 #define	FLASH_MASK_MODULE_CONTRL_MASK				0xE0
-#define FLASH_FOLLOW_OTST2_RB_MASK				0x08
 
 #define FLASH_LED_TRIGGER_DEFAULT				"none"
 #define FLASH_LED_HEADROOM_DEFAULT_MV				500
@@ -99,33 +76,30 @@
 #define	FLASH_LED_VPH_PWR_DROOP_THRESHOLD_DEFAULT_MV		3200
 #define	FLASH_LED_VPH_PWR_DROOP_DEBOUNCE_TIME_DEFAULT_US	10
 #define FLASH_LED_THERMAL_DERATE_RATE_DEFAULT_PERCENT		2
-#define FLASH_RAMP_UP_DELAY_US_MIN				1000
-#define	FLASH_RAMP_UP_DELAY_US_MAX				1001
-#define FLASH_RAMP_DN_DELAY_US_MIN				2160
-#define	FLASH_RAMP_DN_DELAY_US_MAX				2161
+#define FLASH_RAMP_UP_DELAY_US					1000
+#define FLASH_RAMP_DN_DELAY_US					2160
 #define FLASH_BOOST_REGULATOR_PROBE_DELAY_MS			2000
 #define	FLASH_TORCH_MAX_LEVEL					0x0F
 #define	FLASH_MAX_LEVEL						0x4F
 #define	FLASH_LED_FLASH_HW_VREG_OK				0x40
 #define	FLASH_LED_FLASH_SW_VREG_OK				0x80
-#define FLASH_LED_STROBE_TYPE_HW				0x04
+#define FLASH_LED_STROBE_TYPE_HW				0x40
 #define	FLASH_DURATION_DIVIDER					10
 #define	FLASH_LED_HEADROOM_DIVIDER				100
 #define	FLASH_LED_HEADROOM_OFFSET				2
 #define	FLASH_LED_MAX_CURRENT_MA				1000
-#define	FLASH_LED_THERMAL_THRESHOLD_MIN				95
+#define	FLASH_LED_THERMAL_THRESHOLD_MIN				80
 #define	FLASH_LED_THERMAL_DEVIDER				10
 #define	FLASH_LED_VPH_DROOP_THRESHOLD_MIN_MV			2500
 #define	FLASH_LED_VPH_DROOP_THRESHOLD_DIVIDER			100
-#define	FLASH_LED_HDRM_SNS_ENABLE				0x81
-#define	FLASH_LED_HDRM_SNS_DISABLE				0x01
+#define FLASH_LED_HDRM_SNS_ENABLE				0x81
+#define FLASH_LED_HDRM_SNS_DISABLE				0x01
 #define	FLASH_LED_UA_PER_MA					1000
 #define	FLASH_LED_MASK_MODULE_MASK2_ENABLE			0x20
 #define	FLASH_LED_MASK3_ENABLE_SHIFT				7
 #define	FLASH_LED_MODULE_CTRL_DEFAULT				0x60
 #define	FLASH_LED_CURRENT_READING_DELAY_MIN			5000
 #define	FLASH_LED_CURRENT_READING_DELAY_MAX			5001
-#define	FLASH_LED_OPEN_FAULT_DETECTED				0xC
 
 #define FLASH_UNLOCK_SECURE					0xA5
 #define FLASH_LED_TORCH_ENABLE					0x00
@@ -139,13 +113,6 @@
 #define	FLASH_LED_MIN_CURRENT_MA				13
 #define FLASH_SUBTYPE_DUAL					0x01
 #define FLASH_SUBTYPE_SINGLE					0x02
-#define FLASH_TIME_OUT						600
-#define FLASH_LED_MAX_FLASH_CURRENT_MA		1000
-#define FLASH_LED_MAX_TORCH_CURRENT_MA		200
-#define FLASH_LED_MAX_FLASH_LEVEL(curr)		((curr*2-1)/25)
-
-#define BACKLIGHT_ON						1
-#define BACKLIGHT_OFF						0
 
 /*
  * ID represents physical LEDs for individual control purpose.
@@ -154,14 +121,12 @@ enum flash_led_id {
 	FLASH_LED_0 = 0,
 	FLASH_LED_1,
 	FLASH_LED_SWITCH,
-	FLASH_LED_2,
 };
 
 enum flash_led_type {
 	FLASH = 0,
 	TORCH,
 	SWITCH,
-	DUAL_LEDS,
 };
 
 enum thermal_derate_rate {
@@ -190,20 +155,6 @@ struct flash_regulator_data {
 };
 
 /*
- * flashlight_brightness_attribute_definition: the definition of flashlight "brightness" attribute
- */
-
-enum flashlight_brightness_attribute_definition
-{ /* range: [0, 255] */
-    FBAD_OFF        = 0,
-    FBAD_TORCH1     = 125, /*torch level1 mode, 50mA (led1)+ 100mA(led0)*/
-    FBAD_TORCH2     = 126, /*torch level2 mode, 50mA (led1)+ 150mA(led0)*/
-    FBAD_TORCH      = 127, //torch mode, 50mA (led1)+ 50mA(led0)
-    FBAD_PREFLASH   = 128, /*torch level1 mode, 50mA (led1)+ 100mA(led0)*/
-    FBAD_FULL       = 255, /*750mA (led1)+ 750mA(led0)*/
-};
-
-/*
  * Configurations for each individual LED
  */
 struct flash_node_data {
@@ -227,15 +178,12 @@ struct flash_node_data {
  * Flash LED configuration read from device tree
  */
 struct flash_led_platform_data {
-	unsigned int			temp_threshold_num;
-	unsigned int			temp_derate_curr_num;
-	unsigned int			*die_temp_derate_curr_ma;
-	unsigned int			*die_temp_threshold_degc;
 	u16				ramp_up_step;
 	u16				ramp_dn_step;
 	u16				vph_pwr_droop_threshold;
 	u16				headroom;
 	u16				clamp_current;
+	u16				duration;
 	u8				thermal_derate_threshold;
 	u8				vph_pwr_droop_debounce_time;
 	u8				startup_dly;
@@ -248,326 +196,33 @@ struct flash_led_platform_data {
 	bool				hdrm_sns_ch0_en;
 	bool				hdrm_sns_ch1_en;
 	bool				power_detect_en;
-	bool				mask3_en;
-	bool				follow_rb_disable;
-	bool				die_current_derate_en;
-};
-
-struct qpnp_flash_led_buffer {
-	size_t rpos;
-	size_t wpos;
-	size_t len;
-	char data[0];
 };
 
 /*
  * Flash LED data structure containing flash LED attributes
  */
 struct qpnp_flash_led {
-	struct pmic_revid_data		*revid_data;
 	struct spmi_device		*spmi_dev;
 	struct flash_led_platform_data	*pdata;
+	struct flash_node_data		*flash_node;
+	struct power_supply		*battery_psy;
 	struct pinctrl			*pinctrl;
 	struct pinctrl_state		*gpio_state_active;
 	struct pinctrl_state		*gpio_state_suspend;
-	struct flash_node_data		*flash_node;
-	struct power_supply		*battery_psy;
 	struct workqueue_struct		*ordered_workq;
-	struct qpnp_vadc_chip		*vadc_dev;
 	struct mutex			flash_led_lock;
-	struct qpnp_flash_led_buffer	*log;
-	struct dentry			*dbgfs_root;
 	int				num_leds;
-	u32				buffer_cnt;
 	u16				base;
 	u16				current_addr;
 	u16				current2_addr;
 	u8				peripheral_type;
-	u8				fault_reg;
-	uint32_t			flash_strobe;
 	bool				gpio_enabled;
 	bool				charging_enabled;
-	bool				strobe_debug;
-	bool				dbg_feature_en;
-	bool				open_fault;
 };
 
 static u8 qpnp_flash_led_ctrl_dbg_regs[] = {
 	0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
 	0x4A, 0x4B, 0x4C, 0x4F, 0x51, 0x52, 0x54, 0x55, 0x5A, 0x5C, 0x5D,
-};
-
-static struct qpnp_flash_led *this_led;
-
-void (*set_backlight)(int on);
-
-struct delayed_work pmi8994_delayed_work;
-static struct workqueue_struct *pmi8994_work_queue;
-static int flashlight_turn_off(void);
-
-int pmi8994_flash_mode(int, int);
-int pmi8994_torch_mode(int, int);
-
-int (*htc_flash_main)(int led1, int led2);
-int (*htc_torch_main)(int led1, int led2);
-
-static int flash_regulator_enable(struct qpnp_flash_led *, struct flash_node_data *, bool);
-
-void backlight_callback_register( void (*enable_backlight)(int) )
-{
-	FLT_INFO_LOG("%s: ++\n", __func__);
-	set_backlight = enable_backlight;
-}
-EXPORT_SYMBOL(backlight_callback_register);
-
-static int flash_led_dbgfs_file_open(struct qpnp_flash_led *led,
-					struct file *file)
-{
-	struct qpnp_flash_led_buffer *log;
-	size_t logbufsize = SZ_4K;
-
-	log = kzalloc(logbufsize, GFP_KERNEL);
-	if (!log)
-		return -ENOMEM;
-
-	log->rpos = 0;
-	log->wpos = 0;
-	log->len = logbufsize - sizeof(*log);
-	led->log = log;
-
-	led->buffer_cnt = 1;
-	file->private_data = led;
-
-	return 0;
-}
-
-static int flash_led_dfs_open(struct inode *inode, struct file *file)
-{
-	struct qpnp_flash_led *led = inode->i_private;
-
-	return flash_led_dbgfs_file_open(led, file);
-}
-
-static int flash_led_dfs_close(struct inode *inode, struct file *file)
-{
-	struct qpnp_flash_led *led = file->private_data;
-
-	if (led && led->log) {
-		file->private_data = NULL;
-		kfree(led->log);
-	}
-
-	return 0;
-}
-
-static int print_to_log(struct qpnp_flash_led_buffer *log,
-					const char *fmt, ...)
-{
-	va_list args;
-	int cnt;
-	char *log_buf = &log->data[log->wpos];
-	size_t size = log->len - log->wpos;
-
-	va_start(args, fmt);
-	cnt = vscnprintf(log_buf, size, fmt, args);
-	va_end(args);
-
-	log->wpos += cnt;
-	return cnt;
-}
-
-static ssize_t flash_led_dfs_latched_reg_read(struct file *fp, char __user *buf,
-					size_t count, loff_t *ppos) {
-	struct qpnp_flash_led *led = fp->private_data;
-	struct qpnp_flash_led_buffer *log = led->log;
-	u8 val;
-	int rc;
-	size_t len;
-	size_t ret;
-
-	if (log->rpos >= log->wpos && led->buffer_cnt == 0)
-		return 0;
-
-	rc = spmi_ext_register_readl(led->spmi_dev->ctrl,
-		led->spmi_dev->sid, INT_LATCHED_STS(led->base), &val, 1);
-	if (rc) {
-		dev_err(&led->spmi_dev->dev,
-				"Unable to read from address %x, rc(%d)\n",
-				INT_LATCHED_STS(led->base), rc);
-		return -EINVAL;
-	}
-	led->buffer_cnt--;
-
-	rc = print_to_log(log, "0x%05X ", INT_LATCHED_STS(led->base));
-	if (rc == 0)
-		return rc;
-
-	rc = print_to_log(log, "0x%02X ", val);
-	if (rc == 0)
-		return rc;
-
-	if (log->wpos > 0 && log->data[log->wpos - 1] == ' ')
-		log->data[log->wpos - 1] = '\n';
-
-	len = min(count, log->wpos - log->rpos);
-
-	ret = copy_to_user(buf, &log->data[log->rpos], len);
-	if (ret) {
-		pr_err("error copy register value to user\n");
-		return -EFAULT;
-	}
-
-	len -= ret;
-	*ppos += len;
-	log->rpos += len;
-
-	return len;
-}
-
-static ssize_t flash_led_dfs_fault_reg_read(struct file *fp, char __user *buf,
-					size_t count, loff_t *ppos) {
-	struct qpnp_flash_led *led = fp->private_data;
-	struct qpnp_flash_led_buffer *log = led->log;
-	int rc;
-	size_t len;
-	size_t ret;
-
-	if (log->rpos >= log->wpos && led->buffer_cnt == 0)
-		return 0;
-
-	led->buffer_cnt--;
-
-	rc = print_to_log(log, "0x%05X ", FLASH_LED_FAULT_STATUS(led->base));
-	if (rc == 0)
-		return rc;
-
-	rc = print_to_log(log, "0x%02X ", led->fault_reg);
-	if (rc == 0)
-		return rc;
-
-	if (log->wpos > 0 && log->data[log->wpos - 1] == ' ')
-		log->data[log->wpos - 1] = '\n';
-
-	len = min(count, log->wpos - log->rpos);
-
-	ret = copy_to_user(buf, &log->data[log->rpos], len);
-	if (ret) {
-		pr_err("error copy register value to user\n");
-		return -EFAULT;
-	}
-
-	len -= ret;
-	*ppos += len;
-	log->rpos += len;
-
-	return len;
-}
-
-static ssize_t flash_led_dfs_fault_reg_enable(struct file *file,
-			const char __user *buf, size_t count, loff_t *ppos) {
-
-	u8 *val;
-	int pos = 0;
-	int cnt = 0;
-	int data;
-	size_t ret = 0;
-
-	struct qpnp_flash_led *led = file->private_data;
-	char *kbuf = kmalloc(count + 1, GFP_KERNEL);
-
-	if (!kbuf)
-		return -ENOMEM;
-
-	ret = copy_from_user(kbuf, buf, count);
-	if (!ret) {
-		pr_err("failed to copy data from user\n");
-		ret = -EFAULT;
-		goto free_buf;
-	}
-
-	count -= ret;
-	*ppos += count;
-	kbuf[count] = '\0';
-	val = kbuf;
-	while (sscanf(kbuf + pos, "%i", &data) == 1) {
-		pos++;
-		val[cnt++] = data & 0xff;
-	}
-
-	if (!cnt)
-		goto free_buf;
-
-	ret = count;
-	if (*val == 1)
-		led->strobe_debug = true;
-	else
-		led->strobe_debug = false;
-
-free_buf:
-	kfree(kbuf);
-	return ret;
-}
-
-static ssize_t flash_led_dfs_dbg_enable(struct file *file,
-			const char __user *buf, size_t count, loff_t *ppos) {
-
-	u8 *val;
-	int pos = 0;
-	int cnt = 0;
-	int data;
-	size_t ret = 0;
-	struct qpnp_flash_led *led = file->private_data;
-	char *kbuf = kmalloc(count + 1, GFP_KERNEL);
-
-	if (!kbuf)
-		return -ENOMEM;
-
-	ret = copy_from_user(kbuf, buf, count);
-	if (ret == count) {
-		pr_err("failed to copy data from user\n");
-		ret = -EFAULT;
-		goto free_buf;
-	}
-	count -= ret;
-	*ppos += count;
-	kbuf[count] = '\0';
-	val = kbuf;
-	while (sscanf(kbuf + pos, "%i", &data) == 1) {
-		pos++;
-		val[cnt++] = data & 0xff;
-	}
-
-	if (!cnt)
-		goto free_buf;
-
-	ret = count;
-	if (*val == 1)
-		led->dbg_feature_en = true;
-	else
-		led->dbg_feature_en = false;
-
-free_buf:
-	kfree(kbuf);
-	return ret;
-}
-
-static const struct file_operations flash_led_dfs_latched_reg_fops = {
-	.open		= flash_led_dfs_open,
-	.release	= flash_led_dfs_close,
-	.read		= flash_led_dfs_latched_reg_read,
-};
-
-static const struct file_operations flash_led_dfs_strobe_reg_fops = {
-	.open		= flash_led_dfs_open,
-	.release	= flash_led_dfs_close,
-	.read		= flash_led_dfs_fault_reg_read,
-	.write		= flash_led_dfs_fault_reg_enable,
-};
-
-static const struct file_operations flash_led_dfs_dbg_feature_fops = {
-	.open		= flash_led_dfs_open,
-	.release	= flash_led_dfs_close,
-	.write		= flash_led_dfs_dbg_enable,
 };
 
 static int
@@ -596,157 +251,50 @@ qpnp_led_masked_write(struct spmi_device *spmi_dev, u16 addr, u8 mask, u8 val)
 	return rc;
 }
 
-static int qpnp_flash_led_get_allowed_die_temp_curr(struct qpnp_flash_led *led,
-							int64_t die_temp_degc)
-{
-	int die_temp_curr_ma;
-
-	if (die_temp_degc >= led->pdata->die_temp_threshold_degc[0])
-		die_temp_curr_ma =  0;
-	else if (die_temp_degc >= led->pdata->die_temp_threshold_degc[1])
-		die_temp_curr_ma = led->pdata->die_temp_derate_curr_ma[0];
-	else if (die_temp_degc >= led->pdata->die_temp_threshold_degc[2])
-		die_temp_curr_ma = led->pdata->die_temp_derate_curr_ma[1];
-	else if (die_temp_degc >= led->pdata->die_temp_threshold_degc[3])
-		die_temp_curr_ma = led->pdata->die_temp_derate_curr_ma[2];
-	else if (die_temp_degc >= led->pdata->die_temp_threshold_degc[4])
-		die_temp_curr_ma = led->pdata->die_temp_derate_curr_ma[3];
-	else
-		die_temp_curr_ma = led->pdata->die_temp_derate_curr_ma[4];
-
-	return die_temp_curr_ma;
-}
-
-static int64_t qpnp_flash_led_get_die_temp(struct qpnp_flash_led *led)
-{
-	struct qpnp_vadc_result die_temp_result;
-	int rc;
-
-	rc = qpnp_vadc_read(led->vadc_dev, SPARE2, &die_temp_result);
-	if (rc) {
-		pr_err("failed to read the die temp\n");
-		return -EINVAL;
-	}
-
-	return die_temp_result.physical;
-}
-
-static int qpnp_get_pmic_revid(struct qpnp_flash_led *led)
-{
-	struct device_node *revid_dev_node;
-
-	revid_dev_node = of_parse_phandle(led->spmi_dev->dev.of_node,
-				"qcom,pmic-revid", 0);
-	if (!revid_dev_node) {
-		dev_err(&led->spmi_dev->dev,
-			"qcom,pmic-revid property missing\n");
-		return -EINVAL;
-	}
-
-	led->revid_data = get_revid_data(revid_dev_node);
-	if (IS_ERR(led->revid_data)) {
-		pr_err("Couldn't get revid data rc = %ld\n",
-				PTR_ERR(led->revid_data));
-		return PTR_ERR(led->revid_data);
-	}
-
-	return 0;
-}
-
 static int
 qpnp_flash_led_get_max_avail_current(struct flash_node_data *flash_node,
 					struct qpnp_flash_led *led)
 {
 	union power_supply_propval prop;
-	int64_t chg_temp_milidegc, die_temp_degc;
-	int max_curr_avail_ma = 2000;
-	int allowed_die_temp_curr_ma = 2000;
+	int max_curr_avail_ma;
 	int rc;
 
-	if (led->pdata->power_detect_en) {
-		if (!led->battery_psy) {
-			dev_err(&led->spmi_dev->dev,
+	if (!led->battery_psy) {
+		dev_err(&led->spmi_dev->dev,
 				"Failed to query power supply\n");
-			return -EINVAL;
-		}
-
-		/*
-		* When charging is enabled, enforce this new
-		* enabelment sequence to reduce fuel gauge
-		* resolution reading.
-		*/
-		if (led->charging_enabled) {
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_MODULE_ENABLE_CTRL(led->base),
-				FLASH_MODULE_ENABLE, FLASH_MODULE_ENABLE);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-				"Module enable reg write failed\n");
-				return -EINVAL;
-			}
-
-			usleep_range(FLASH_LED_CURRENT_READING_DELAY_MIN,
-				FLASH_LED_CURRENT_READING_DELAY_MAX);
-		}
-
-		led->battery_psy->get_property(led->battery_psy,
-				POWER_SUPPLY_PROP_FLASH_CURRENT_MAX, &prop);
-		if (!prop.intval) {
-			dev_err(&led->spmi_dev->dev,
-				"battery too low for flash\n");
-			return -EINVAL;
-		}
-
-		max_curr_avail_ma = (prop.intval / FLASH_LED_UA_PER_MA);
+		return -EINVAL;
 	}
-
-	/* When thermal mitigation is available, this logic
-	*  will execute, to derate current based on PMIC die
-	*  temperature.
+	/*
+	* When charging is enabled, enforce this new
+	* enabelment sequence to reduce fuel gauge
+	* resolution reading.
 	*/
-	if (led->pdata->die_current_derate_en) {
-		chg_temp_milidegc = qpnp_flash_led_get_die_temp(led);
-		if (chg_temp_milidegc < 0)
-			return -EINVAL;
+	if (led->charging_enabled) {
+		rc = qpnp_led_masked_write(led->spmi_dev,
+			FLASH_MODULE_ENABLE_CTRL(led->base),
+			FLASH_MODULE_ENABLE, FLASH_MODULE_ENABLE);
 
-		die_temp_degc = div_s64(chg_temp_milidegc, 1000);
-		allowed_die_temp_curr_ma =
-			qpnp_flash_led_get_allowed_die_temp_curr(led,
-								die_temp_degc);
-		if (allowed_die_temp_curr_ma < 0)
+		if (rc) {
+			dev_err(&led->spmi_dev->dev,
+				"Module enable reg write failed\n");
 			return -EINVAL;
+		}
+
+		usleep_range(FLASH_LED_CURRENT_READING_DELAY_MIN,
+				FLASH_LED_CURRENT_READING_DELAY_MAX);
 	}
 
-	max_curr_avail_ma = (max_curr_avail_ma >= allowed_die_temp_curr_ma)
-				? allowed_die_temp_curr_ma : max_curr_avail_ma;
+	led->battery_psy->get_property(led->battery_psy,
+			POWER_SUPPLY_PROP_FLASH_CURRENT_MAX, &prop);
+	if (!prop.intval) {
+		dev_err(&led->spmi_dev->dev,
+				"battery too low for flash\n");
+		return -EINVAL;
+	}
+
+	max_curr_avail_ma = (prop.intval / FLASH_LED_UA_PER_MA);
 
 	return max_curr_avail_ma;
-}
-
-static ssize_t qpnp_flash_led_die_temp_store(struct device *dev,
-					struct device_attribute *attr,
-					const char *buf, size_t count)
-{
-	struct qpnp_flash_led *led;
-	struct flash_node_data *flash_node;
-	unsigned long val;
-	struct led_classdev *led_cdev = dev_get_drvdata(dev);
-	ssize_t ret;
-
-	ret = kstrtoul(buf, 10, &val);
-	if (ret)
-		return ret;
-
-	flash_node = container_of(led_cdev, struct flash_node_data, cdev);
-	led = dev_get_drvdata(&flash_node->spmi_dev->dev);
-
-	/*'0' for disable die_temp feature; non-zero to enable feature*/
-	if (val == 0)
-		led->pdata->die_current_derate_en = false;
-	else
-		led->pdata->die_current_derate_en = true;
-
-	return count;
 }
 
 static ssize_t qpnp_led_strobe_type_store(struct device *dev,
@@ -838,23 +386,18 @@ static ssize_t qpnp_flash_led_max_current_show(struct device *dev,
 	struct qpnp_flash_led *led;
 	struct flash_node_data *flash_node;
 	struct led_classdev *led_cdev = dev_get_drvdata(dev);
-	int max_curr_avail_ma = 0;
-
+	int max_curr_avail_ma;
 	flash_node = container_of(led_cdev, struct flash_node_data, cdev);
 	led = dev_get_drvdata(&flash_node->spmi_dev->dev);
 
-	if (led->flash_node[0].flash_on)
-		max_curr_avail_ma += led->flash_node[0].max_current;
-	if (led->flash_node[1].flash_on)
-		max_curr_avail_ma += led->flash_node[1].max_current;
-
-	if (led->pdata->power_detect_en ||
-			led->pdata->die_current_derate_en) {
+	if (led->pdata->power_detect_en) {
 		max_curr_avail_ma =
 			qpnp_flash_led_get_max_avail_current(flash_node, led);
 
 		if (max_curr_avail_ma < 0)
 			return -EINVAL;
+		else
+			max_curr_avail_ma = (int)flash_node->max_current;
 	}
 
 	return snprintf(buf, PAGE_SIZE, "%u\n", max_curr_avail_ma);
@@ -873,12 +416,9 @@ static struct device_attribute qpnp_flash_led_attrs[] = {
 	__ATTR(max_allowed_current, (S_IRUGO | S_IWUSR | S_IWGRP),
 				qpnp_flash_led_max_current_show,
 				NULL),
-	__ATTR(enable_die_temp_current_derate, (S_IRUGO | S_IWUSR | S_IWGRP),
-				NULL,
-				qpnp_flash_led_die_temp_store),
 };
 
-static u32 qpnp_flash_led_get_thermal_derate_rate(const char *rate)
+static int qpnp_flash_led_get_thermal_derate_rate(const char *rate)
 {
 	/*
 	 * return 5% derate as default value if user specifies
@@ -898,7 +438,7 @@ static u32 qpnp_flash_led_get_thermal_derate_rate(const char *rate)
 		return RATE_5_PERCENT;
 }
 
-static u32 qpnp_flash_led_get_ramp_step(const char *step)
+static int qpnp_flash_led_get_ramp_step(const char *step)
 {
 	/*
 	 * return 27 us as default value if user specifies
@@ -1020,20 +560,6 @@ static int qpnp_flash_led_module_disable(struct qpnp_flash_led *led,
 			}
 		}
 
-		if (led->battery_psy &&
-			led->revid_data->pmic_subtype == PMI8996_SUBTYPE &&
-						!led->revid_data->rev3) {
-			psy_prop.intval = false;
-			rc = led->battery_psy->set_property(led->battery_psy,
-					POWER_SUPPLY_PROP_FLASH_TRIGGER,
-							&psy_prop);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-				"Failed to enble charger i/p current limit\n");
-				return -EINVAL;
-			}
-		}
-
 		rc = qpnp_led_masked_write(led->spmi_dev,
 				FLASH_MODULE_ENABLE_CTRL(led->base),
 				FLASH_MODULE_ENABLE_MASK,
@@ -1092,365 +618,9 @@ static int qpnp_flash_led_module_disable(struct qpnp_flash_led *led,
 	}
 
 	if (flash_node->id == FLASH_LED_SWITCH)
-		flash_node->trigger &= FLASH_LED_STROBE_TYPE_HW;
+		flash_node->trigger = 0;
 
 	return 0;
-}
-
-
-static int flashlight_turn_off(void)
-{
-	int rc;
-	bool flash_mode_on = (this_led->flash_node->type == FLASH && this_led->flash_node->flash_on);
-
-	FLT_INFO_LOG("%s: flash_mode_on(%d)\n", __func__, flash_mode_on);
-	mutex_lock(&this_led->flash_led_lock);
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-			FLASH_LED_STROBE_CTRL(this_led->base),
-			this_led->flash_node->trigger, FLASH_LED_DISABLE);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev, "Strobe disable failed\n");
-		goto exit_flash_led_work;
-	}
-
-	if( gpio_is_valid(this_led->flash_strobe) )
-		gpio_set_value(this_led->flash_strobe, 0);
-
-	usleep_range(FLASH_RAMP_DN_DELAY_US_MIN, FLASH_RAMP_DN_DELAY_US_MAX);
-
-exit_flash_led_work:
-	rc = qpnp_flash_led_module_disable(this_led, this_led->flash_node);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev, "Module disable failed\n");
-		goto exit_flash_led_work;
-	}
-
-	if(set_backlight && flash_mode_on)
-		set_backlight(BACKLIGHT_ON);
-
-	if (this_led->flash_node->flash_on && this_led->flash_node->num_regulators > 0)
-		flash_regulator_enable(this_led, this_led->flash_node, false);
-
-	this_led->flash_node->flash_on = false;
-	mutex_unlock(&this_led->flash_led_lock);
-
-	return 0;
-}
-static void flashlight_turn_off_work(struct work_struct *work)
-{
-	flashlight_turn_off();
-}
-
-
-int pmi8994_flash_mode(int mode2, int mode13)
-{
-	int rc;
-	u8 val;
-	union power_supply_propval psy_prop;
-	int max_curr_avail_ma;
-
-	this_led->flash_node->trigger = FLASH_LED0_TRIGGER | FLASH_LED1_TRIGGER;
-
-	FLT_INFO_LOG("flash mode, camera flash current %d+%d.\n", mode2, mode13);
-
-	if (mode2 == 0 && mode13 == 0)
-	{
-		flashlight_turn_off();
-		return 0;
-	}
-
-	mutex_lock(&this_led->flash_led_lock);
-
-	if (!this_led->flash_node->flash_on && this_led->flash_node->num_regulators > 0) {
-		rc = flash_regulator_enable(this_led, this_led->flash_node, true);
-		if (rc) {
-			mutex_unlock(&this_led->flash_led_lock);
-			return -EINVAL;
-		}
-	}
-
-	if (!this_led->gpio_enabled && this_led->pinctrl) {
-		rc = pinctrl_select_state(this_led->pinctrl,
-						this_led->gpio_state_active);
-		if (rc) {
-			dev_err(&this_led->spmi_dev->dev,
-						"failed to enable GPIO\n");
-			goto error_enable_gpio;
-		}
-		this_led->gpio_enabled = true;
-	}
-
-	if(set_backlight)
-		set_backlight(BACKLIGHT_OFF);
-
-	if (!this_led->battery_psy)
-		this_led->battery_psy = power_supply_get_by_name("battery");
-	if (!this_led->battery_psy) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Failed to get battery power supply\n");
-		goto exit_flash_led_work;
-	}
-
-	psy_prop.intval = true;
-	rc = this_led->battery_psy->set_property(this_led->battery_psy,
-					POWER_SUPPLY_PROP_FLASH_ACTIVE,
-							&psy_prop);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Failed to setup OTG pulse skip enable\n");
-		goto exit_flash_led_work;
-	}
-
-	if (this_led->pdata->power_detect_en) {
-		max_curr_avail_ma =
-			qpnp_flash_led_get_max_avail_current
-						(this_led->flash_node, this_led);
-		if (max_curr_avail_ma < 0) {
-			dev_err(&this_led->spmi_dev->dev,
-				"Failed to get Max available curr\n");
-			goto exit_flash_led_work;
-		} else {
-			if (max_curr_avail_ma <
-				this_led->flash_node->prgm_current) {
-				dev_err(&this_led->spmi_dev->dev,
-					"battery only supports %d mA.\n",
-					max_curr_avail_ma);
-				this_led->flash_node->prgm_current =
-					(u16) max_curr_avail_ma;
-			}
-		}
-	}
-
-	val = 0x3B;	//600msec
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_SAFETY_TIMER(this_led->base),
-		FLASH_SAFETY_TIMER_MASK, val);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Safety timer reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_MAX_CURRENT(this_led->base),
-		FLASH_CURRENT_MASK, FLASH_LED_MAX_FLASH_LEVEL(FLASH_LED_MAX_FLASH_CURRENT_MA));
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Max current reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	if (mode2 > FLASH_LED_MAX_FLASH_CURRENT_MA)
-		mode2 = FLASH_LED_MAX_FLASH_CURRENT_MA;
-
-	val = (u8)FLASH_LED_MAX_FLASH_LEVEL(mode2);
-	FLT_INFO_LOG("reg=0x1D342, val=0x%x\n", val);
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-			FLASH_LED0_CURRENT(this_led->base),
-			FLASH_CURRENT_MASK, val);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Current reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	if (mode13 > FLASH_LED_MAX_FLASH_CURRENT_MA)
-		mode13 = FLASH_LED_MAX_FLASH_CURRENT_MA;
-
-	val = (u8)FLASH_LED_MAX_FLASH_LEVEL(mode13);
-	FLT_INFO_LOG("reg=0x1D343, val=0x%x\n", val);
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-			FLASH_LED1_CURRENT(this_led->base),
-			FLASH_CURRENT_MASK, val);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Current reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-			FLASH_MODULE_ENABLE_CTRL(this_led->base),
-			FLASH_MODULE_ENABLE | FLASH_LED0_ENABLEMENT | FLASH_LED1_ENABLEMENT,
-			FLASH_MODULE_ENABLE | FLASH_LED0_ENABLEMENT | FLASH_LED1_ENABLEMENT);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Module enable reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	if( gpio_is_valid(this_led->flash_strobe) )
-		gpio_set_value(this_led->flash_strobe, 1);
-
-	usleep_range(FLASH_RAMP_DN_DELAY_US_MIN, FLASH_RAMP_DN_DELAY_US_MAX);
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_LED_STROBE_CTRL(this_led->base),
-		this_led->flash_node->trigger,
-		this_led->flash_node->trigger);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Strobe reg write failed\n");
-		goto exit_flash_led_work;
-	}
-	this_led->flash_node->type = FLASH;
-	queue_delayed_work(pmi8994_work_queue, &pmi8994_delayed_work,
-		   msecs_to_jiffies(FLASH_TIME_OUT));
-
-	this_led->flash_node->flash_on = true;
-	mutex_unlock(&this_led->flash_led_lock);
-
-	return 0;
-
-exit_flash_led_work:
-	rc = qpnp_flash_led_module_disable(this_led, this_led->flash_node);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev, "Module disable failed\n");
-		goto exit_flash_led_work;
-	}
-
-	if(set_backlight)
-		set_backlight(BACKLIGHT_ON);
-error_enable_gpio:
-	if (this_led->flash_node->flash_on && this_led->flash_node->num_regulators > 0)
-		flash_regulator_enable(this_led, this_led->flash_node, false);
-
-	this_led->flash_node->flash_on = false;
-	mutex_unlock(&this_led->flash_led_lock);
-
-	return -EINVAL;
-
-}
-
-int pmi8994_torch_mode(int mode2, int mode13)
-{
-	int rc;
-	u8 val;
-	this_led->flash_node->trigger = FLASH_LED0_TRIGGER | FLASH_LED1_TRIGGER;
-
-	FLT_INFO_LOG("torch mode, camera flash current %d+%d.\n", mode2, mode13);
-
-	if (mode2 == 0 && mode13 == 0)
-	{
-		flashlight_turn_off();
-		return 0;
-	}
-
-	mutex_lock(&this_led->flash_led_lock);
-
-	if (!this_led->flash_node->flash_on && this_led->flash_node->num_regulators > 0) {
-		rc = flash_regulator_enable(this_led, this_led->flash_node, true);
-		if (rc) {
-			mutex_unlock(&this_led->flash_led_lock);
-			return -EINVAL;
-		}
-	}
-
-	if (!this_led->gpio_enabled && this_led->pinctrl) {
-		rc = pinctrl_select_state(this_led->pinctrl,
-						this_led->gpio_state_active);
-		if (rc) {
-			dev_err(&this_led->spmi_dev->dev,
-						"failed to enable GPIO\n");
-			goto error_enable_gpio;
-		}
-		this_led->gpio_enabled = true;
-	}
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_LED_UNLOCK_SECURE(this_led->base),
-		FLASH_SECURE_MASK, FLASH_UNLOCK_SECURE);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Secure reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_TORCH(this_led->base),
-		FLASH_TORCH_MASK, FLASH_LED_TORCH_ENABLE);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Torch reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	if (mode2 > FLASH_LED_MAX_TORCH_CURRENT_MA)
-		mode2 = FLASH_LED_MAX_TORCH_CURRENT_MA;
-	val = (u8)FLASH_LED_MAX_FLASH_LEVEL(mode2);
-	FLT_INFO_LOG("reg=0x1D342, val=0x%x\n", val);
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_LED0_CURRENT(this_led->base),
-		FLASH_CURRENT_MASK, val);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Current reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	if (mode13 > FLASH_LED_MAX_TORCH_CURRENT_MA)
-		mode13 = FLASH_LED_MAX_TORCH_CURRENT_MA;
-	val = (u8)FLASH_LED_MAX_FLASH_LEVEL(mode13);
-	FLT_INFO_LOG("reg=0x1D343, val=0x%x\n", val);
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_LED1_CURRENT(this_led->base),
-		FLASH_CURRENT_MASK, val);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Current reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_MAX_CURRENT(this_led->base),
-		FLASH_CURRENT_MASK, FLASH_TORCH_MAX_LEVEL);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-				"Max current reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_MODULE_ENABLE_CTRL(this_led->base),
-		FLASH_MODULE_ENABLE_MASK,
-		FLASH_MODULE_ENABLE);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Module enable reg write failed\n");
-		goto exit_flash_led_work;
-	}
-
-	rc = qpnp_led_masked_write(this_led->spmi_dev,
-		FLASH_LED_STROBE_CTRL(this_led->base),
-		FLASH_LED0_TRIGGER | FLASH_LED1_TRIGGER,
-		FLASH_LED0_TRIGGER | FLASH_LED1_TRIGGER);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev,
-			"Strobe ctrl reg write failed\n");
-		goto exit_flash_led_work;
-	}
-	this_led->flash_node->type = TORCH;
-
-	this_led->flash_node->flash_on = true;
-	mutex_unlock(&this_led->flash_led_lock);
-
-	return 0;
-
-exit_flash_led_work:
-	rc = qpnp_flash_led_module_disable(this_led, this_led->flash_node);
-	if (rc) {
-		dev_err(&this_led->spmi_dev->dev, "Module disable failed\n");
-		goto exit_flash_led_work;
-	}
-error_enable_gpio:
-	if (this_led->flash_node->flash_on && this_led->flash_node->num_regulators > 0)
-		flash_regulator_enable(this_led, this_led->flash_node, false);
-
-	this_led->flash_node->flash_on = false;
-	mutex_unlock(&this_led->flash_led_lock);
-
-	return -EINVAL;
-
 }
 
 static enum
@@ -1596,17 +766,10 @@ static void qpnp_flash_led_work(struct work_struct *work)
 	int i;
 	u8 val;
 
-	FLT_INFO_LOG("%s: brt = %d\n", __func__, brightness);
 	mutex_lock(&led->flash_led_lock);
 
 	if (!brightness)
 		goto turn_off;
-
-	if (led->open_fault) {
-		dev_err(&led->spmi_dev->dev, "Open fault detected\n");
-		mutex_unlock(&led->flash_led_lock);
-		return;
-	}
 
 	if (!flash_node->flash_on && flash_node->num_regulators > 0) {
 		rc = flash_regulator_enable(led, flash_node, true);
@@ -1627,238 +790,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 		led->gpio_enabled = true;
 	}
 
-	if (led->dbg_feature_en) {
-		rc = qpnp_led_masked_write(led->spmi_dev,
-						INT_SET_TYPE(led->base),
-						FLASH_STATUS_REG_MASK, 0x1F);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-					"INT_SET_TYPE write failed\n");
-			goto exit_flash_led_work;
-		}
-
-		rc = qpnp_led_masked_write(led->spmi_dev,
-					IN_POLARITY_HIGH(led->base),
-					FLASH_STATUS_REG_MASK, 0x1F);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-					"IN_POLARITY_HIGH write failed\n");
-			goto exit_flash_led_work;
-		}
-
-		rc = qpnp_led_masked_write(led->spmi_dev,
-					INT_EN_SET(led->base),
-					FLASH_STATUS_REG_MASK, 0x1F);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-					"INT_EN_SET write failed\n");
-			goto exit_flash_led_work;
-		}
-
-		rc = qpnp_led_masked_write(led->spmi_dev,
-					INT_LATCHED_CLR(led->base),
-					FLASH_STATUS_REG_MASK, 0x1F);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-					"INT_LATCHED_CLR write failed\n");
-			goto exit_flash_led_work;
-		}
-	}
-
-	if (led->flash_node[led->num_leds - 1].id == FLASH_LED_SWITCH &&
-					flash_node->id != FLASH_LED_SWITCH) {
-		led->flash_node[led->num_leds - 1].trigger |=
-						(0x80 >> flash_node->id);
-		if (flash_node->id == FLASH_LED_0)
-			led->flash_node[led->num_leds - 1].prgm_current =
-						flash_node->prgm_current;
-		else if (flash_node->id == FLASH_LED_1)
-			led->flash_node[led->num_leds - 1].prgm_current2 =
-						flash_node->prgm_current;
-	}
-
-	if (flash_node->type == DUAL_LEDS) {
-		if (flash_node->prgm_current == FBAD_FULL) {//Flash mode
-			if(set_backlight)
-				set_backlight(BACKLIGHT_OFF);
-
-			val = 0x3B;	//600msec
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_SAFETY_TIMER(led->base),
-				FLASH_SAFETY_TIMER_MASK, val);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Safety timer reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_MAX_CURRENT(led->base),
-				FLASH_CURRENT_MASK, FLASH_LED_MAX_FLASH_LEVEL(FLASH_LED_MAX_FLASH_CURRENT_MA));
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Max current reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			val = 0x3B; //750mA
-			rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_LED0_CURRENT(led->base),
-					FLASH_CURRENT_MASK, val);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Current reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_LED1_CURRENT(led->base),
-					FLASH_CURRENT_MASK, val);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Current reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_MODULE_ENABLE_CTRL(led->base),
-					FLASH_MODULE_ENABLE | FLASH_LED0_ENABLEMENT | FLASH_LED1_ENABLEMENT,
-					FLASH_MODULE_ENABLE | FLASH_LED0_ENABLEMENT | FLASH_LED1_ENABLEMENT);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Module enable reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			if( gpio_is_valid(this_led->flash_strobe) )
-				gpio_set_value(this_led->flash_strobe, 1);
-
-			usleep_range(FLASH_RAMP_DN_DELAY_US_MIN, FLASH_RAMP_DN_DELAY_US_MAX);
-
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_LED_STROBE_CTRL(led->base),
-				FLASH_LED0_TRIGGER | FLASH_LED1_TRIGGER,
-				FLASH_LED0_TRIGGER | FLASH_LED1_TRIGGER);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Strobe reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-		} else {	//torch mode
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_LED_UNLOCK_SECURE(led->base),
-				FLASH_SECURE_MASK, FLASH_UNLOCK_SECURE);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Secure reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_TORCH(led->base),
-				FLASH_TORCH_MASK, FLASH_LED_TORCH_ENABLE);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Torch reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			if (flash_node->prgm_current == FBAD_TORCH) {
-				val = 0x03;
-				rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_LED0_CURRENT(led->base),
-					FLASH_CURRENT_MASK, val);
-				if (rc) {
-					dev_err(&led->spmi_dev->dev,
-						"Current reg write failed\n");
-					goto exit_flash_led_work;
-				}
-
-				rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_LED1_CURRENT(led->base),
-					FLASH_CURRENT_MASK, val);
-				if (rc) {
-					dev_err(&led->spmi_dev->dev,
-						"Current reg write failed\n");
-					goto exit_flash_led_work;
-				}
-
-			} else if ( (flash_node->prgm_current == FBAD_TORCH1) ||
-					(flash_node->prgm_current == FBAD_PREFLASH) ) {
-				val = 0x07;	//100mA(led0)
-				rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_LED0_CURRENT(led->base),
-					FLASH_CURRENT_MASK, val);
-				if (rc) {
-					dev_err(&led->spmi_dev->dev,
-						"Current reg write failed\n");
-					goto exit_flash_led_work;
-				}
-
-				val = 0x03;	//50mA (led1)
-				rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_LED1_CURRENT(led->base),
-					FLASH_CURRENT_MASK, val);
-				if (rc) {
-					dev_err(&led->spmi_dev->dev,
-						"Current reg write failed\n");
-					goto exit_flash_led_work;
-				}
-			} else {
-
-				val = 0x0B;	//150mA(led0)
-				rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_LED0_CURRENT(led->base),
-					FLASH_CURRENT_MASK, val);
-				if (rc) {
-					dev_err(&led->spmi_dev->dev,
-						"Current reg write failed\n");
-					goto exit_flash_led_work;
-				}
-
-				val = 0x03;	//50mA (led1)
-				rc = qpnp_led_masked_write(led->spmi_dev,
-					FLASH_LED1_CURRENT(led->base),
-					FLASH_CURRENT_MASK, val);
-				if (rc) {
-					dev_err(&led->spmi_dev->dev,
-						"Current reg write failed\n");
-					goto exit_flash_led_work;
-				}
-			}
-
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_MAX_CURRENT(led->base),
-				FLASH_CURRENT_MASK, FLASH_TORCH_MAX_LEVEL);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-						"Max current reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_MODULE_ENABLE_CTRL(led->base),
-				FLASH_MODULE_ENABLE_MASK,
-				FLASH_MODULE_ENABLE);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Module enable reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-			rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_LED_STROBE_CTRL(led->base),
-				FLASH_LED0_TRIGGER | FLASH_LED1_TRIGGER,
-				FLASH_LED0_TRIGGER | FLASH_LED1_TRIGGER);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-					"Strobe ctrl reg write failed\n");
-				goto exit_flash_led_work;
-			}
-
-		}
-	} else if (flash_node->type == TORCH) {
+	if (flash_node->type == TORCH) {
 		rc = qpnp_led_masked_write(led->spmi_dev,
 			FLASH_LED_UNLOCK_SECURE(led->base),
 			FLASH_SECURE_MASK, FLASH_UNLOCK_SECURE);
@@ -1989,7 +921,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 					FLASH_LED_HDRM_SNS_ENABLE);
 				if (rc) {
 					dev_err(&led->spmi_dev->dev,
-					"Headroom sense disable failed\n");
+					"Headroom sense diable failed\n");
 					goto exit_flash_led_work;
 				}
 			}
@@ -1998,9 +930,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 		rc = qpnp_led_masked_write(led->spmi_dev,
 			FLASH_LED_STROBE_CTRL(led->base),
 			(flash_node->id == FLASH_LED_SWITCH ? FLASH_STROBE_MASK
-						| FLASH_LED_STROBE_TYPE_HW
-							: flash_node->trigger |
-						FLASH_LED_STROBE_TYPE_HW),
+							: flash_node->trigger),
 							flash_node->trigger);
 		if (rc) {
 			dev_err(&led->spmi_dev->dev,
@@ -2017,20 +947,15 @@ static void qpnp_flash_led_work(struct work_struct *work)
 		if (led->battery_psy) {
 			rc = led->battery_psy->set_property(led->battery_psy,
 						POWER_SUPPLY_PROP_FLASH_ACTIVE,
-						&psy_prop);
+								&psy_prop);
 			if (rc) {
 				dev_err(&led->spmi_dev->dev,
-					"Failed to setup OTG pulse skip enable\n");
+				"Failed to setup OTG pulse skip enable\n");
 				goto exit_flash_led_work;
 			}
-		} else {
-			dev_err(&led->spmi_dev->dev,
-					"led->battery_psy is NULL\n");
-			goto exit_flash_led_work;
 		}
 
-		if (led->pdata->power_detect_en ||
-					led->pdata->die_current_derate_en) {
+		if (led->pdata->power_detect_en) {
 			if (led->battery_psy) {
 				led->battery_psy->get_property(led->battery_psy,
 					POWER_SUPPLY_PROP_STATUS,
@@ -2049,30 +974,28 @@ static void qpnp_flash_led_work(struct work_struct *work)
 					|| psy_prop.intval ==
 					POWER_SUPPLY_STATUS_NOT_CHARGING)
 					led->charging_enabled = false;
-			}
-			max_curr_avail_ma =
-				qpnp_flash_led_get_max_avail_current
+				max_curr_avail_ma =
+					qpnp_flash_led_get_max_avail_current
 							(flash_node, led);
-			if (max_curr_avail_ma < 0) {
-				dev_err(&led->spmi_dev->dev,
+				if (max_curr_avail_ma < 0) {
+					dev_err(&led->spmi_dev->dev,
 					"Failed to get max avail curr\n");
-				goto exit_flash_led_work;
+					goto exit_flash_led_work;
+				}
 			}
 		}
 
 		if (flash_node->id == FLASH_LED_SWITCH) {
 			if (flash_node->trigger & FLASH_LED0_TRIGGER)
 				total_curr_ma += flash_node->prgm_current;
-			if (flash_node->trigger & FLASH_LED1_TRIGGER)
+			else if (flash_node->trigger & FLASH_LED1_TRIGGER)
 				total_curr_ma += flash_node->prgm_current2;
 
 			if (max_curr_avail_ma < total_curr_ma) {
-				flash_node->prgm_current =
-					(flash_node->prgm_current *
-					max_curr_avail_ma) / total_curr_ma;
-				flash_node->prgm_current2 =
-					(flash_node->prgm_current2 *
-					max_curr_avail_ma) / total_curr_ma;
+				flash_node->prgm_current *=
+					max_curr_avail_ma / total_curr_ma;
+				flash_node->prgm_current2 *=
+					max_curr_avail_ma / total_curr_ma;
 			}
 
 			val = (u8)(flash_node->prgm_current *
@@ -2130,7 +1053,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 			}
 		}
 
-		val = (u8)((flash_node->duration - FLASH_DURATION_DIVIDER)
+		val = (u8)((led->pdata->duration - FLASH_DURATION_DIVIDER)
 						/ FLASH_DURATION_DIVIDER);
 		rc = qpnp_led_masked_write(led->spmi_dev,
 			FLASH_SAFETY_TIMER(led->base),
@@ -2160,20 +1083,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 				goto exit_flash_led_work;
 			}
 
-			usleep_range(FLASH_RAMP_UP_DELAY_US_MIN,
-						FLASH_RAMP_UP_DELAY_US_MAX);
-		}
-
-		if (led->revid_data->pmic_subtype == PMI8996_SUBTYPE &&
-						!led->revid_data->rev3) {
-			rc = led->battery_psy->set_property(led->battery_psy,
-						POWER_SUPPLY_PROP_FLASH_TRIGGER,
-							&psy_prop);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-				"Failed to disable charger i/p curr limit\n");
-				goto exit_flash_led_work;
-			}
+			usleep(FLASH_RAMP_UP_DELAY_US);
 		}
 
 		if (led->pdata->hdrm_sns_ch0_en ||
@@ -2230,29 +1140,12 @@ static void qpnp_flash_led_work(struct work_struct *work)
 		rc = qpnp_led_masked_write(led->spmi_dev,
 			FLASH_LED_STROBE_CTRL(led->base),
 			(flash_node->id == FLASH_LED_SWITCH ? FLASH_STROBE_MASK
-						| FLASH_LED_STROBE_TYPE_HW
-							: flash_node->trigger |
-						FLASH_LED_STROBE_TYPE_HW),
+							: flash_node->trigger),
 							flash_node->trigger);
 		if (rc) {
 			dev_err(&led->spmi_dev->dev,
 				"Strobe reg write failed\n");
 			goto exit_flash_led_work;
-		}
-
-		if (led->strobe_debug && led->dbg_feature_en) {
-			udelay(2000);
-			rc = spmi_ext_register_readl(led->spmi_dev->ctrl,
-					led->spmi_dev->sid,
-					FLASH_LED_FAULT_STATUS(led->base),
-					&val, 1);
-			if (rc) {
-				dev_err(&led->spmi_dev->dev,
-				"Unable to read from addr= %x, rc(%d)\n",
-				FLASH_LED_FAULT_STATUS(led->base), rc);
-				goto exit_flash_led_work;
-			}
-			led->fault_reg = val;
 		}
 	} else {
 		pr_err("Both Torch and Flash cannot be select at same time\n");
@@ -2267,40 +1160,17 @@ static void qpnp_flash_led_work(struct work_struct *work)
 	return;
 
 turn_off:
-	if (flash_node->type == TORCH) {
-		/*
-		 * Checking LED fault status detects hardware open fault.
-		 * If fault occurs, all subsequent LED enablement requests
-		 * will be rejected to protect hardware.
-		 */
-		rc = spmi_ext_register_readl(led->spmi_dev->ctrl,
-			led->spmi_dev->sid,
-			FLASH_LED_FAULT_STATUS(led->base), &val, 1);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-				"Failed to read out fault status register\n");
-			goto exit_flash_led_work;
-		}
-
-		led->open_fault |= (val & FLASH_LED_OPEN_FAULT_DETECTED);
-	}
-
 	rc = qpnp_led_masked_write(led->spmi_dev,
 			FLASH_LED_STROBE_CTRL(led->base),
-			(flash_node->id == FLASH_LED_SWITCH ? FLASH_STROBE_MASK
-						| FLASH_LED_STROBE_TYPE_HW
-						: flash_node->trigger
-						| FLASH_LED_STROBE_TYPE_HW),
+			flash_node->id == FLASH_LED_SWITCH ? FLASH_STROBE_MASK
+						: flash_node->trigger,
 						FLASH_LED_DISABLE);
 	if (rc) {
 		dev_err(&led->spmi_dev->dev, "Strobe disable failed\n");
 		goto exit_flash_led_work;
 	}
 
-	if( gpio_is_valid(this_led->flash_strobe) )
-		gpio_set_value(this_led->flash_strobe, 0);
-
-	usleep_range(FLASH_RAMP_DN_DELAY_US_MIN, FLASH_RAMP_DN_DELAY_US_MAX);
+	usleep(FLASH_RAMP_DN_DELAY_US);
 exit_flash_hdrm_sns:
 	if (led->pdata->hdrm_sns_ch0_en) {
 		if (flash_node->id == FLASH_LED_0 ||
@@ -2333,11 +1203,10 @@ exit_flash_hdrm_sns:
 	}
 exit_flash_led_work:
 	rc = qpnp_flash_led_module_disable(led, flash_node);
-	if (rc)
+	if (rc) {
 		dev_err(&led->spmi_dev->dev, "Module disable failed\n");
-
-	if(set_backlight)
-		set_backlight(BACKLIGHT_ON);
+		goto exit_flash_led_work;
+	}
 
 error_enable_gpio:
 	if (flash_node->flash_on && flash_node->num_regulators > 0)
@@ -2366,11 +1235,7 @@ static void qpnp_flash_led_brightness_set(struct led_classdev *led_cdev,
 		value = flash_node->cdev.max_brightness;
 
 	flash_node->cdev.brightness = value;
-	if (flash_node->id == FLASH_LED_2) {
-		if (value < FLASH_LED_MIN_CURRENT_MA && value != 0)
-			value = FLASH_LED_MIN_CURRENT_MA;
-		flash_node->prgm_current = value;
-	} else if (led->flash_node[led->num_leds - 1].id ==
+	if (led->flash_node[led->num_leds - 1].id ==
 						FLASH_LED_SWITCH) {
 		if (flash_node->type == TORCH)
 			led->flash_node[led->num_leds - 1].type = TORCH;
@@ -2415,7 +1280,9 @@ static void qpnp_flash_led_brightness_set(struct led_classdev *led_cdev,
 		flash_node->prgm_current = value;
 	}
 
+	mutex_lock(&led->flash_led_lock);
 	queue_work(led->ordered_workq, &flash_node->work);
+	mutex_unlock(&led->flash_led_lock);
 
 	return;
 }
@@ -2509,65 +1376,12 @@ static int qpnp_flash_led_init_settings(struct qpnp_flash_led *led)
 		return rc;
 	}
 
-	val = 0x0;
-	val |= led->pdata->mask3_en << FLASH_LED_MASK3_ENABLE_SHIFT;
-	val |= FLASH_LED_MASK_MODULE_MASK2_ENABLE;
 	rc = qpnp_led_masked_write(led->spmi_dev, FLASH_MASK_ENABLE(led->base),
-				FLASH_MASK_MODULE_CONTRL_MASK, val);
+				FLASH_MASK_MODULE_CONTRL_MASK,
+				FLASH_LED_MASK_MODULE_MASK2_ENABLE);
 	if (rc) {
 		dev_err(&led->spmi_dev->dev, "Mask module enable failed\n");
 		return rc;
-	}
-
-	rc = spmi_ext_register_readl(led->spmi_dev->ctrl,
-			led->spmi_dev->sid,
-			FLASH_PERPH_RESET_CTRL(led->base),
-			&val, 1);
-	if (rc) {
-		dev_err(&led->spmi_dev->dev,
-			"Unable to read from address %x, rc(%d)\n",
-			FLASH_PERPH_RESET_CTRL(led->base), rc);
-		return -EINVAL;
-	}
-
-	if (led->pdata->follow_rb_disable) {
-		rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_LED_UNLOCK_SECURE(led->base),
-				FLASH_SECURE_MASK, FLASH_UNLOCK_SECURE);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-				"Secure reg write failed\n");
-			return -EINVAL;
-		}
-
-		val |= FLASH_FOLLOW_OTST2_RB_MASK;
-		rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_PERPH_RESET_CTRL(led->base),
-				FLASH_FOLLOW_OTST2_RB_MASK, val);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-				"failed to reset OTST2_RB bit\n");
-			return rc;
-		}
-	} else {
-		rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_LED_UNLOCK_SECURE(led->base),
-				FLASH_SECURE_MASK, FLASH_UNLOCK_SECURE);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-				"Secure reg write failed\n");
-			return -EINVAL;
-		}
-
-		val &= ~FLASH_FOLLOW_OTST2_RB_MASK;
-		rc = qpnp_led_masked_write(led->spmi_dev,
-				FLASH_PERPH_RESET_CTRL(led->base),
-				FLASH_FOLLOW_OTST2_RB_MASK, val);
-		if (rc) {
-			dev_err(&led->spmi_dev->dev,
-				"failed to reset OTST2_RB bit\n");
-			return rc;
-		}
 	}
 
 	if (!led->pdata->thermal_derate_en)
@@ -2627,6 +1441,30 @@ static int qpnp_flash_led_init_settings(struct qpnp_flash_led *led)
 		return rc;
 	}
 
+	if (led->pdata->hdrm_sns_ch0_en) {
+		rc = qpnp_led_masked_write(led->spmi_dev,
+				FLASH_HDRM_SNS_ENABLE_CTRL0(led->base),
+				FLASH_LED_HDRM_SNS_ENABLE_MASK,
+				FLASH_LED_HDRM_SNS_ENABLE);
+		if (rc) {
+			dev_err(&led->spmi_dev->dev,
+					"Headroom sense enable failed\n");
+			return rc;
+		}
+	}
+
+	if (led->pdata->hdrm_sns_ch1_en) {
+		rc = qpnp_led_masked_write(led->spmi_dev,
+				FLASH_HDRM_SNS_ENABLE_CTRL1(led->base),
+				FLASH_LED_HDRM_SNS_ENABLE_MASK,
+				FLASH_LED_HDRM_SNS_ENABLE);
+		if (rc) {
+			dev_err(&led->spmi_dev->dev,
+					"Headroom sense enable failed\n");
+			return rc;
+		}
+	}
+
 	led->battery_psy = power_supply_get_by_name("battery");
 	if (!led->battery_psy) {
 		dev_err(&led->spmi_dev->dev,
@@ -2654,8 +1492,6 @@ static int qpnp_flash_led_parse_each_led_dt(struct qpnp_flash_led *led,
 			flash_node->type = TORCH;
 		else if (strcmp(temp_string, "switch") == 0)
 			flash_node->type = SWITCH;
-		else if (strcmp(temp_string, "dual_leds") == 0)
-			flash_node->type = DUAL_LEDS;
 		else {
 			dev_err(&led->spmi_dev->dev,
 					"Wrong flash LED type\n");
@@ -2686,29 +1522,15 @@ static int qpnp_flash_led_parse_each_led_dt(struct qpnp_flash_led *led,
 		return rc;
 	}
 
-	if (flash_node->type == SWITCH || flash_node->type == FLASH) {
-		rc = of_property_read_u32(node, "qcom,duration", &val);
-		if (!rc)
-			flash_node->duration = (u16)val;
-		else if (rc != -EINVAL) {
-			dev_err(&led->spmi_dev->dev,
-					"Unable to read duration\n");
-			return rc;
-		}
-	}
-
 	switch (led->peripheral_type) {
 	case FLASH_SUBTYPE_SINGLE:
 		flash_node->trigger = FLASH_LED0_TRIGGER;
 		break;
 	case FLASH_SUBTYPE_DUAL:
-		if (flash_node->id == FLASH_LED_0)
+		if (flash_node->id == FLASH_LED_0) {
 			flash_node->trigger = FLASH_LED0_TRIGGER;
-		else if (flash_node->id == FLASH_LED_1)
+		} else if (flash_node->id == FLASH_LED_1) {
 			flash_node->trigger = FLASH_LED1_TRIGGER;
-		else if (flash_node->id == FLASH_LED_2) {
-			flash_node->enable = FLASH_MODULE_ENABLE;
-			flash_node->trigger = FLASH_LED0_TRIGGER|FLASH_LED1_TRIGGER;
 		}
 		break;
 	default:
@@ -2765,6 +1587,15 @@ static int qpnp_flash_led_parse_common_dt(
 		return rc;
 	}
 
+	rc = of_property_read_u32(node, "qcom,duration", &val);
+	if (!rc) {
+		led->pdata->duration = val;
+	} else if (rc != -EINVAL) {
+		dev_err(&led->spmi_dev->dev,
+					"unable to read duration\n");
+		return rc;
+	}
+
 	led->pdata->pmic_charger_support =
 			of_property_read_bool(node,
 						"qcom,pmic-charger-support");
@@ -2784,6 +1615,12 @@ static int qpnp_flash_led_parse_common_dt(
 		if (!rc) {
 			temp_val =
 				qpnp_flash_led_get_thermal_derate_rate(temp);
+			if (temp_val < 0) {
+				dev_err(&led->spmi_dev->dev,
+					"Invalid thermal derate rate\n");
+				return -EINVAL;
+			}
+
 			led->pdata->thermal_derate_rate = (u8)temp_val;
 		} else {
 			dev_err(&led->spmi_dev->dev,
@@ -2812,6 +1649,11 @@ static int qpnp_flash_led_parse_common_dt(
 		rc = of_property_read_string(node, "qcom,ramp_up_step", &temp);
 		if (!rc) {
 			temp_val = qpnp_flash_led_get_ramp_step(temp);
+			if (temp_val < 0) {
+				dev_err(&led->spmi_dev->dev,
+					"Invalid ramp up step values\n");
+				return -EINVAL;
+			}
 			led->pdata->ramp_up_step = (u8)temp_val;
 		} else if (rc != -EINVAL) {
 			dev_err(&led->spmi_dev->dev,
@@ -2823,6 +1665,11 @@ static int qpnp_flash_led_parse_common_dt(
 		rc = of_property_read_string(node, "qcom,ramp_dn_step", &temp);
 		if (!rc) {
 			temp_val = qpnp_flash_led_get_ramp_step(temp);
+			if (temp_val < 0) {
+				dev_err(&led->spmi_dev->dev,
+					"Invalid ramp down step values\n");
+				return rc;
+			}
 			led->pdata->ramp_dn_step = (u8)temp_val;
 		} else if (rc != -EINVAL) {
 			dev_err(&led->spmi_dev->dev,
@@ -2868,100 +1715,10 @@ static int qpnp_flash_led_parse_common_dt(
 	led->pdata->power_detect_en = of_property_read_bool(node,
 						"qcom,power-detect-enabled");
 
-	led->flash_strobe = -1;
-	if ( of_find_property(node, "qcom,gpio-flash-strobe", NULL) ) {
-		led->flash_strobe = of_get_named_gpio(node, "qcom,gpio-flash-strobe", 0);
-		FLT_INFO_LOG("flash_strobe = %d\n", led->flash_strobe );
-	} else
-		FLT_INFO_LOG("Unable to read FLASH-STROBE gpio pin\n");
-
-	led->pdata->mask3_en = of_property_read_bool(node,
-						"qcom,otst2-module-enabled");
-
-	led->pdata->follow_rb_disable = of_property_read_bool(node,
-						"qcom,follow-otst2-rb-disabled");
-
-	led->pdata->die_current_derate_en = of_property_read_bool(node,
-					"qcom,die-current-derate-enabled");
-
-	if (led->pdata->die_current_derate_en) {
-		led->vadc_dev = qpnp_get_vadc(&led->spmi_dev->dev,
-							"die-temp");
-		if (IS_ERR(led->vadc_dev)) {
-			pr_err("VADC channel property Missing\n");
-			return -EINVAL;
-		}
-
-		if (of_find_property(node, "qcom,die-temp-threshold",
-				&led->pdata->temp_threshold_num)) {
-
-			if (led->pdata->temp_threshold_num > 0) {
-				led->pdata->die_temp_threshold_degc =
-				devm_kzalloc(&led->spmi_dev->dev,
-						led->pdata->temp_threshold_num,
-						GFP_KERNEL);
-
-				if (led->pdata->die_temp_threshold_degc
-								== NULL) {
-					dev_err(&led->spmi_dev->dev,
-					"failed to allocate die temp array\n");
-					return -ENOMEM;
-				}
-				led->pdata->temp_threshold_num /=
-							sizeof(unsigned int);
-
-				rc = of_property_read_u32_array(node,
-						"qcom,die-temp-threshold",
-				led->pdata->die_temp_threshold_degc,
-						led->pdata->temp_threshold_num);
-				if (rc) {
-					dev_err(&led->spmi_dev->dev,
-					"couldn't read temp threshold rc=%d\n",
-								rc);
-					return rc;
-				}
-			}
-		}
-
-		if (of_find_property(node, "qcom,die-temp-derate-current",
-					&led->pdata->temp_derate_curr_num)) {
-			if (led->pdata->temp_derate_curr_num > 0) {
-				led->pdata->die_temp_derate_curr_ma =
-					devm_kzalloc(&led->spmi_dev->dev,
-					led->pdata->temp_derate_curr_num,
-					GFP_KERNEL);
-				if (led->pdata->die_temp_derate_curr_ma
-								== NULL) {
-					dev_err(&led->spmi_dev->dev,
-						"failed to allocate die derate current array\n");
-					return -ENOMEM;
-				}
-				led->pdata->temp_derate_curr_num /=
-						sizeof(unsigned int);
-
-				rc = of_property_read_u32_array(node,
-						"qcom,die-temp-derate-current",
-				led->pdata->die_temp_derate_curr_ma,
-				led->pdata->temp_derate_curr_num);
-				if (rc) {
-					dev_err(&led->spmi_dev->dev,
-					"couldn't read temp limits rc =%d\n",
-								rc);
-					return rc;
-				}
-			}
-		}
-		if (led->pdata->temp_threshold_num !=
-					led->pdata->temp_derate_curr_num) {
-			pr_err("Both array size are not same\n");
-			return -EINVAL;
-		}
-	}
-
 	led->pinctrl = devm_pinctrl_get(&led->spmi_dev->dev);
 	if (IS_ERR_OR_NULL(led->pinctrl)) {
 		dev_err(&led->spmi_dev->dev,
-					"Unable to acquire pinctrl\n");
+					"Unable to quire pinctrl\n");
 		led->pinctrl = NULL;
 		return 0;
 	} else {
@@ -2969,17 +1726,16 @@ static int qpnp_flash_led_parse_common_dt(
 			pinctrl_lookup_state(led->pinctrl, "flash_led_enable");
 		if (IS_ERR_OR_NULL(led->gpio_state_active)) {
 			dev_err(&led->spmi_dev->dev,
-					"Can not lookup LED active state\n");
+					"Cannot lookup LED active state\n");
 			devm_pinctrl_put(led->pinctrl);
 			led->pinctrl = NULL;
 			return PTR_ERR(led->gpio_state_active);
 		}
 		led->gpio_state_suspend =
-			pinctrl_lookup_state(led->pinctrl,
-							"flash_led_disable");
+			pinctrl_lookup_state(led->pinctrl, "flash_led_disable");
 		if (IS_ERR_OR_NULL(led->gpio_state_suspend)) {
 			dev_err(&led->spmi_dev->dev,
-					"Can not lookup LED disable state\n");
+					"Cannot lookup LED suspend state\n");
 			devm_pinctrl_put(led->pinctrl);
 			led->pinctrl = NULL;
 			return PTR_ERR(led->gpio_state_suspend);
@@ -2994,11 +1750,8 @@ static int qpnp_flash_led_probe(struct spmi_device *spmi)
 	struct qpnp_flash_led *led;
 	struct resource *flash_resource;
 	struct device_node *node, *temp;
-	struct dentry *root, *file;
-	int rc, i = 0, j = 0, num_leds = 0;
+	int rc, i = 0, j, num_leds = 0;
 	u32 val;
-
-	FLT_INFO_LOG("%s: ++\n", __func__);
 
 	node = spmi->dev.of_node;
 	if (node == NULL) {
@@ -3033,12 +1786,12 @@ static int qpnp_flash_led_probe(struct spmi_device *spmi)
 		return -ENOMEM;
 	}
 
-	rc = qpnp_flash_led_get_peripheral_type(led);
-	if (rc < 0) {
+	led->peripheral_type =
+			(u8)qpnp_flash_led_get_peripheral_type(led);
+	if (led->peripheral_type < 0) {
 		dev_err(&spmi->dev, "Failed to get peripheral type\n");
 		return rc;
 	}
-	led->peripheral_type = (u8) rc;
 
 	rc = qpnp_flash_led_parse_common_dt(led, node);
 	if (rc) {
@@ -3052,10 +1805,6 @@ static int qpnp_flash_led_probe(struct spmi_device *spmi)
 		dev_err(&spmi->dev, "Failed to initialize flash LED\n");
 		return rc;
 	}
-
-	rc = qpnp_get_pmic_revid(led);
-	if (rc)
-		return rc;
 
 	temp = NULL;
 	while ((temp = of_get_next_child(node, temp)))
@@ -3072,6 +1821,8 @@ static int qpnp_flash_led_probe(struct spmi_device *spmi)
 		return -ENOMEM;
 	}
 
+	mutex_init(&led->flash_led_lock);
+
 	led->ordered_workq = alloc_ordered_workqueue("flash_led_workqueue", 0);
 	if (!led->ordered_workq) {
 		dev_err(&spmi->dev,
@@ -3079,35 +1830,7 @@ static int qpnp_flash_led_probe(struct spmi_device *spmi)
 		return -ENOMEM;
 	}
 
-	if( gpio_is_valid(led->flash_strobe) )
-	{
-		rc = gpio_request(led->flash_strobe, "flash_strobe_gpio");
-		if (rc) {
-			FLT_ERR_LOG("%s: gpio_request failed for flash_strobe(%d).\n", __func__, rc);
-			return rc;
-		}
-
-		rc = gpio_direction_output( led->flash_strobe, 0 );
-		if (rc)
-		{
-			FLT_ERR_LOG("%s: gpio_direction_output failed for flash_strobe(%d).\n", __func__, rc);
-			gpio_free(led->flash_strobe);
-			return rc;
-		}
-	}
-
-	INIT_DELAYED_WORK(&pmi8994_delayed_work, flashlight_turn_off_work);
-	pmi8994_work_queue = create_singlethread_workqueue("pmi8994_wq");
-	if (!pmi8994_work_queue)
-		goto err_create_pmi8994_work_queue;
-
-	htc_flash_main = &pmi8994_flash_mode;
-	htc_torch_main = &pmi8994_torch_mode;
-
-	mutex_init(&led->flash_led_lock);
-
 	for_each_child_of_node(node, temp) {
-		j = -1;
 		led->flash_node[i].cdev.brightness_set =
 						qpnp_flash_led_brightness_set;
 		led->flash_node[i].cdev.brightness_get =
@@ -3183,54 +1906,16 @@ static int qpnp_flash_led_probe(struct spmi_device *spmi)
 			if (rc)
 				goto error_led_register;
 		}
+
 		i++;
 	}
 
 	led->num_leds = i;
 
-	root = debugfs_create_dir("flashLED", NULL);
-	if (IS_ERR_OR_NULL(root)) {
-		pr_err("Error creating top level directory err%ld",
-			(long)root);
-		if (PTR_ERR(root) == -ENODEV)
-			pr_err("debugfs is not enabled in kernel");
-		goto error_free_led_sysfs;
-	}
-
-	led->dbgfs_root = root;
-	file = debugfs_create_file("enable_debug", S_IRUSR | S_IWUSR, root,
-					led, &flash_led_dfs_dbg_feature_fops);
-	if (!file) {
-		pr_err("error creating 'enable_debug' entry\n");
-		goto error_led_debugfs;
-	}
-
-	file = debugfs_create_file("latched", S_IRUSR | S_IWUSR, root, led,
-					&flash_led_dfs_latched_reg_fops);
-	if (!file) {
-		pr_err("error creating 'latched' entry\n");
-		goto error_led_debugfs;
-	}
-
-	file = debugfs_create_file("strobe", S_IRUSR | S_IWUSR, root, led,
-					&flash_led_dfs_strobe_reg_fops);
-	if (!file) {
-		pr_err("error creating 'strobe' entry\n");
-		goto error_led_debugfs;
-	}
-
-	this_led = led;
-
 	dev_set_drvdata(&spmi->dev, led);
 
-	FLT_INFO_LOG("%s: --\n", __func__);
 	return 0;
 
-error_led_debugfs:
-	debugfs_remove_recursive(root);
-error_free_led_sysfs:
-	i = led->num_leds - 1;
-	j = ARRAY_SIZE(qpnp_flash_led_attrs) - 1;
 error_led_register:
 	for (; i >= 0; i--) {
 		for (; j >= 0; j--)
@@ -3239,10 +1924,6 @@ error_led_register:
 		j = ARRAY_SIZE(qpnp_flash_led_attrs) - 1;
 		led_classdev_unregister(&led->flash_node[i].cdev);
 	}
-err_create_pmi8994_work_queue:
-	if(gpio_is_valid(led->flash_strobe))
-		gpio_free(led->flash_strobe);
-	kfree(led);
 	mutex_destroy(&led->flash_led_lock);
 	destroy_workqueue(led->ordered_workq);
 
@@ -3267,9 +1948,7 @@ static int qpnp_flash_led_remove(struct spmi_device *spmi)
 						&qpnp_flash_led_attrs[j].attr);
 		led_classdev_unregister(&led->flash_node[i].cdev);
 	}
-	if(gpio_is_valid(this_led->flash_strobe))
-		gpio_free(this_led->flash_strobe);
-	debugfs_remove_recursive(led->dbgfs_root);
+
 	mutex_destroy(&led->flash_led_lock);
 	destroy_workqueue(led->ordered_workq);
 

@@ -311,10 +311,6 @@ static int smq_receive(struct smq *smq, void **pp, int *pnsize, int *pbmore)
 
 	*pp = smq->blocks + (node->index_block * SM_BLOCKSIZE);
 	*pnsize = SM_BLOCKSIZE * node->num_blocks;
-
-	/* Ensure that the reads and writes are updated in the memory
-	when they are done and not cached. Also, ensure that the reads
-	and writes are not reordered as they are shared between two cores. */
 	rmb();
 	if (smq->in->s.index_sent_read != smq->out->s.index_sent_write)
 		more = 1;
@@ -354,11 +350,6 @@ static int smq_alloc_send(struct smq *smq, const uint8_t *pcb, int nsize)
 
 				smq_blockmap_put(&smq->block_map,
 					node->index_block);
-				/* Ensure that the reads and writes are
-				updated	in the memory when they are done
-				and not cached. Also, ensure that the reads
-				and writes are not reordered as they are
-				shared between two cores. */
 				rmb();
 			}
 		}
@@ -580,7 +571,7 @@ static void smq_dtor(struct smq *smq)
  * Control:
  * The control portion contains a list of nodes [0..N] where N is number
  * of available data blocks. Each node identifies the data
- * block indexes that contain a particular debug message to be transferred,
+ * block indexes that contain a particular debug message to be transfered,
  * and the number of blocks it took to hold the contents of the message.
  *
  * Each node has the following structure:
@@ -718,7 +709,6 @@ static void send_interrupt_to_subsystem(struct rdbg_data *rdbgdata)
 {
 	int offset = rdbgdata->gpio_out_offset;
 	int val = 1 ^ gpio_get_value(rdbgdata->out.gpio_base_id + offset);
-
 	gpio_set_value(rdbgdata->out.gpio_base_id + offset, val);
 	rdbgdata->gpio_out_offset = (offset + 1) % 32;
 
@@ -740,8 +730,8 @@ static irqreturn_t on_interrupt_from(int irq, void *ptr)
 static int initialize_smq(struct rdbg_data *rdbgdata)
 {
 	int err = 0;
-	unsigned char *smem_consumer_buffer = rdbgdata->smem_addr;
 
+	unsigned char *smem_consumer_buffer = rdbgdata->smem_addr;
 	smem_consumer_buffer += (rdbgdata->smem_size/2);
 
 	if (smq_ctor(&(rdbgdata->producer_smrb), (void *)(rdbgdata->smem_addr),
@@ -945,6 +935,7 @@ static ssize_t rdbg_read(struct file *filp, char __user *buf, size_t size,
 		__func__, (unsigned long) buf);
 
 bail:
+	dev_dbg(rdbgdata->device, "%s: Returning from receive", __func__);
 	return err;
 }
 
@@ -1021,6 +1012,7 @@ static int __init rdbg_init(void)
 	char *node_name = kcalloc(max_len, sizeof(char), GFP_KERNEL);
 
 	if (!node_name) {
+		pr_err("Not enough memory");
 		err = -ENOMEM;
 		goto bail;
 	}
@@ -1035,6 +1027,7 @@ static int __init rdbg_init(void)
 	rdbgdevice->rdbg_data = kcalloc(rdbgdevice->num_devices,
 		sizeof(struct rdbg_data), GFP_KERNEL);
 	if (!rdbgdevice->rdbg_data) {
+		pr_err("Not enough memory for rdbg devices");
 		err = -ENOMEM;
 		goto name_bail;
 	}

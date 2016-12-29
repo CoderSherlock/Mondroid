@@ -16,6 +16,7 @@
 #include <net/udp.h>
 #include <net/udplite.h>
 #include <linux/sock_diag.h>
+#include <net/ipv6.h>
 
 static int sk_diag_dump(struct sock *sk, struct sk_buff *skb,
 		struct netlink_callback *cb, struct inet_diag_req_v2 *req,
@@ -74,7 +75,7 @@ static int udp_dump_one(struct udp_table *tbl, struct sk_buff *in_skb,
 			   sk_user_ns(NETLINK_CB(in_skb).sk),
 			   NETLINK_CB(in_skb).portid,
 			   nlh->nlmsg_seq, 0, nlh,
-			   netlink_net_capable(in_skb, CAP_NET_ADMIN));
+			   ns_capable(net->user_ns, CAP_NET_ADMIN));
 	if (err < 0) {
 		WARN_ON(err == -EMSGSIZE);
 		kfree_skb(rep);
@@ -96,7 +97,7 @@ static void udp_dump(struct udp_table *table, struct sk_buff *skb, struct netlin
 {
 	int num, s_num, slot, s_slot;
 	struct net *net = sock_net(skb->sk);
-	bool net_admin = netlink_net_capable(cb->skb, CAP_NET_ADMIN);
+	bool net_admin = ns_capable(net->user_ns, CAP_NET_ADMIN);
 
 	s_slot = cb->args[0];
 	num = s_num = cb->args[1];
@@ -166,7 +167,7 @@ static void udp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 
 #ifdef CONFIG_INET_DIAG_DESTROY
 static int __udp_diag_destroy(struct sk_buff *in_skb,
-			      struct inet_diag_req_v2 *req,
+			      const struct inet_diag_req_v2 *req,
 			      struct udp_table *tbl)
 {
 	struct net *net = sock_net(in_skb->sk);
@@ -211,7 +212,7 @@ static int __udp_diag_destroy(struct sk_buff *in_skb,
 	if (!sk)
 		return -ENOENT;
 
-	if (sock_diag_check_cookie(sk, req->id.idiag_cookie)) {
+	if (sock_diag_check_cookie(sk, (__u32 *) req->id.idiag_cookie)) {
 		sock_put(sk);
 		return -ENOENT;
 	}

@@ -31,8 +31,8 @@
 #include <linux/uaccess.h>
 #include <linux/random.h>
 #include <linux/hw_breakpoint.h>
+#include <linux/cpuidle.h>
 #include <linux/leds.h>
-#include <linux/reboot.h>
 #include <linux/console.h>
 
 #include <asm/cacheflush.h>
@@ -40,10 +40,8 @@
 #include <asm/processor.h>
 #include <asm/thread_notify.h>
 #include <asm/stacktrace.h>
-#include <asm/system_misc.h>
 #include <asm/mach/time.h>
 #include <asm/tls.h>
-#include "reboot.h"
 
 #ifdef CONFIG_CC_STACKPROTECTOR
 #include <linux/stackprotector.h>
@@ -51,14 +49,14 @@ unsigned long __stack_chk_guard __read_mostly;
 EXPORT_SYMBOL(__stack_chk_guard);
 #endif
 
-static const char *processor_modes[] __maybe_unused = {
+static const char *processor_modes[] = {
   "USER_26", "FIQ_26" , "IRQ_26" , "SVC_26" , "UK4_26" , "UK5_26" , "UK6_26" , "UK7_26" ,
   "UK8_26" , "UK9_26" , "UK10_26", "UK11_26", "UK12_26", "UK13_26", "UK14_26", "UK15_26",
   "USER_32", "FIQ_32" , "IRQ_32" , "SVC_32" , "UK4_32" , "UK5_32" , "UK6_32" , "ABT_32" ,
   "UK8_32" , "UK9_32" , "UK10_32", "UND_32" , "UK12_32", "UK13_32", "UK14_32", "SYS_32"
 };
 
-static const char *isa_modes[] __maybe_unused = {
+static const char *isa_modes[] = {
   "ARM" , "Thumb" , "Jazelle", "ThumbEE"
 };
 
@@ -135,16 +133,16 @@ static void __soft_restart(void *addr)
 	BUG();
 }
 
-void _soft_restart(unsigned long addr, bool disable_l2)
+void soft_restart(unsigned long addr)
 {
 	u64 *stack = soft_restart_stack + ARRAY_SIZE(soft_restart_stack);
 
 	/* Disable interrupts first */
-	raw_local_irq_disable();
+	local_irq_disable();
 	local_fiq_disable();
 
 	/* Disable the L2 if we're the last man standing. */
-	if (disable_l2)
+	if (num_online_cpus() == 1)
 		outer_disable();
 
 	/* Change to the new stack and continue with the reset. */
@@ -154,9 +152,8 @@ void _soft_restart(unsigned long addr, bool disable_l2)
 	BUG();
 }
 
-void soft_restart(unsigned long addr)
+static void null_restart(enum reboot_mode reboot_mode, const char *cmd)
 {
-	_soft_restart(addr, num_online_cpus() == 1);
 }
 
 /*
@@ -165,20 +162,16 @@ void soft_restart(unsigned long addr)
 void (*pm_power_off)(void);
 EXPORT_SYMBOL(pm_power_off);
 
-void (*arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd);
+void (*arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd) = null_restart;
+EXPORT_SYMBOL_GPL(arm_pm_restart);
 
 /*
  * This is our default idle handler.
  */
 
-extern void arch_idle(void);
-void (*arm_pm_idle)(void) = arch_idle;
+void (*arm_pm_idle)(void);
 
-/*
- * Called from the core idle loop.
- */
-
-void arch_cpu_idle(void)
+static void default_idle(void)
 {
 	if (arm_pm_idle)
 		arm_pm_idle();
@@ -215,6 +208,25 @@ void arch_cpu_idle_dead(void)
 #endif
 
 /*
+ * Called from the core idle loop.
+ */
+void arch_cpu_idle(void)
+{
+	if (cpuidle_idle_call())
+		default_idle();
+}
+
+enum reboot_mode reboot_mode = REBOOT_HARD;
+
+static int __init reboot_setup(char *str)
+{
+	if ('s' == str[0])
+		reboot_mode = REBOOT_SOFT;
+	return 1;
+}
+__setup("reboot=", reboot_setup);
+
+/*
  * Called by kexec, immediately prior to machine_kexec().
  *
  * This must completely disable all secondary CPUs; simply causing those CPUs
@@ -245,7 +257,7 @@ void machine_shutdown(void)
  */
 void machine_halt(void)
 {
-	local_irq_disable();
+	preempt_disable();
 	smp_send_stop();
 
 	local_irq_disable();
@@ -260,7 +272,7 @@ void machine_halt(void)
  */
 void machine_power_off(void)
 {
-	local_irq_disable();
+	preempt_disable();
 	smp_send_stop();
 
 	if (pm_power_off)
@@ -280,18 +292,14 @@ void machine_power_off(void)
  */
 void machine_restart(char *cmd)
 {
-	local_irq_disable();
+	preempt_disable();
 	smp_send_stop();
-
 
 	/* Flush the console to make sure all the relevant messages make it
 	 * out to the console drivers */
 	arm_machine_flush_console();
 
-	if (arm_pm_restart)
-		arm_pm_restart(reboot_mode, cmd);
-	else
-		do_kernel_restart(cmd);
+	arm_pm_restart(reboot_mode, cmd);
 
 	/* Give a grace period for failure to restart of 1s */
 	mdelay(1000);
@@ -312,12 +320,10 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 	u32	*p;
 
 	/*
-	 * don't attempt to dump non-kernel addresses, values that are probably
-	 * just small negative numbers, or vmalloc addresses that may point to
-	 * memory-mapped peripherals
+	 * don't attempt to dump non-kernel addresses or
+	 * values that are probably just small negative numbers
 	 */
-	if (addr < PAGE_OFFSET || addr > -256UL ||
-	    is_vmalloc_addr((void *)addr))
+	if (addr < PAGE_OFFSET || addr > -256UL)
 		return;
 
 	printk("\n%s: %#lx:\n", name, addr);
@@ -339,15 +345,19 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 		printk("%04lx ", (unsigned long)p & 0xffff);
 		for (j = 0; j < 8; j++) {
 			u32	data;
+			/*
+			 * vmalloc addresses may point to
+			 * memory-mapped peripherals
+			 */
 			if (!virt_addr_valid(p) ||
 			    probe_kernel_address(p, data)) {
 				printk(" ********");
 			} else {
-				printk(" %08x", data);
+				printk(KERN_CONT " %08x", data);
 			}
 			++p;
 		}
-		printk("\n");
+		printk(KERN_CONT "\n");
 	}
 }
 
@@ -401,17 +411,12 @@ void __show_regs(struct pt_regs *regs)
 	buf[3] = flags & PSR_V_BIT ? 'V' : 'v';
 	buf[4] = '\0';
 
-#ifndef CONFIG_CPU_V7M
 	printk("Flags: %s  IRQs o%s  FIQs o%s  Mode %s  ISA %s  Segment %s\n",
 		buf, interrupts_enabled(regs) ? "n" : "ff",
 		fast_interrupts_enabled(regs) ? "n" : "ff",
 		processor_modes[processor_mode(regs)],
 		isa_modes[isa_mode(regs)],
 		get_fs() == get_ds() ? "kernel" : "user");
-#else
-	printk("xPSR: %08lx\n", regs->ARM_cpsr);
-#endif
-
 #ifdef CONFIG_CPU_CP15
 	{
 		unsigned int ctrl;
@@ -438,6 +443,7 @@ void __show_regs(struct pt_regs *regs)
 
 void show_regs(struct pt_regs * regs)
 {
+	printk("\n");
 	__show_regs(regs);
 	dump_stack();
 }
@@ -464,8 +470,6 @@ void flush_thread(void)
 	memset(thread->used_cp, 0, sizeof(thread->used_cp));
 	memset(&tsk->thread.debug, 0, sizeof(struct debug_info));
 	memset(&thread->fpstate, 0, sizeof(union fp_state));
-
-	flush_tls();
 
 	thread_notify(THREAD_NOTIFY_FLUSH, thread);
 }
@@ -605,57 +609,24 @@ int in_gate_area_no_mm(unsigned long addr)
 
 const char *arch_vma_name(struct vm_area_struct *vma)
 {
-	return is_gate_vma(vma) ? "[vectors]" : NULL;
-}
-
-/* If possible, provide a placement hint at a random offset from the
- * stack for the signal page.
- */
-static unsigned long sigpage_addr(const struct mm_struct *mm,
-				  unsigned int npages)
-{
-	unsigned long offset;
-	unsigned long first;
-	unsigned long last;
-	unsigned long addr;
-	unsigned int slots;
-
-	first = PAGE_ALIGN(mm->start_stack);
-
-	last = TASK_SIZE - (npages << PAGE_SHIFT);
-
-	/* No room after stack? */
-	if (first > last)
-		return 0;
-
-	/* Just enough room? */
-	if (first == last)
-		return first;
-
-	slots = ((last - first) >> PAGE_SHIFT) + 1;
-
-	offset = get_random_int() % slots;
-
-	addr = first + (offset << PAGE_SHIFT);
-
-	return addr;
+	if (is_gate_vma(vma))
+		return "[vectors]";
+	else if (vma->vm_mm && vma->vm_start == vma->vm_mm->context.sigpage)
+		return "[sigpage]";
+	else if (vma == get_user_timers_vma(NULL))
+		return "[timers]";
+	else
+		return NULL;
 }
 
 static struct page *signal_page;
 extern struct page *get_signal_page(void);
 
-static const struct vm_special_mapping sigpage_mapping = {
-	.name = "[sigpage]",
-	.pages = &signal_page,
-};
-
 int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 {
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma;
 	unsigned long addr;
-	unsigned long hint;
-	int ret = 0;
+	int ret;
 
 	if (!signal_page)
 		signal_page = get_signal_page();
@@ -663,23 +634,18 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 		return -ENOMEM;
 
 	down_write(&mm->mmap_sem);
-	hint = sigpage_addr(mm, 1);
-	addr = get_unmapped_area(NULL, hint, PAGE_SIZE, 0, 0);
+	addr = get_unmapped_area(NULL, 0, PAGE_SIZE, 0, 0);
 	if (IS_ERR_VALUE(addr)) {
 		ret = addr;
 		goto up_fail;
 	}
 
-	vma = _install_special_mapping(mm, addr, PAGE_SIZE,
+	ret = install_special_mapping(mm, addr, PAGE_SIZE,
 		VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC,
-		&sigpage_mapping);
+		&signal_page);
 
-	if (IS_ERR(vma)) {
-		ret = PTR_ERR(vma);
-		goto up_fail;
-	}
-
-	mm->context.sigpage = addr;
+	if (ret == 0)
+		mm->context.sigpage = addr;
 
  up_fail:
 	up_write(&mm->mmap_sem);

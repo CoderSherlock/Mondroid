@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,21 +24,18 @@
 #include <linux/kobject.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
-#include <linux/interrupt.h>
-#include <linux/spinlock.h>
 
 #include "mdss_fb.h"
 #include "mdss_dsi.h"
 #include "mdss_panel.h"
 #include "mdss_mdp.h"
 
-#define STATUS_CHECK_INTERVAL_MS 3000
+#define STATUS_CHECK_INTERVAL_MS 5000
 #define STATUS_CHECK_INTERVAL_MIN_MS 50
-#define DSI_STATUS_CHECK_INIT -1
-#define DSI_STATUS_CHECK_DISABLE 1
+#define DSI_STATUS_CHECK_DISABLE 0
 
 static uint32_t interval = STATUS_CHECK_INTERVAL_MS;
-static int32_t dsi_status_disable = DSI_STATUS_CHECK_INIT;
+static uint32_t dsi_status_disable = DSI_STATUS_CHECK_DISABLE;
 struct dsi_status_data *pstatus_data;
 
 /*
@@ -48,7 +45,6 @@ struct dsi_status_data *pstatus_data;
  */
 static void check_dsi_ctrl_status(struct work_struct *work)
 {
-	unsigned long flag;
 	struct dsi_status_data *pdsi_status = NULL;
 
 	pdsi_status = container_of(to_delayed_work(work),
@@ -66,50 +62,11 @@ static void check_dsi_ctrl_status(struct work_struct *work)
 
 	if (mdss_panel_is_power_off(pdsi_status->mfd->panel_power_state) ||
 			pdsi_status->mfd->shutdown_pending) {
-		pr_debug("%s: panel off\n", __func__);
+		pr_err("%s: panel off\n", __func__);
 		return;
 	}
 
-	spin_lock_irqsave(&pstatus_data->te.spinlock, flag);
-
-	pr_debug("now=%d, last=%d, vsync=%d\n",
-		jiffies_to_msecs(jiffies),
-		jiffies_to_msecs(pstatus_data->te.ts_last_check),
-		jiffies_to_msecs(pstatus_data->te.ts_vsync));
-
-	if (pstatus_data->te.err_fg == true ||
-		time_after(pstatus_data->te.ts_last_check, pstatus_data->te.ts_vsync)) {
-		if (pstatus_data->te.err_fg == true) {
-			pr_warn("<ESD TE> %s: ERR_FG triggered\n", __func__);
-			pstatus_data->te.err_fg = false;
-		} else
-			pr_warn("<ESD TE> %s: Vsync doesn't come on time (%d %d)\n",
-				__func__, jiffies_to_msecs(pstatus_data->te.ts_last_check),
-				jiffies_to_msecs(pstatus_data->te.ts_vsync));
-
-		/* change ts for next round of vsync check after panel dead */
-		pstatus_data->te.ts_last_check =
-			pstatus_data->te.ts_vsync = jiffies;
-		if (pstatus_data->te.irq_enabled == true) {
-			disable_irq_nosync(pstatus_data->te.irq);
-			pstatus_data->te.irq_enabled = false;
-		}
-		spin_unlock_irqrestore(&pstatus_data->te.spinlock, flag);
-		pdsi_status->mfd->mdp.check_dsi_status(work, interval);
-	} else {
-		pstatus_data->te.ts_last_check = jiffies;
-		pr_debug("<ESD TE> %s: enable vsync IRQ\n", __func__);
-		enable_irq(pstatus_data->te.irq);
-		pstatus_data->te.irq_enabled = true;
-		spin_unlock_irqrestore(&pstatus_data->te.spinlock, flag);
-		mod_delayed_work(system_wq, &pstatus_data->check_status,
-			msecs_to_jiffies(interval));
-	}
-}
-
-void check_dsi_ctrl_status_ext(void)
-{
-       check_dsi_ctrl_status(&pstatus_data->check_status.work);
+	pdsi_status->mfd->mdp.check_dsi_status(work, interval);
 }
 
 /*
@@ -118,11 +75,11 @@ void check_dsi_ctrl_status_ext(void)
  * @data	: Pointer to the device structure.
  *
  * This function is called whenever a HW vsync signal is received from the
- * panel. This changes the timestamp of HW vsync signal.
+ * panel. This resets the timer of ESD delayed workqueue back to initial
+ * value.
  */
 irqreturn_t hw_vsync_handler(int irq, void *data)
 {
-	unsigned long flag;
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata =
 			(struct mdss_dsi_ctrl_pdata *)data;
 	if (!ctrl_pdata) {
@@ -130,49 +87,14 @@ irqreturn_t hw_vsync_handler(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
-	if (pstatus_data) {
-		spin_lock_irqsave(&pstatus_data->te.spinlock, flag);
-		pstatus_data->te.ts_vsync = jiffies;
-		if (pstatus_data->te.irq_enabled) {
-			pr_debug("<ESD TE> %s: disable vsync IRQ\n", __func__);
-			pstatus_data->te.irq_enabled = false;
-			disable_irq_nosync(pstatus_data->te.irq);
-		}
-		spin_unlock_irqrestore(&pstatus_data->te.spinlock, flag);
-	} else
-		pr_err("%s: Pstatus data is NULL\n", __func__);
+	if (pstatus_data)
+		mod_delayed_work(system_wq, &pstatus_data->check_status,
+			msecs_to_jiffies(interval));
+	else
+		pr_err("Pstatus data is NULL\n");
 
 	if (!atomic_read(&ctrl_pdata->te_irq_ready))
 		atomic_inc(&ctrl_pdata->te_irq_ready);
-
-	return IRQ_HANDLED;
-}
-
-/*
- * err_fg_handler() - Interrupt handler for ERR_FG signal.
- * @irq		: irq line number
- * @data	: Pointer to the device structure.
- *
- * This function is called whenever a ERR_FG signal is received from the
- * panel. Must trigger ESD workaround.
- */
-irqreturn_t err_fg_handler(int irq, void *data)
-{
-	unsigned long flag;
-	struct mdss_dsi_ctrl_pdata *ctrl_pdata =
-		(struct mdss_dsi_ctrl_pdata *)data;
-
-	if (ctrl_pdata->need_detection &&
-		ctrl_pdata->power_on_detection == true) {
-		pr_debug("%s: device power on, not ERR_FG trigger\n", __func__);
-		ctrl_pdata->power_on_detection = false;
-	} else {
-		pr_info("%s: Handle ERR_FG\n", __func__);
-		spin_lock_irqsave(&pstatus_data->te.spinlock, flag);
-		if (pstatus_data)
-			pstatus_data->te.err_fg = true;
-		spin_unlock_irqrestore(&pstatus_data->te.spinlock, flag);
-	}
 
 	return IRQ_HANDLED;
 }
@@ -203,10 +125,6 @@ static int fb_event_callback(struct notifier_block *self,
 		return NOTIFY_BAD;
 	}
 
-	/* handle only mdss fb device */
-	if (strncmp("mdssfb", evdata->info->fix.id, 6))
-		return NOTIFY_DONE;
-
 	mfd = evdata->info->par;
 	ctrl_pdata = container_of(dev_get_platdata(&mfd->pdev->dev),
 				struct mdss_dsi_ctrl_pdata, panel_data);
@@ -217,11 +135,13 @@ static int fb_event_callback(struct notifier_block *self,
 
 	pinfo = &ctrl_pdata->panel_data.panel_info;
 
-	if ((!(pinfo->esd_check_enabled) &&
-			dsi_status_disable) ||
-			(dsi_status_disable == DSI_STATUS_CHECK_DISABLE)) {
-		pr_debug("ESD check is disabled.\n");
-		cancel_delayed_work(&pdata->check_status);
+	if (!(pinfo->esd_check_enabled)) {
+		pr_debug("ESD check is not enaled in panel dtsi\n");
+		return NOTIFY_DONE;
+	}
+
+	if (dsi_status_disable) {
+		pr_debug("%s: DSI status disabled\n", __func__);
 		return NOTIFY_DONE;
 	}
 
@@ -234,9 +154,6 @@ static int fb_event_callback(struct notifier_block *self,
 
 		switch (*blank) {
 		case FB_BLANK_UNBLANK:
-			pdata->te.irq = gpio_to_irq(ctrl_pdata->disp_te_gpio);
-			pdata->te.ts_last_check =
-				pdata->te.ts_vsync = jiffies;
 			schedule_delayed_work(&pdata->check_status,
 				msecs_to_jiffies(interval));
 			break;
@@ -308,12 +225,6 @@ int __init mdss_dsi_status_init(void)
 		kfree(pstatus_data);
 		return -EPERM;
 	}
-
-	pstatus_data->te.irq = -1;
-	pstatus_data->te.irq_enabled = false;
-	pstatus_data->te.ts_vsync =
-		pstatus_data->te.ts_last_check = jiffies;
-	spin_lock_init(&pstatus_data->te.spinlock);
 
 	pr_info("%s: DSI status check interval:%d\n", __func__,	interval);
 

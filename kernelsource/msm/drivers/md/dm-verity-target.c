@@ -25,6 +25,7 @@
 #define DM_VERITY_ENV_LENGTH		42
 #define DM_VERITY_ENV_VAR_NAME		"DM_VERITY_ERR_BLOCK_NR"
 
+#define DM_VERITY_MEMPOOL_SIZE		4
 #define DM_VERITY_DEFAULT_PREFETCH_SIZE	262144
 
 #define DM_VERITY_MAX_CORRUPTED_ERRS	100
@@ -286,7 +287,7 @@ static int verity_verify_level(struct dm_verity *v, struct dm_verity_io *io,
 			aux->hash_verified = 1;
 		else if (verity_fec_decode(v, io,
 					   DM_VERITY_BLOCK_TYPE_METADATA,
-					   hash_block, data, NULL) == 0)
+					   hash_block, data, 0, 0) == 0)
 			aux->hash_verified = 1;
 		else if (verity_handle_err(v,
 					   DM_VERITY_BLOCK_TYPE_METADATA,
@@ -334,6 +335,7 @@ int verity_hash_for_block(struct dm_verity *v, struct dm_verity_io *io,
 		if (unlikely(r))
 			goto out;
 	}
+
 out:
 	if (!r && v->zero_digest)
 		*is_zero = !memcmp(v->zero_digest, digest, v->digest_size);
@@ -344,37 +346,44 @@ out:
 }
 
 /*
- * Calls function process for 1 << v->data_dev_block_bits bytes in the bio_vec
- * starting from iter.
+ * Calls function process for 1 << v->data_dev_block_bits bytes in io->io_vec
+ * starting from (vector, offset).
  */
 int verity_for_bv_block(struct dm_verity *v, struct dm_verity_io *io,
-			struct bvec_iter *iter,
+			unsigned *vector, unsigned *offset,
 			int (*process)(struct dm_verity *v,
-				       struct dm_verity_io *io, u8 *data,
-				       size_t len))
+				       struct dm_verity_io *io,
+				       u8 *data, size_t len))
 {
 	unsigned todo = 1 << v->data_dev_block_bits;
-	struct bio *bio = dm_bio_from_per_bio_data(io, v->ti->per_bio_data_size);
 
 	do {
 		int r;
+		struct bio_vec *bv;
 		u8 *page;
 		unsigned len;
-		struct bio_vec bv = bio_iter_iovec(bio, *iter);
 
-		page = kmap_atomic(bv.bv_page);
-		len = bv.bv_len;
+		BUG_ON(*vector >= io->io_vec_size);
+		bv = &io->io_vec[*vector];
+		page = kmap_atomic(bv->bv_page);
+		len = bv->bv_len - *offset;
 
 		if (likely(len >= todo))
 			len = todo;
 
-		r = process(v, io, page + bv.bv_offset, len);
+		r = process(v, io, page + bv->bv_offset + *offset, len);
 		kunmap_atomic(page);
 
 		if (r < 0)
 			return r;
 
-		bio_advance_iter(bio, iter, len);
+		*offset += len;
+
+		if (likely(*offset == bv->bv_len)) {
+			*offset = 0;
+			(*vector)++;
+		}
+
 		todo -= len;
 	} while (todo);
 
@@ -401,8 +410,9 @@ static int verity_verify_io(struct dm_verity_io *io)
 {
 	bool is_zero;
 	struct dm_verity *v = io->v;
-	struct bvec_iter start;
 	unsigned b;
+	unsigned vector = 0, offset = 0;
+	unsigned start_vector, start_offset;
 
 	for (b = 0; b < io->n_blocks; b++) {
 		int r;
@@ -419,7 +429,7 @@ static int verity_verify_io(struct dm_verity_io *io)
 			 * If we expect a zero block, don't validate, just
 			 * return zeros.
 			 */
-			r = verity_for_bv_block(v, io, &io->iter,
+			r = verity_for_bv_block(v, io, &vector, &offset,
 						verity_bv_zero);
 			if (unlikely(r < 0))
 				return r;
@@ -431,8 +441,11 @@ static int verity_verify_io(struct dm_verity_io *io)
 		if (unlikely(r < 0))
 			return r;
 
-		start = io->iter;
-		r = verity_for_bv_block(v, io, &io->iter, verity_bv_hash_update);
+		start_vector = vector;
+		start_offset = offset;
+
+		r = verity_for_bv_block(v, io, &vector, &offset,
+					verity_bv_hash_update);
 		if (unlikely(r < 0))
 			return r;
 
@@ -444,12 +457,14 @@ static int verity_verify_io(struct dm_verity_io *io)
 				  verity_io_want_digest(v, io), v->digest_size) == 0))
 			continue;
 		else if (verity_fec_decode(v, io, DM_VERITY_BLOCK_TYPE_DATA,
-					   io->block + b, NULL, &start) == 0)
+					   io->block + b, NULL, start_vector, start_offset) == 0)
 			continue;
 		else if (verity_handle_err(v, DM_VERITY_BLOCK_TYPE_DATA,
 					   io->block + b))
 			return -EIO;
 	}
+	BUG_ON(vector != io->io_vec_size);
+	BUG_ON(offset);
 
 	return 0;
 }
@@ -465,9 +480,12 @@ static void verity_finish_io(struct dm_verity_io *io, int error)
 	bio->bi_end_io = io->orig_bi_end_io;
 	bio->bi_private = io->orig_bi_private;
 
-	verity_fec_finish_io(io);
+	if (io->io_vec != io->io_vec_inline)
+		mempool_free(io->io_vec, v->vec_mempool);
 
-	bio_endio_nodec(bio, error);
+	verity_fec_finish_io(io, error);
+
+	bio_endio(bio, error);
 }
 
 static void verity_work(struct work_struct *w)
@@ -551,15 +569,15 @@ static void verity_submit_prefetch(struct dm_verity *v, struct dm_verity_io *io)
  * Bio map function. It allocates dm_verity_io structure and bio vector and
  * fills them. Then it issues prefetches and the I/O.
  */
-int verity_map(struct dm_target *ti, struct bio *bio)
+static int verity_map(struct dm_target *ti, struct bio *bio)
 {
 	struct dm_verity *v = ti->private;
 	struct dm_verity_io *io;
 
 	bio->bi_bdev = v->data_dev->bdev;
-	bio->bi_iter.bi_sector = verity_map_sector(v, bio->bi_iter.bi_sector);
+	bio->bi_sector = verity_map_sector(v, bio->bi_sector);
 
-	if (((unsigned)bio->bi_iter.bi_sector | bio_sectors(bio)) &
+	if (((unsigned)bio->bi_sector | bio_sectors(bio)) &
 	    ((1 << (v->data_dev_block_bits - SECTOR_SHIFT)) - 1)) {
 		DMERR_LIMIT("unaligned io");
 		return -EIO;
@@ -578,12 +596,18 @@ int verity_map(struct dm_target *ti, struct bio *bio)
 	io->v = v;
 	io->orig_bi_end_io = bio->bi_end_io;
 	io->orig_bi_private = bio->bi_private;
-	io->block = bio->bi_iter.bi_sector >> (v->data_dev_block_bits - SECTOR_SHIFT);
-	io->n_blocks = bio->bi_iter.bi_size >> v->data_dev_block_bits;
+	io->block = bio->bi_sector >> (v->data_dev_block_bits - SECTOR_SHIFT);
+	io->n_blocks = bio->bi_size >> v->data_dev_block_bits;
 
 	bio->bi_end_io = verity_end_io;
 	bio->bi_private = io;
-	io->iter = bio->bi_iter;
+	io->io_vec_size = bio_segments(bio);
+	if (io->io_vec_size < DM_VERITY_IO_VEC_INLINE)
+		io->io_vec = io->io_vec_inline;
+	else
+		io->io_vec = mempool_alloc(v->vec_mempool, GFP_NOIO);
+	memcpy(io->io_vec, bio_iovec(bio),
+	       io->io_vec_size * sizeof(struct bio_vec));
 
 	verity_fec_init_io(io);
 
@@ -597,7 +621,7 @@ int verity_map(struct dm_target *ti, struct bio *bio)
 /*
  * Status: V (valid) or C (corruption found)
  */
-void verity_status(struct dm_target *ti, status_type_t type,
+static void verity_status(struct dm_target *ti, status_type_t type,
 			  unsigned status_flags, char *result, unsigned maxlen)
 {
 	struct dm_verity *v = ti->private;
@@ -657,7 +681,7 @@ void verity_status(struct dm_target *ti, status_type_t type,
 	}
 }
 
-int verity_ioctl(struct dm_target *ti, unsigned cmd,
+static int verity_ioctl(struct dm_target *ti, unsigned cmd,
 			unsigned long arg)
 {
 	struct dm_verity *v = ti->private;
@@ -671,7 +695,7 @@ int verity_ioctl(struct dm_target *ti, unsigned cmd,
 				     cmd, arg);
 }
 
-int verity_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+static int verity_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 			struct bio_vec *biovec, int max_size)
 {
 	struct dm_verity *v = ti->private;
@@ -686,7 +710,7 @@ int verity_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
-int verity_iterate_devices(struct dm_target *ti,
+static int verity_iterate_devices(struct dm_target *ti,
 				  iterate_devices_callout_fn fn, void *data)
 {
 	struct dm_verity *v = ti->private;
@@ -694,7 +718,7 @@ int verity_iterate_devices(struct dm_target *ti,
 	return fn(ti, v->data_dev, v->data_start, ti->len, data);
 }
 
-void verity_io_hints(struct dm_target *ti, struct queue_limits *limits)
+static void verity_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct dm_verity *v = ti->private;
 
@@ -707,12 +731,15 @@ void verity_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	blk_limits_io_min(limits, limits->logical_block_size);
 }
 
-void verity_dtr(struct dm_target *ti)
+static void verity_dtr(struct dm_target *ti)
 {
 	struct dm_verity *v = ti->private;
 
 	if (v->verify_wq)
 		destroy_workqueue(v->verify_wq);
+
+	if (v->vec_mempool)
+		mempool_destroy(v->vec_mempool);
 
 	if (v->bufio)
 		dm_bufio_client_destroy(v->bufio);
@@ -834,7 +861,7 @@ static int verity_parse_opt_args(struct dm_arg_set *as, struct dm_verity *v)
  *	<digest>
  *	<salt>		Hex string or "-" if no salt.
  */
-int verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
+static int verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
 	struct dm_verity *v;
 	struct dm_arg_set as;
@@ -1045,6 +1072,14 @@ int verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 	}
 
+	v->vec_mempool = mempool_create_kmalloc_pool(DM_VERITY_MEMPOOL_SIZE,
+					BIO_MAX_PAGES * sizeof(struct bio_vec));
+	if (!v->vec_mempool) {
+		ti->error = "Cannot allocate vector mempool";
+		r = -ENOMEM;
+		goto bad;
+	}
+
 	/* WQ_UNBOUND greatly improves performance when running on ramdisk */
 	v->verify_wq = alloc_workqueue("kverityd", WQ_HIGHPRI | WQ_MEM_RECLAIM | WQ_UNBOUND, num_online_cpus());
 	if (!v->verify_wq) {
@@ -1073,7 +1108,7 @@ bad:
 
 static struct target_type verity_target = {
 	.name		= "verity",
-	.version	= {1, 3, 0},
+	.version	= {1, 2, 0},
 	.module		= THIS_MODULE,
 	.ctr		= verity_ctr,
 	.dtr		= verity_dtr,

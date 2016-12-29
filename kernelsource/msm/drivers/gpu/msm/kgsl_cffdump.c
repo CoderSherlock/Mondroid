@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -71,6 +71,8 @@ struct cff_op_poll_reg {
 struct cff_op_wait_irq {
 	unsigned char op;
 } __packed;
+
+#define CFF_OP_RMW              0x0000000a
 
 struct cff_op_write_mem {
 	unsigned char op;
@@ -406,7 +408,7 @@ void kgsl_cffdump_user_event(struct kgsl_device *device,
 
 
 void kgsl_cffdump_memcpy(struct kgsl_device *device,
-		uint64_t gpuaddr, unsigned int *ptr, uint64_t sizebytes)
+		unsigned int gpuaddr, unsigned int *ptr, size_t sizebytes)
 {
 	int i;
 
@@ -418,47 +420,47 @@ void kgsl_cffdump_memcpy(struct kgsl_device *device,
 }
 
 void kgsl_cffdump_syncmem(struct kgsl_device *device,
-		struct kgsl_mem_entry *entry, uint64_t offset,
-		uint64_t sizebytes, bool clean_cache)
+			  struct kgsl_memdesc *memdesc, uint gpuaddr,
+			  size_t sizebytes, bool clean_cache)
 {
-	void *src;
+	unsigned int *src;
 
-	if (!device || device->cff_dump_enable || !entry)
+	if (!device || device->cff_dump_enable)
 		return;
 
-	if (sizebytes == 0)
-		return;
-
-	if ((offset >= entry->memdesc.size) ||
-		(entry->memdesc.size - len) > offset)
+	if (!memdesc)
 		return;
 
 	total_syncmem += sizebytes;
 
-	src = kgsl_memdesc_map(&entry->memdesc);
-	if (src == NULL) {
+	src = kgsl_gpuaddr_to_vaddr(memdesc, gpuaddr);
+	if (memdesc->hostptr == NULL) {
 		KGSL_CORE_ERR(
-			"cffdump: no kernel mapping for GPU address 0x%llX\n",
+			"cffdump: no kernel mapping for GPU address 0x%08X\n",
 			gpuaddr);
 		return;
 	}
 
 	if (clean_cache) {
-		/* Makes sure that the region is freshly fetched */
+		/* Ensure that this memory region is not read from the
+		 * cache but fetched fresh */
+
 		mb();
 
-		kgsl_cache_range_op(entry->memdesc,
-			offset, sizebytes, KGSL_CACHE_OP_INV);
+		kgsl_cache_range_op((struct kgsl_memdesc *)memdesc,
+				gpuaddr - memdesc->gpuaddr,
+				sizebytes,
+				KGSL_CACHE_OP_INV);
 	}
 
-	kgsl_cffdump_memcpy(device, entry->memdesc.gpuaddr + offset,
-			src + offset, sizebytes);
+	kgsl_cffdump_memcpy(device, gpuaddr, src, sizebytes);
 
-	kgsl_memdesc_unmap(&entry->memdesc);
+	/* Unmap memory since kgsl_gpuaddr_to_vaddr was called */
+	kgsl_memdesc_unmap(memdesc);
 }
 
 void kgsl_cffdump_memset(struct kgsl_device *device,
-		uint64_t gpuaddr, unsigned char ch, uint64_t sizebytes)
+		unsigned int gpuaddr, unsigned char ch, size_t sizebytes)
 {
 	int i;
 
@@ -665,7 +667,7 @@ EXPORT_SYMBOL(kgsl_cff_dump_enable_get);
  */
 static int kgsl_cffdump_capture_adreno_ib_cff(struct kgsl_device *device,
 				struct kgsl_process_private *process,
-				uint64_t gpuaddr, uint64_t dwords)
+				unsigned int gpuaddr, unsigned int dwords)
 {
 	int ret;
 	struct adreno_ib_object_list *ib_obj_list;
@@ -680,15 +682,15 @@ static int kgsl_cffdump_capture_adreno_ib_cff(struct kgsl_device *device,
 
 	if (ret) {
 		KGSL_DRV_ERR(device,
-		"Fail to create object list for IB 0x%016llX, size(dwords) 0x%llX\n",
+		"Fail to create object list for IB %x, size(dwords) %x\n",
 		gpuaddr, dwords);
 		return ret;
 	}
 
 	for (i = 0; i < ib_obj_list->num_objs; i++) {
 		ib_obj = &(ib_obj_list->obj_list[i]);
-		kgsl_cffdump_syncmem(device, ib_obj->entry, 0, ib_obj->size,
-			false);
+		kgsl_cffdump_syncmem(device, &(ib_obj->entry->memdesc),
+					ib_obj->gpuaddr, ib_obj->size, false);
 	}
 	adreno_ib_destroy_obj_list(ib_obj_list);
 	return 0;
@@ -716,11 +718,12 @@ int kgsl_cffdump_capture_ib_desc(struct kgsl_device *device,
 	list_for_each_entry(ib, &cmdbatch->cmdlist, node) {
 		ret = kgsl_cffdump_capture_adreno_ib_cff(
 			device, context->proc_priv, ib->gpuaddr,
-			ib->size >> 2);
+			ib->sizedwords);
 		if (ret) {
 			KGSL_DRV_ERR(device,
-			"Fail cff capture, IB 0x%016llX, size 0x%llX\n",
-			ib->gpuaddr, ib->size);
+			"Fail cff capture, IB %lx, size %zx\n",
+			ib->gpuaddr,
+			ib->sizedwords << 2);
 			break;
 		}
 	}

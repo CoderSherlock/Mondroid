@@ -12,6 +12,7 @@
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/qcom_iommu.h>
 
 #include "msm_isp32.h"
 #include "msm_isp_util.h"
@@ -20,11 +21,6 @@
 #include "msm_isp.h"
 #include "msm.h"
 #include "msm_camera_io_util.h"
-
-static const struct platform_device_id msm_vfe32_dev_id[] = {
-	{"msm_vfe32", (kernel_ulong_t) &vfe32_hw_info},
-	{}
-};
 
 #define VFE32_BURST_LEN 2
 #define VFE32_UB_SIZE 1024
@@ -36,7 +32,7 @@ static const struct platform_device_id msm_vfe32_dev_id[] = {
 #define VFE32_XBAR_BASE(idx) (0x40 + 0x4 * (idx / 4))
 #define VFE32_XBAR_SHIFT(idx) ((idx % 4) * 8)
 #define VFE32_PING_PONG_BASE(wm, ping_pong) \
-	(VFE32_WM_BASE(wm) + 0x4 * (1 + ((~ping_pong) & 0x1)))
+	(VFE32_WM_BASE(wm) + 0x4 * (1 + (~(ping_pong >> wm) & 0x1)))
 
 static uint8_t stats_pingpong_offset_map[] = {
 	7, 8, 9, 10, 11, 12, 13};
@@ -280,8 +276,7 @@ static int msm_vfe32_init_hardware(struct vfe_device *vfe_dev)
 		pr_err("%s: vfe ioremap failed\n", __func__);
 		goto vfe_remap_failed;
 	}
-	vfe_dev->common_data->dual_vfe_res->vfe_base[vfe_dev->pdev->id] =
-		vfe_dev->vfe_base;
+	vfe_dev->dual_vfe_res->vfe_base[vfe_dev->pdev->id] = vfe_dev->vfe_base;
 
 	vfe_dev->vfe_vbif_base = ioremap(vfe_dev->vfe_vbif_mem->start,
 		resource_size(vfe_dev->vfe_vbif_mem));
@@ -291,6 +286,7 @@ static int msm_vfe32_init_hardware(struct vfe_device *vfe_dev)
 		goto vbif_remap_failed;
 	}
 
+	tasklet_enable(&vfe_dev->vfe_tasklet);
 	rc = request_irq(vfe_dev->vfe_irq->start, msm_isp_process_irq,
 					 IRQF_TRIGGER_RISING, "vfe", vfe_dev);
 	if (rc < 0) {
@@ -300,6 +296,7 @@ static int msm_vfe32_init_hardware(struct vfe_device *vfe_dev)
 
 	return rc;
 irq_req_failed:
+	tasklet_disable(&vfe_dev->vfe_tasklet);
 	iounmap(vfe_dev->vfe_vbif_base);
 	vfe_dev->vfe_vbif_base = NULL;
 vbif_remap_failed:
@@ -326,14 +323,14 @@ bus_scale_register_failed:
 
 static void msm_vfe32_release_hardware(struct vfe_device *vfe_dev)
 {
-	msm_camera_io_w_mb(0x0, vfe_dev->vfe_base + 0x1C);
-	msm_camera_io_w_mb(0x0, vfe_dev->vfe_base + 0x20);
-	disable_irq(vfe_dev->vfe_irq->start);
 	free_irq(vfe_dev->vfe_irq->start, vfe_dev);
-	tasklet_kill(&vfe_dev->vfe_tasklet);
+	tasklet_disable(&vfe_dev->vfe_tasklet);
 	msm_isp_flush_tasklet(vfe_dev);
 	iounmap(vfe_dev->vfe_vbif_base);
 	vfe_dev->vfe_vbif_base = NULL;
+	vfe_dev->dual_vfe_res->vfe_base[vfe_dev->pdev->id] = NULL;
+	iounmap(vfe_dev->vfe_base);
+	vfe_dev->vfe_base = NULL;
 	if (vfe_dev->vfe_clk_idx == 1)
 		msm_cam_clk_enable(&vfe_dev->pdev->dev,
 				msm_vfe32_1_clk_info, vfe_dev->vfe_clk,
@@ -342,9 +339,6 @@ static void msm_vfe32_release_hardware(struct vfe_device *vfe_dev)
 		msm_cam_clk_enable(&vfe_dev->pdev->dev,
 				msm_vfe32_2_clk_info, vfe_dev->vfe_clk,
 				ARRAY_SIZE(msm_vfe32_2_clk_info), 0);
-	vfe_dev->common_data->dual_vfe_res->vfe_base[vfe_dev->pdev->id] = NULL;
-	iounmap(vfe_dev->vfe_base);
-	vfe_dev->vfe_base = NULL;
 	kfree(vfe_dev->vfe_clk);
 	regulator_disable(vfe_dev->fs_vfe);
 	msm_isp_deinit_bandwidth_mgr(ISP_VFE0 + vfe_dev->pdev->id);
@@ -407,6 +401,12 @@ static void msm_vfe32_process_camif_irq(struct vfe_device *vfe_dev,
 {
 	if (!(irq_status0 & 0x1F))
 		return;
+
+	if (irq_status0 & 0x1)
+		vfe_dev->axi_data.src_info[VFE_PIX_0].camif_sof_frame_id++;
+
+	if (vfe_dev->axi_data.src_info[VFE_PIX_0].camif_sof_frame_id == 0)
+		vfe_dev->axi_data.src_info[VFE_PIX_0].camif_sof_frame_id = 1;
 
 	if (irq_status0 & BIT(0)) {
 		ISP_DBG("%s: SOF IRQ\n", __func__);
@@ -484,9 +484,8 @@ static void msm_vfe32_get_overflow_mask(uint32_t *overflow_mask)
 	*overflow_mask = 0x0;
 }
 
-static int msm_vfe32_process_error_status(struct vfe_device *vfe_dev)
+static void msm_vfe32_process_error_status(struct vfe_device *vfe_dev)
 {
-	int ret = 0;
 	uint32_t error_status1 = vfe_dev->error_info.error_mask1;
 
 	if (error_status1 & BIT(0))
@@ -566,8 +565,6 @@ static int msm_vfe32_process_error_status(struct vfe_device *vfe_dev)
 	}
 	if (error_status1 & BIT(22))
 		pr_err("%s: axi error\n", __func__);
-
-	return ret;
 }
 
 static void msm_vfe32_read_irq_status(struct vfe_device *vfe_dev,
@@ -644,8 +641,7 @@ static void msm_vfe32_reg_update(struct vfe_device *vfe_dev,
 {
 	if (vfe_dev->is_split && vfe_dev->pdev->id == ISP_VFE1) {
 		msm_camera_io_w_mb(0xF,
-			vfe_dev->common_data->dual_vfe_res->vfe_base[ISP_VFE0]
-			+ 0x260);
+			vfe_dev->dual_vfe_res->vfe_base[ISP_VFE0] + 0x260);
 		msm_camera_io_w_mb(0xF, vfe_dev->vfe_base + 0x260);
 	} else if (!vfe_dev->is_split) {
 		msm_camera_io_w_mb(0xF, vfe_dev->vfe_base + 0x260);
@@ -679,17 +675,17 @@ static void msm_vfe32_axi_reload_wm(
 	}
 }
 
-static void msm_vfe32_axi_enable_wm(void __iomem *vfe_base,
+static void msm_vfe32_axi_enable_wm(struct vfe_device *vfe_dev,
 	uint8_t wm_idx, uint8_t enable)
 {
 	uint32_t val = msm_camera_io_r(
-	   vfe_base + VFE32_WM_BASE(wm_idx));
+	   vfe_dev->vfe_base + VFE32_WM_BASE(wm_idx));
 	if (enable)
 		val |= 0x1;
 	else
 		val &= ~0x1;
 	msm_camera_io_w_mb(val,
-		vfe_base + VFE32_WM_BASE(wm_idx));
+		vfe_dev->vfe_base + VFE32_WM_BASE(wm_idx));
 }
 
 static void msm_vfe32_axi_cfg_comp_mask(struct vfe_device *vfe_dev,
@@ -749,13 +745,13 @@ static void msm_vfe32_cfg_framedrop(void __iomem *vfe_base,
 	uint32_t framedrop_period)
 {
 	if (stream_info->stream_src == PIX_ENCODER) {
-		msm_camera_io_w(framedrop_period - 1, vfe_base + 0x504);
-		msm_camera_io_w(framedrop_period - 1, vfe_base + 0x508);
+		msm_camera_io_w(framedrop_period, vfe_base + 0x504);
+		msm_camera_io_w(framedrop_period, vfe_base + 0x508);
 		msm_camera_io_w(framedrop_pattern, vfe_base + 0x50C);
 		msm_camera_io_w(framedrop_pattern, vfe_base + 0x510);
 	} else if (stream_info->stream_src == PIX_VIEWFINDER) {
-		msm_camera_io_w(framedrop_period - 1, vfe_base + 0x514);
-		msm_camera_io_w(framedrop_period - 1, vfe_base + 0x518);
+		msm_camera_io_w(framedrop_period, vfe_base + 0x514);
+		msm_camera_io_w(framedrop_period, vfe_base + 0x518);
 		msm_camera_io_w(framedrop_pattern, vfe_base + 0x51C);
 		msm_camera_io_w(framedrop_pattern, vfe_base + 0x520);
 	}
@@ -1161,12 +1157,11 @@ static void msm_vfe32_cfg_axi_ub(struct vfe_device *vfe_dev)
 }
 
 static void msm_vfe32_update_ping_pong_addr(void __iomem *vfe_base,
-	uint8_t wm_idx, uint32_t pingpong_bit, dma_addr_t paddr,
-	int32_t buf_size)
+		uint8_t wm_idx, uint32_t pingpong_status, dma_addr_t paddr)
 {
 	uint32_t paddr32 = (paddr & 0xFFFFFFFF);
 	msm_camera_io_w(paddr32, vfe_base +
-		VFE32_PING_PONG_BASE(wm_idx, pingpong_bit));
+		VFE32_PING_PONG_BASE(wm_idx, pingpong_status));
 }
 
 static int msm_vfe32_axi_halt(struct vfe_device *vfe_dev, uint32_t blocking)
@@ -1448,7 +1443,6 @@ struct msm_vfe_axi_hardware_info msm_vfe32_axi_hw_info = {
 	.num_rdi = 3,
 	.num_rdi_master = 3,
 	.min_wm_ub = 64,
-	.scratch_buf_range = SZ_32M,
 };
 
 static struct msm_vfe_stats_hardware_info msm_vfe32_stats_hw_info = {
@@ -1460,7 +1454,22 @@ static struct msm_vfe_stats_hardware_info msm_vfe32_stats_hw_info = {
 		1 << MSM_ISP_STATS_SKIN | 1 << MSM_ISP_STATS_BHIST,
 	.stats_ping_pong_offset = stats_pingpong_offset_map,
 	.num_stats_type = VFE32_NUM_STATS_TYPE,
-	.num_stats_comp_mask = 0,
+	.num_stats_comp_mask = 1,
+};
+
+static struct v4l2_subdev_core_ops msm_vfe32_subdev_core_ops = {
+	.ioctl = msm_isp_ioctl,
+	.subscribe_event = msm_isp_subscribe_event,
+	.unsubscribe_event = msm_isp_unsubscribe_event,
+};
+
+static struct v4l2_subdev_ops msm_vfe32_subdev_ops = {
+	.core = &msm_vfe32_subdev_core_ops,
+};
+
+static struct v4l2_subdev_internal_ops msm_vfe32_internal_ops = {
+	.open = msm_isp_open_node,
+	.close = msm_isp_close_node,
 };
 
 struct msm_vfe_hardware_info vfe32_hw_info = {
@@ -1539,41 +1548,7 @@ struct msm_vfe_hardware_info vfe32_hw_info = {
 	.dmi_reg_offset = 0x5A0,
 	.axi_hw_info = &msm_vfe32_axi_hw_info,
 	.stats_hw_info = &msm_vfe32_stats_hw_info,
+	.subdev_ops = &msm_vfe32_subdev_ops,
+	.subdev_internal_ops = &msm_vfe32_internal_ops,
 };
 EXPORT_SYMBOL(vfe32_hw_info);
-
-static const struct of_device_id msm_vfe32_dt_match[] = {
-	{
-		.compatible = "qcom,vfe32",
-		.data = &vfe32_hw_info,
-	},
-	{}
-};
-
-MODULE_DEVICE_TABLE(of, msm_vfe32_dt_match);
-
-static struct platform_driver vfe32_driver = {
-	.probe = vfe_hw_probe,
-	.driver = {
-		.name = "msm_vfe32",
-		.owner = THIS_MODULE,
-		.of_match_table = msm_vfe32_dt_match,
-	},
-	.id_table = msm_vfe32_dev_id,
-};
-
-static int __init msm_vfe32_init_module(void)
-{
-	return platform_driver_register(&vfe32_driver);
-}
-
-static void __exit msm_vfe32_exit_module(void)
-{
-	platform_driver_unregister(&vfe32_driver);
-}
-
-module_init(msm_vfe32_init_module);
-module_exit(msm_vfe32_exit_module);
-MODULE_DESCRIPTION("MSM VFE32 driver");
-MODULE_LICENSE("GPL v2");
-

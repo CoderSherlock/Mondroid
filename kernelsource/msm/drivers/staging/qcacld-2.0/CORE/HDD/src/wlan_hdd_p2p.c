@@ -1865,25 +1865,11 @@ void hdd_sendActionCnf( hdd_adapter_t *pAdapter, tANI_BOOLEAN actionSendSuccess 
 
     cfgState->actionFrmState = HDD_IDLE;
 
+    hddLog( LOG1, "Send Action cnf, actionSendSuccess %d", actionSendSuccess);
     if( NULL == cfgState->buf )
     {
         return;
     }
-    if (cfgState->is_go_neg_ack_received) {
-
-        cfgState->is_go_neg_ack_received = 0 ;
-        /* Sometimes its possible that host may receive the ack for GO
-         * negotiation req after sending go negotaition confirmation,
-         * in such case drop the ack received for the go negotiation
-         * request, so that supplicant waits for the confirmation ack
-         * from firmware.
-         */
-        hddLog( LOG1, FL("Drop the pending ack received in cfgState->actionFrmState %d"),
-                cfgState->actionFrmState);
-        return;
-    }
-
-    hddLog( LOG1, "Send Action cnf, actionSendSuccess %d", actionSendSuccess);
 
     /*
      * buf is the same pointer it passed us to send. Since we are sending
@@ -1903,48 +1889,6 @@ void hdd_sendActionCnf( hdd_adapter_t *pAdapter, tANI_BOOLEAN actionSendSuccess 
     cfgState->buf = NULL;
 
     complete(&pAdapter->tx_action_cnf_event);
-}
-
-/**
- * hdd_send_action_cnf_cb - action confirmation callback
- * @session_id: SME session ID
- * @tx_completed: ack status
- *
- * This function invokes hdd_sendActionCnf to update ack status to
- * supplicant.
- */
-void hdd_send_action_cnf_cb(uint32_t session_id, bool tx_completed)
-{
-	v_CONTEXT_t vos_context;
-	hdd_context_t *hdd_ctx;
-	hdd_adapter_t *adapter;
-
-	ENTER();
-
-	/* Get the global VOSS context */
-	vos_context = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
-	if (!vos_context) {
-		hddLog(LOGE, FL("Global VOS context is Null"));
-		return;
-	}
-
-	/* Get the HDD context.*/
-	hdd_ctx = vos_get_context(VOS_MODULE_ID_HDD, vos_context);
-	if (0 != wlan_hdd_validate_context(hdd_ctx))
-		return;
-
-	adapter = hdd_get_adapter_by_sme_session_id(hdd_ctx, session_id);
-	if (NULL == adapter) {
-		hddLog(LOGE, FL("adapter not found"));
-		return;
-	}
-
-	if (WLAN_HDD_ADAPTER_MAGIC != adapter->magic) {
-		hddLog(LOGE, FL("adapter has invalid magic"));
-		return;
-	}
-
-	hdd_sendActionCnf(adapter, tx_completed) ;
 }
 
 /**
@@ -2285,15 +2229,11 @@ struct net_device* __wlan_hdd_add_virtual_intf(
                                          wlan_hdd_get_session_type(type),
                                          name, p2pDeviceAddress.bytes,
                                          VOS_TRUE );
-            if (WLAN_HDD_RX_HANDLE_RPS == pHddCtx->cfg_ini->rxhandle)
-                hdd_dp_util_send_rps_ind(pAdapter);
     }
     else
     {
        pAdapter = hdd_open_adapter( pHddCtx, wlan_hdd_get_session_type(type),
                           name, wlan_hdd_get_intf_addr(pHddCtx), VOS_TRUE );
-       if (WLAN_HDD_RX_HANDLE_RPS == pHddCtx->cfg_ini->rxhandle)
-           hdd_dp_util_send_rps_ind(pAdapter);
     }
 
     if( NULL == pAdapter)
@@ -2622,7 +2562,6 @@ void __hdd_indicate_mgmt_frame(hdd_adapter_t *pAdapter,
                 {
                     hddLog(LOG1, "%s: ACK_PENDING and But received RESP for Action frame ",
                             __func__);
-                    cfgState->is_go_neg_ack_received = 1;
                     hdd_sendActionCnf(pAdapter, TRUE);
                 }
             }

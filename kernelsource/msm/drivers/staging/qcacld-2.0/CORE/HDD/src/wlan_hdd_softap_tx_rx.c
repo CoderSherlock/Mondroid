@@ -144,8 +144,7 @@ void hdd_softap_tx_resume_timer_expired_handler(void *adapter_context)
    }
 
    hddLog(LOG1, FL("Enabling queues"));
-   wlan_hdd_netif_queue_control(pAdapter, WLAN_WAKE_ALL_NETIF_QUEUE,
-                 WLAN_CONTROL_PATH);
+   netif_tx_wake_all_queues(pAdapter->dev);
    return;
 }
 
@@ -181,9 +180,7 @@ void hdd_softap_tx_resume_cb(void *adapter_context,
        }
 
        hddLog(LOG1, FL("Enabling queues"));
-       wlan_hdd_netif_queue_control(pAdapter,
-            WLAN_WAKE_ALL_NETIF_QUEUE,
-            WLAN_DATA_FLOW_CONTROL);
+       netif_tx_wake_all_queues(pAdapter->dev);
        pAdapter->hdd_stats.hddTxRxStats.txflow_unpause_cnt++;
        pAdapter->hdd_stats.hddTxRxStats.is_txflow_paused = FALSE;
 
@@ -192,9 +189,7 @@ void hdd_softap_tx_resume_cb(void *adapter_context,
     else if (VOS_FALSE == tx_resume)  /* Pause TX  */
     {
         hddLog(LOG1, FL("Disabling queues"));
-        wlan_hdd_netif_queue_control(pAdapter,
-            WLAN_STOP_ALL_NETIF_QUEUE,
-            WLAN_DATA_FLOW_CONTROL);
+        netif_tx_stop_all_queues(pAdapter->dev);
         if (VOS_TIMER_STATE_STOPPED ==
             vos_timer_getCurrentState(&pAdapter->tx_flow_control_timer))
         {
@@ -340,8 +335,7 @@ int __hdd_softap_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
                (VOS_TIMER_STATE_STOPPED ==
                 vos_timer_getCurrentState(&pAdapter->tx_flow_control_timer))) {
                hddLog(LOG1, FL("Disabling queues"));
-               wlan_hdd_netif_queue_control(pAdapter, WLAN_STOP_ALL_NETIF_QUEUE,
-                           WLAN_DATA_FLOW_CONTROL);
+               netif_tx_stop_all_queues(dev);
                vos_timer_start(&pAdapter->tx_flow_control_timer,
                                WLAN_SAP_HDD_TX_FLOW_CONTROL_OS_Q_BLOCK_TIME);
                pAdapter->hdd_stats.hddTxRxStats.txflow_timer_cnt++;
@@ -475,11 +469,11 @@ static void __hdd_softap_tx_timeout(struct net_device *dev)
 {
    hdd_adapter_t *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
    hdd_context_t *hdd_ctx;
-   struct netdev_queue *txq;
-   int i = 0;
 
    DPTRACE(adf_dp_trace(NULL, ADF_DP_TRACE_HDD_SOFTAP_TX_TIMEOUT,
                         NULL, 0));
+   VOS_TRACE( VOS_MODULE_ID_HDD_SAP_DATA, VOS_TRACE_LEVEL_ERROR,
+      "%s: Transmission timeout occurred", __func__);
 
    hdd_ctx = WLAN_HDD_GET_CTX(adapter);
    if (hdd_ctx->isLogpInProgress) {
@@ -494,19 +488,6 @@ static void __hdd_softap_tx_timeout(struct net_device *dev)
     * case of disassociation it is ok to ignore this. But if associated, we have
     * do possible recovery here.
     */
-
-    VOS_TRACE(VOS_MODULE_ID_HDD_SAP_DATA, VOS_TRACE_LEVEL_ERROR,
-        "%s: Transmission timeout occurred jiffies %lu trans_start %lu",
-        __func__, jiffies, dev->trans_start);
-
-    for (i = 0; i < NUM_TX_QUEUES; i++) {
-        txq = netdev_get_tx_queue(dev, i);
-        VOS_TRACE(VOS_MODULE_ID_HDD_SAP_DATA,
-             VOS_TRACE_LEVEL_ERROR,
-             "Queue%d status: %d txq->trans_start %lu",
-             i, netif_tx_queue_stopped(txq), txq->trans_start);
-    }
-    wlan_display_tx_timeout_stats(adapter);
 }
 
 /**
@@ -1096,11 +1077,11 @@ VOS_STATUS hdd_softap_RegisterSTA( hdd_adapter_t *pAdapter,
 
    }
 
+   netif_carrier_on(pAdapter->dev);
    //Enable Tx queue
    hddLog(LOG1, FL("Enabling queues"));
-   wlan_hdd_netif_queue_control(pAdapter,
-        WLAN_START_ALL_NETIF_QUEUE_N_CARRIER,
-        WLAN_CONTROL_PATH);
+   netif_tx_start_all_queues(pAdapter->dev);
+
    return( vosStatus );
 }
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -101,8 +101,7 @@ do {									\
 #define TMC_REG_DUMP_VER_OFF		(4)
 #define TMC_REG_DUMP_VER		(1)
 
-#define TMC_ETR_SG_ENT_TO_BLK(phys_pte)	(((phys_addr_t)phys_pte >> 4)	\
-					 << PAGE_SHIFT);
+#define TMC_ETR_SG_ENT_TO_BLK(phys_pte)	((phys_pte >> 4) << PAGE_SHIFT);
 #define TMC_ETR_SG_ENT(phys_pte)	(((phys_pte >> PAGE_SHIFT) << 4) | 0x2);
 #define TMC_ETR_SG_NXT_TBL(phys_pte)	(((phys_pte >> PAGE_SHIFT) << 4) | 0x3);
 #define TMC_ETR_SG_LST_ENT(phys_pte)	(((phys_pte >> PAGE_SHIFT) << 4) | 0x1);
@@ -206,8 +205,6 @@ struct tmc_drvdata {
 	char			*byte_cntr_node;
 	uint32_t		mem_size;
 	bool			sticky_enable;
-	bool			force_reg_dump;
-	bool			dump_reg;
 	bool			sg_enable;
 	enum tmc_etr_mem_type	mem_type;
 	enum tmc_etr_mem_type	memtype;
@@ -217,7 +214,6 @@ struct tmc_drvdata {
 	struct notifier_block	jtag_save_blk;
 };
 
-static void __tmc_reg_dump(struct tmc_drvdata *drvdata);
 static void tmc_wait_for_flush(struct tmc_drvdata *drvdata)
 {
 	int count;
@@ -525,7 +521,8 @@ static void tmc_etr_fill_usb_bam_data(struct tmc_drvdata *drvdata)
 {
 	struct tmc_etr_bam_data *bamdata = drvdata->bamdata;
 
-	get_qdss_bam_connection_info(&bamdata->dest,
+	get_bam2bam_connection_info(usb_bam_get_qdss_idx(0),
+				    &bamdata->dest,
 				    &bamdata->dest_pipe_idx,
 				    &bamdata->src_pipe_idx,
 				    &bamdata->desc_fifo,
@@ -912,11 +909,6 @@ static int tmc_enable(struct tmc_drvdata *drvdata, enum tmc_mode mode)
 			__tmc_etf_enable(drvdata);
 	}
 	drvdata->enable = true;
-	if (drvdata->force_reg_dump) {
-		drvdata->dump_reg = true;
-		__tmc_reg_dump(drvdata);
-		drvdata->dump_reg = false;
-	}
 
 	/*
 	 * sticky_enable prevents users from reading tmc dev node before
@@ -959,9 +951,7 @@ static void __tmc_reg_dump(struct tmc_drvdata *drvdata)
 	char *reg_hdr;
 	uint32_t *reg_buf;
 
-	if (!drvdata->reg_buf)
-		return;
-	else if (!drvdata->aborting && !drvdata->dump_reg)
+	if (!drvdata->reg_buf || !drvdata->aborting)
 		return;
 
 	reg_hdr = drvdata->reg_buf - PAGE_SIZE;
@@ -2345,10 +2335,15 @@ static int tmc_probe(struct platform_device *pdev)
 	struct coresight_cti_data *ctidata;
 	struct coresight_desc *desc;
 
-	pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
-	if (IS_ERR(pdata))
-		return PTR_ERR(pdata);
-	pdev->dev.platform_data = pdata;
+	if (coresight_fuse_access_disabled())
+		return -EPERM;
+
+	if (pdev->dev.of_node) {
+		pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
+		if (IS_ERR(pdata))
+			return PTR_ERR(pdata);
+		pdev->dev.platform_data = pdata;
+	}
 
 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
 	if (!drvdata)
@@ -2384,27 +2379,20 @@ static int tmc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	if (!coresight_authstatus_enabled(drvdata->base)) {
-		clk_disable_unprepare(drvdata->clk);
-		return -EPERM;
-	}
-
-	drvdata->force_reg_dump = of_property_read_bool
-				  (pdev->dev.of_node,
-				  "qcom,force-reg-dump");
-
 	devid = tmc_readl(drvdata, CORESIGHT_DEVID);
 	drvdata->config_type = BMVAL(devid, 6, 7);
 
 	if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
-		ret = of_property_read_u32(pdev->dev.of_node,
-					   "qcom,memory-size",
-					   &drvdata->size);
-		if (ret) {
-			clk_disable_unprepare(drvdata->clk);
-			return ret;
+		if (pdev->dev.of_node) {
+			ret = of_property_read_u32(pdev->dev.of_node,
+						   "qcom,memory-size",
+						   &drvdata->size);
+			if (ret) {
+				clk_disable_unprepare(drvdata->clk);
+				return ret;
+			}
+			drvdata->mem_size = drvdata->size;
 		}
-		drvdata->mem_size = drvdata->size;
 	} else {
 		drvdata->size = tmc_readl(drvdata, TMC_RSZ) * BYTES_PER_WORD;
 	}
@@ -2413,19 +2401,22 @@ static int tmc_probe(struct platform_device *pdev)
 
 	if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
 		drvdata->out_mode = TMC_ETR_OUT_MODE_MEM;
-		drvdata->sg_enable = of_property_read_bool(pdev->dev.of_node,
-							   "qcom,sg-enable");
-
-		if (drvdata->sg_enable)
-			drvdata->memtype = TMC_ETR_MEM_TYPE_SG;
-		else
-			drvdata->memtype = TMC_ETR_MEM_TYPE_CONTIG;
-
-		drvdata->mem_type = drvdata->memtype;
-
-		drvdata->byte_cntr_present = !of_property_read_bool
+		if (pdev->dev.of_node) {
+			drvdata->sg_enable = of_property_read_bool
 					     (pdev->dev.of_node,
-					     "qcom,byte-cntr-absent");
+					     "qcom,sg-enable");
+
+			if (drvdata->sg_enable)
+				drvdata->memtype = TMC_ETR_MEM_TYPE_SG;
+			else
+				drvdata->memtype = TMC_ETR_MEM_TYPE_CONTIG;
+
+			drvdata->mem_type = drvdata->memtype;
+
+			drvdata->byte_cntr_present = !of_property_read_bool
+						     (pdev->dev.of_node,
+						     "qcom,byte-cntr-absent");
+		}
 		ret = tmc_etr_byte_cntr_init(pdev, drvdata);
 		if (ret)
 			goto err0;
@@ -2516,24 +2507,26 @@ static int tmc_probe(struct platform_device *pdev)
 	}
 	count++;
 
-	ctidata = of_get_coresight_cti_data(dev, pdev->dev.of_node);
-	if (IS_ERR(ctidata)) {
-		dev_err(dev, "invalid cti data\n");
-	} else if (ctidata && ctidata->nr_ctis == 2) {
-		drvdata->cti_flush = coresight_cti_get(
-				ctidata->names[0]);
-		if (IS_ERR(drvdata->cti_flush))
-			dev_err(dev, "failed to get flush cti\n");
+	if (pdev->dev.of_node) {
+		ctidata = of_get_coresight_cti_data(dev, pdev->dev.of_node);
+		if (IS_ERR(ctidata)) {
+			dev_err(dev, "invalid cti data\n");
+		} else if (ctidata && ctidata->nr_ctis == 2) {
+			drvdata->cti_flush = coresight_cti_get(
+							ctidata->names[0]);
+			if (IS_ERR(drvdata->cti_flush))
+				dev_err(dev, "failed to get flush cti\n");
 
-		drvdata->cti_reset = coresight_cti_get(
-				ctidata->names[1]);
-		if (IS_ERR(drvdata->cti_reset))
-			dev_err(dev, "failed to get reset cti\n");
-	}
+			drvdata->cti_reset = coresight_cti_get(
+							ctidata->names[1]);
+			if (IS_ERR(drvdata->cti_reset))
+				dev_err(dev, "failed to get reset cti\n");
+		}
 
-	drvdata->notify = of_property_read_bool(pdev->dev.of_node,
+		drvdata->notify = of_property_read_bool(pdev->dev.of_node,
 						"qcom,tmc-flush-powerdown");
 
+	}
 
 	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
 	if (!desc) {

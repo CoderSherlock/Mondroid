@@ -27,8 +27,6 @@
 
 #include <linux/types.h>
 
-#define NL80211_GENL_NAME "nl80211"
-
 /**
  * DOC: Station handling
  *
@@ -126,31 +124,6 @@
  */
 
 /**
- * DOC: packet coalesce support
- *
- * In most cases, host that receives IPv4 and IPv6 multicast/broadcast
- * packets does not do anything with these packets. Therefore the
- * reception of these unwanted packets causes unnecessary processing
- * and power consumption.
- *
- * Packet coalesce feature helps to reduce number of received interrupts
- * to host by buffering these packets in firmware/hardware for some
- * predefined time. Received interrupt will be generated when one of the
- * following events occur.
- * a) Expiration of hardware timer whose expiration time is set to maximum
- * coalescing delay of matching coalesce rule.
- * b) Coalescing buffer in hardware reaches it's limit.
- * c) Packet doesn't match any of the configured coalesce rules.
- *
- * User needs to configure following parameters for creating a coalesce
- * rule.
- * a) Maximum coalescing delay
- * b) List of packet patterns which needs to be matched
- * c) Condition for coalescence. pattern 'match' or 'no match'
- * Multiple such rules can be created.
- */
-
-/**
  * enum nl80211_commands - supported nl80211 commands
  *
  * @NL80211_CMD_UNSPEC: unspecified command to catch errors
@@ -227,11 +200,7 @@
  *	the interface identified by %NL80211_ATTR_IFINDEX.
  * @NL80211_CMD_DEL_STATION: Remove a station identified by %NL80211_ATTR_MAC
  *	or, if no MAC address given, all stations, on the interface identified
- *	by %NL80211_ATTR_IFINDEX. %NL80211_ATTR_MGMT_SUBTYPE and
- *	%NL80211_ATTR_REASON_CODE can optionally be used to specify which type
- *	of disconnection indication should be sent to the station
- *	(Deauthentication or Disassociation frame and reason code for that
- *	frame).
+ *	by %NL80211_ATTR_IFINDEX.
  *
  * @NL80211_CMD_GET_MPATH: Get mesh path attributes for mesh path to
  * 	destination %NL80211_ATTR_MAC on the interface identified by
@@ -290,9 +259,7 @@
  * @NL80211_CMD_GET_SCAN: get scan results
  * @NL80211_CMD_TRIGGER_SCAN: trigger a new scan with the given parameters
  *	%NL80211_ATTR_TX_NO_CCK_RATE is used to decide whether to send the
- *	probe requests at CCK rate or not. %NL80211_ATTR_MAC can be used to
- *	specify a BSSID to scan for; if not included, the wildcard BSSID will
- *	be used.
+ *	probe requests at CCK rate or not.
  * @NL80211_CMD_NEW_SCAN_RESULTS: scan notification (as a reply to
  *	NL80211_CMD_GET_SCAN and on the "scan" multicast group)
  * @NL80211_CMD_SCAN_ABORTED: scan was aborted, for unspecified reasons,
@@ -309,9 +276,8 @@
  *	passed, all channels allowed for the current regulatory domain
  *	are used.  Extra IEs can also be passed from the userspace by
  *	using the %NL80211_ATTR_IE attribute.
- * @NL80211_CMD_STOP_SCHED_SCAN: stop a scheduled scan. Returns -ENOENT if
- *	scheduled scan is not running. The caller may assume that as soon
- *	as the call returns, it is safe to start a new scheduled scan again.
+ * @NL80211_CMD_STOP_SCHED_SCAN: stop a scheduled scan.  Returns -ENOENT
+ *	if scheduled scan is not running.
  * @NL80211_CMD_SCHED_SCAN_RESULTS: indicates that there are scheduled scan
  *	results available.
  * @NL80211_CMD_SCHED_SCAN_STOPPED: indicates that the scheduled scan has
@@ -509,9 +475,6 @@
  *	TX status event pertaining to the TX request.
  *	%NL80211_ATTR_TX_NO_CCK_RATE is used to decide whether to send the
  *	management frames at CCK rate or not in 2GHz band.
- *	%NL80211_ATTR_CSA_C_OFFSETS_TX is an array of offsets to CSA
- *	counters which will be updated to the current value. This attribute
- *	is used during CSA period.
  * @NL80211_CMD_FRAME_WAIT_CANCEL: When an off-channel TX was requested, this
  *	command may be used with the corresponding cookie to cancel the wait
  *	time if it is known that it is no longer necessary.
@@ -601,14 +564,7 @@
  *	operation, %NL80211_ATTR_MAC contains the peer MAC address, and
  *	%NL80211_ATTR_REASON_CODE the reason code to be used (only with
  *	%NL80211_TDLS_TEARDOWN).
- * @NL80211_CMD_TDLS_MGMT: Send a TDLS management frame. The
- *	%NL80211_ATTR_TDLS_ACTION attribute determines the type of frame to be
- *	sent. Public Action codes (802.11-2012 8.1.5.1) will be sent as
- *	802.11 management frames, while TDLS action codes (802.11-2012
- *	8.5.13.1) will be encapsulated and sent as data frames. The currently
- *	supported Public Action code is %WLAN_PUB_ACTION_TDLS_DISCOVER_RES
- *	and the currently supported TDLS actions codes are given in
- *	&enum ieee80211_tdls_actioncode.
+ * @NL80211_CMD_TDLS_MGMT: Send a TDLS management frame.
  *
  * @NL80211_CMD_UNEXPECTED_FRAME: Used by an application controlling an AP
  *	(or GO) interface (i.e. hostapd) to ask for unexpected frames to
@@ -646,15 +602,6 @@
  *	independently of the userspace SME, send this event indicating
  *	%NL80211_ATTR_IFINDEX is now on %NL80211_ATTR_WIPHY_FREQ and the
  *	attributes determining channel width.
- *
- * @NL80211_CMD_CH_SWITCH_STARTED_NOTIFY: Notify that a channel switch
- *      has been started on an interface, regardless of the initiator
- *      (ie. whether it was requested from a remote device or
- *      initiated on our own).  It indicates that
- *      %NL80211_ATTR_IFINDEX will be on %NL80211_ATTR_WIPHY_FREQ
- *      after %NL80211_ATTR_CH_SWITCH_COUNT TBTT's.  The userspace may
- *      decide to react to this indication by requesting other
- *      interfaces to change channel as well.
  *
  * @NL80211_CMD_START_P2P_DEVICE: Start the given P2P Device, identified by
  *	its %NL80211_ATTR_WDEV identifier. It must have been created with
@@ -736,51 +683,6 @@
  *	that attribute is not included, QoS mapping is disabled. Since this
  *	QoS mapping is relevant for IP packets, it is only valid during an
  *	association. This is cleared on disassociation and AP restart.
- *
- * @NL80211_CMD_ADD_TX_TS: Ask the kernel to add a traffic stream for the given
- *	%NL80211_ATTR_TSID and %NL80211_ATTR_MAC with %NL80211_ATTR_USER_PRIO
- *	and %NL80211_ATTR_ADMITTED_TIME parameters.
- *	Note that the action frame handshake with the AP shall be handled by
- *	userspace via the normal management RX/TX framework, this only sets
- *	up the TX TS in the driver/device.
- *	If the admitted time attribute is not added then the request just checks
- *	if a subsequent setup could be successful, the intent is to use this to
- *	avoid setting up a session with the AP when local restrictions would
- *	make that impossible. However, the subsequent "real" setup may still
- *	fail even if the check was successful.
- * @NL80211_CMD_DEL_TX_TS: Remove an existing TS with the %NL80211_ATTR_TSID
- *	and %NL80211_ATTR_MAC parameters. It isn't necessary to call this
- *	before removing a station entry entirely, or before disassociating
- *	or similar, cleanup will happen in the driver/device in this case.
- *
- * @NL80211_CMD_GET_MPP: Get mesh path attributes for mesh proxy path to
- *	destination %NL80211_ATTR_MAC on the interface identified by
- *	%NL80211_ATTR_IFINDEX.
- *
- * @NL80211_CMD_JOIN_OCB: Join the OCB network. The center frequency and
- *	bandwidth of a channel must be given.
- * @NL80211_CMD_LEAVE_OCB: Leave the OCB network -- no special arguments, the
- *	network is determined by the network interface.
- *
- * @NL80211_CMD_TDLS_CHANNEL_SWITCH: Start channel-switching with a TDLS peer,
- *	identified by the %NL80211_ATTR_MAC parameter. A target channel is
- *	provided via %NL80211_ATTR_WIPHY_FREQ and other attributes determining
- *	channel width/type. The target operating class is given via
- *	%NL80211_ATTR_OPER_CLASS.
- *	The driver is responsible for continually initiating channel-switching
- *	operations and returning to the base channel for communication with the
- *	AP.
- * @NL80211_CMD_TDLS_CANCEL_CHANNEL_SWITCH: Stop channel-switching with a TDLS
- *	peer given by %NL80211_ATTR_MAC. Both peers must be on the base channel
- *	when this command completes.
- *
- * @NL80211_CMD_WIPHY_REG_CHANGE: Similar to %NL80211_CMD_REG_CHANGE, but used
- *	as an event to indicate changes for devices with wiphy-specific regdom
- *	management.
- *
- * @NL80211_CMD_ABORT_SCAN: Stop an ongoing scan. Returns -ENOENT if a scan is
- *	not running. The driver indicates the status of the scan through
- *	cfg80211_scan_done().
  *
  * @NL80211_CMD_MAX: highest used command number
  * @__NL80211_CMD_AFTER_LAST: internal use
@@ -953,23 +855,6 @@ enum nl80211_commands {
 
 	NL80211_CMD_SET_QOS_MAP,
 
-	NL80211_CMD_ADD_TX_TS,
-	NL80211_CMD_DEL_TX_TS,
-
-	NL80211_CMD_GET_MPP,
-
-	NL80211_CMD_JOIN_OCB,
-	NL80211_CMD_LEAVE_OCB,
-
-	NL80211_CMD_CH_SWITCH_STARTED_NOTIFY,
-
-	NL80211_CMD_TDLS_CHANNEL_SWITCH,
-	NL80211_CMD_TDLS_CANCEL_CHANNEL_SWITCH,
-
-	NL80211_CMD_WIPHY_REG_CHANGE,
-
-	NL80211_CMD_ABORT_SCAN,
-
 	/* add new commands above here */
 
 	/* used to define NL80211_CMD_MAX below */
@@ -1105,7 +990,7 @@ enum nl80211_commands {
  * 	to query the CRDA to retrieve one regulatory domain. This attribute can
  * 	also be used by userspace to query the kernel for the currently set
  * 	regulatory domain. We chose an alpha2 as that is also used by the
- * 	IEEE-802.11 country information element to identify a country.
+ * 	IEEE-802.11d country information element to identify a country.
  * 	Users can also simply ask the wireless core to set regulatory domain
  * 	to a specific alpha2.
  * @NL80211_ATTR_REG_RULES: a nested array of regulatory domain regulatory
@@ -1605,10 +1490,10 @@ enum nl80211_commands {
  *	operation).
  * @NL80211_ATTR_CSA_IES: Nested set of attributes containing the IE information
  *	for the time while performing a channel switch.
- * @NL80211_ATTR_CSA_C_OFF_BEACON: An array of offsets (u16) to the channel
- *	switch counters in the beacons tail (%NL80211_ATTR_BEACON_TAIL).
- * @NL80211_ATTR_CSA_C_OFF_PRESP: An array of offsets (u16) to the channel
- *	switch counters in the probe response (%NL80211_ATTR_PROBE_RESP).
+ * @NL80211_ATTR_CSA_C_OFF_BEACON: Offset of the channel switch counter
+ *	field in the beacons tail (%NL80211_ATTR_BEACON_TAIL).
+ * @NL80211_ATTR_CSA_C_OFF_PRESP: Offset of the channel switch counter
+ *	field in the probe response (%NL80211_ATTR_PROBE_RESP).
  *
  * @NL80211_ATTR_RXMGMT_FLAGS: flags for nl80211_send_mgmt(), u32.
  *	As specified in the &enum nl80211_rxmgmt_flags.
@@ -1624,15 +1509,6 @@ enum nl80211_commands {
  *	channels and reports radar events to userspace. Userspace is required
  *	to react to radar events, e.g. initiate a channel switch or leave the
  *	IBSS network.
- *
- * @NL80211_ATTR_SUPPORT_5_MHZ: A flag indicating that the device supports
- *	5 MHz channel bandwidth.
- * @NL80211_ATTR_SUPPORT_10_MHZ: A flag indicating that the device supports
- *	10 MHz channel bandwidth.
- *
- * @NL80211_ATTR_OPMODE_NOTIF: Operating mode field from Operating Mode
- *	Notification Element based on association request when used with
- *	%NL80211_CMD_NEW_STATION; u8 attribute.
  *
  * @NL80211_ATTR_VENDOR_ID: The vendor ID, either a 24-bit OUI or, if
  *	%NL80211_VENDOR_ID_IS_LINUX is set, a special Linux ID (not used yet)
@@ -1656,53 +1532,8 @@ enum nl80211_commands {
  *	advertise values that cannot always be met. In such cases, an attempt
  *	to add a new station entry with @NL80211_CMD_NEW_STATION may fail.
  *
- * @NL80211_ATTR_CSA_C_OFFSETS_TX: An array of csa counter offsets (u16) which
- *	should be updated when the frame is transmitted.
- * @NL80211_ATTR_MAX_CSA_COUNTERS: U8 attribute used to advertise the maximum
- *	supported number of csa counters.
- *
  * @NL80211_ATTR_TDLS_PEER_CAPABILITY: flags for TDLS peer capabilities, u32.
  *	As specified in the &enum nl80211_tdls_peer_capability.
- *
- * @NL80211_ATTR_IFACE_SOCKET_OWNER: flag attribute, if set during interface
- *	creation then the new interface will be owned by the netlink socket
- *	that created it and will be destroyed when the socket is closed.
- *	If set during scheduled scan start then the new scan req will be
- *	owned by the netlink socket that created it and the scheduled scan will
- *	be stopped when the socket is closed.
- *
- * @NL80211_ATTR_TDLS_INITIATOR: flag attribute indicating the current end is
- *	the TDLS link initiator.
- *
- * @NL80211_ATTR_USE_RRM: flag for indicating whether the current connection
- *	shall support Radio Resource Measurements (11k). This attribute can be
- *	used with %NL80211_CMD_ASSOCIATE and %NL80211_CMD_CONNECT requests.
- *	User space applications are expected to use this flag only if the
- *	underlying device supports these minimal RRM features:
- *		%NL80211_FEATURE_DS_PARAM_SET_IE_IN_PROBES,
- *		%NL80211_FEATURE_QUIET,
- *	If this flag is used, driver must add the Power Capabilities IE to the
- *	association request. In addition, it must also set the RRM capability
- *	flag in the association request's Capability Info field.
- *
- * @NL80211_ATTR_WIPHY_DYN_ACK: flag attribute used to enable ACK timeout
- *	estimation algorithm (dynack). In order to activate dynack
- *	%NL80211_FEATURE_ACKTO_ESTIMATION feature flag must be set by lower
- *	drivers to indicate dynack capability. Dynack is automatically disabled
- *	setting valid value for coverage class.
- *
- * @NL80211_ATTR_TSID: a TSID value (u8 attribute)
- * @NL80211_ATTR_USER_PRIO: user priority value (u8 attribute)
- * @NL80211_ATTR_ADMITTED_TIME: admitted time in units of 32 microseconds
- *	(per second) (u16 attribute)
- *
- * @NL80211_ATTR_SMPS_MODE: SMPS mode to use (ap mode). see
- *	&enum nl80211_smps_mode.
- *
- * @NL80211_ATTR_PBSS: flag attribute. If set it means operate
- *	in a PBSS. Specified in %NL80211_CMD_CONNECT to request
- *	connecting to a PCP, and in %NL80211_CMD_START_AP to start
- *	a PCP instead of AP. Relevant for DMG networks only.
  *
  * @NL80211_ATTR_MAX: highest attribute number currently defined
  * @__NL80211_ATTR_AFTER_LAST: internal use
@@ -2028,6 +1859,7 @@ enum nl80211_attrs {
 	NL80211_ATTR_VENDOR_ID,
 	NL80211_ATTR_VENDOR_SUBCMD,
 	NL80211_ATTR_VENDOR_DATA,
+
 	NL80211_ATTR_VENDOR_EVENTS,
 
 	NL80211_ATTR_QOS_MAP,
@@ -2038,46 +1870,6 @@ enum nl80211_attrs {
 	NL80211_ATTR_MAX_AP_ASSOC_STA,
 
 	NL80211_ATTR_TDLS_PEER_CAPABILITY,
-
-	NL80211_ATTR_IFACE_SOCKET_OWNER,
-
-	NL80211_ATTR_CSA_C_OFFSETS_TX,
-	NL80211_ATTR_MAX_CSA_COUNTERS,
-
-	NL80211_ATTR_TDLS_INITIATOR,
-
-	NL80211_ATTR_USE_RRM,
-
-	NL80211_ATTR_WIPHY_DYN_ACK,
-
-	NL80211_ATTR_TSID,
-	NL80211_ATTR_USER_PRIO,
-	NL80211_ATTR_ADMITTED_TIME,
-
-	NL80211_ATTR_SMPS_MODE,
-
-	NL80211_ATTR_OPER_CLASS,
-
-	NL80211_ATTR_MAC_MASK,
-
-	NL80211_ATTR_WIPHY_SELF_MANAGED_REG,
-
-	NL80211_ATTR_EXT_FEATURES,
-
-	NL80211_ATTR_SURVEY_RADIO_STATS,
-
-	NL80211_ATTR_NETNS_FD,
-
-	NL80211_ATTR_SCHED_SCAN_DELAY,
-
-	NL80211_ATTR_REG_INDOOR,
-
-	NL80211_ATTR_MAX_NUM_SCHED_SCAN_PLANS,
-	NL80211_ATTR_MAX_SCAN_PLAN_INTERVAL,
-	NL80211_ATTR_MAX_SCAN_PLAN_ITERATIONS,
-	NL80211_ATTR_SCHED_SCAN_PLANS,
-
-	NL80211_ATTR_PBSS,
 
 	/* add attributes here, update the policy in nl80211.c */
 
@@ -2343,12 +2135,6 @@ enum nl80211_sta_bss_param {
  * @NL80211_STA_INFO_PEER_PM: peer mesh STA link-specific power mode
  * @NL80211_STA_INFO_NONPEER_PM: neighbor mesh STA power save mode towards
  *	non-peer STA
- * @NL80211_STA_INFO_CHAIN_SIGNAL: per-chain signal strength of last PPDU
- *	Contains a nested array of signal strength attributes (u8, dBm)
- * @NL80211_STA_INFO_CHAIN_SIGNAL_AVG: per-chain signal strength average
- *	Same format as NL80211_STA_INFO_CHAIN_SIGNAL.
- * @NL80211_STA_EXPECTED_THROUGHPUT: expected throughput considering also the
- *	802.11 header (u32, kbps)
  * @__NL80211_STA_INFO_AFTER_LAST: internal
  * @NL80211_STA_INFO_MAX: highest possible station info attribute
  */
@@ -2378,9 +2164,6 @@ enum nl80211_sta_info {
 	NL80211_STA_INFO_NONPEER_PM,
 	NL80211_STA_INFO_RX_BYTES64,
 	NL80211_STA_INFO_TX_BYTES64,
-	NL80211_STA_INFO_CHAIN_SIGNAL,
-	NL80211_STA_INFO_CHAIN_SIGNAL_AVG,
-	NL80211_STA_INFO_EXPECTED_THROUGHPUT,
 
 	/* keep last */
 	__NL80211_STA_INFO_AFTER_LAST,
@@ -2482,9 +2265,10 @@ enum nl80211_band_attr {
  * @NL80211_FREQUENCY_ATTR_FREQ: Frequency in MHz
  * @NL80211_FREQUENCY_ATTR_DISABLED: Channel is disabled in current
  *	regulatory domain.
- * @NL80211_FREQUENCY_ATTR_NO_IR: no mechanisms that initiate radiation
- * 	are permitted on this channel, this includes sending probe
- * 	requests, or modes of operation that require beaconing.
+ * @NL80211_FREQUENCY_ATTR_PASSIVE_SCAN: Only passive scanning is
+ *	permitted on this channel in current regulatory domain.
+ * @NL80211_FREQUENCY_ATTR_NO_IBSS: IBSS networks are not permitted
+ *	on this channel in current regulatory domain.
  * @NL80211_FREQUENCY_ATTR_RADAR: Radar detection is mandatory
  *	on this channel in current regulatory domain.
  * @NL80211_FREQUENCY_ATTR_MAX_TX_POWER: Maximum transmission power in mBm
@@ -2528,7 +2312,8 @@ enum nl80211_band_attr {
  *	currently defined
  * @__NL80211_FREQUENCY_ATTR_AFTER_LAST: internal use
  *
- * See https://apps.fcc.gov/eas/comments/GetPublishedDocument.html?id=327&tn=528122
+ * See
+ * https://apps.fcc.gov/eas/comments/GetPublishedDocument.html?id=327&tn=528122
  * for more information on the FCC description of the relaxations allowed
  * by NL80211_FREQUENCY_ATTR_INDOOR_ONLY and
  * NL80211_FREQUENCY_ATTR_GO_CONCURRENT.
@@ -2537,8 +2322,8 @@ enum nl80211_frequency_attr {
 	__NL80211_FREQUENCY_ATTR_INVALID,
 	NL80211_FREQUENCY_ATTR_FREQ,
 	NL80211_FREQUENCY_ATTR_DISABLED,
-	NL80211_FREQUENCY_ATTR_NO_IR,
-	__NL80211_FREQUENCY_ATTR_NO_IBSS,
+	NL80211_FREQUENCY_ATTR_PASSIVE_SCAN,
+	NL80211_FREQUENCY_ATTR_NO_IBSS,
 	NL80211_FREQUENCY_ATTR_RADAR,
 	NL80211_FREQUENCY_ATTR_MAX_TX_POWER,
 	NL80211_FREQUENCY_ATTR_DFS_STATE,
@@ -2559,9 +2344,6 @@ enum nl80211_frequency_attr {
 };
 
 #define NL80211_FREQUENCY_ATTR_MAX_TX_POWER NL80211_FREQUENCY_ATTR_MAX_TX_POWER
-#define NL80211_FREQUENCY_ATTR_PASSIVE_SCAN	NL80211_FREQUENCY_ATTR_NO_IR
-#define NL80211_FREQUENCY_ATTR_NO_IBSS		NL80211_FREQUENCY_ATTR_NO_IR
-#define NL80211_FREQUENCY_ATTR_NO_IR		NL80211_FREQUENCY_ATTR_NO_IR
 
 /**
  * enum nl80211_bitrate_attr - bitrate attributes
@@ -2630,6 +2412,34 @@ enum nl80211_reg_type {
 };
 
 /**
+ * enum nl80211_country_ie_pref - country IE processing preferences
+ *
+ * enumerates the different preferences a 802.11 card can advertize
+ * for parsing the country IEs. As per the current implementation
+ * country IEs are only used derive the apha2, the information
+ * for power settings that comes with the country IE is ignored
+ * and we use the power settings from regdb.
+ *
+ * @NL80211_COUNTRY_IE_FOLLOW_CORE - This is the default behaviour.
+ *	It allows the core to update channel flags according to the
+ *	ISO3166-alpha2 in the country IE. The applied power is -
+ *	MIN(power specified by custom domain, power obtained from regdb)
+ * @NL80211_COUNTRY_IE_FOLLOW_POWER - for devices that have a
+ *	preference that even though they may have programmed their own
+ *	custom power setting prior to wiphy registration, they want
+ *	to ensure their channel power settings are updated for this
+ *	connection with the power settings derived from alpha2 of the
+ *	country IE.
+ * @NL80211_COUNTRY_IE_IGNORE_CORE - for devices that have a preference to
+ *	to ignore all country IE information processed by the core.
+ */
+enum nl80211_country_ie_pref {
+	NL80211_COUNTRY_IE_FOLLOW_CORE,
+	NL80211_COUNTRY_IE_FOLLOW_POWER,
+	NL80211_COUNTRY_IE_IGNORE_CORE,
+};
+
+/**
  * enum nl80211_reg_rule_attr - regulatory rule attributes
  * @__NL80211_REG_RULE_ATTR_INVALID: attribute number 0 is reserved
  * @NL80211_ATTR_REG_RULE_FLAGS: a set of flags which specify additional
@@ -2642,14 +2452,12 @@ enum nl80211_reg_type {
  * 	in KHz. This is not a center a frequency but an actual regulatory
  * 	band edge.
  * @NL80211_ATTR_FREQ_RANGE_MAX_BW: maximum allowed bandwidth for this
- *	frequency range, in KHz.
+ * 	frequency range, in KHz.
  * @NL80211_ATTR_POWER_RULE_MAX_ANT_GAIN: the maximum allowed antenna gain
  * 	for a given frequency range. The value is in mBi (100 * dBi).
  * 	If you don't have one then don't send this.
  * @NL80211_ATTR_POWER_RULE_MAX_EIRP: the maximum allowed EIRP for
  * 	a given frequency range. The value is in mBm (100 * dBm).
- * @NL80211_ATTR_DFS_CAC_TIME: DFS CAC time in milliseconds.
- *	If not present or 0 default CAC time will be used.
  * @NL80211_REG_RULE_ATTR_MAX: highest regulatory rule attribute number
  *	currently defined
  * @__NL80211_REG_RULE_ATTR_AFTER_LAST: internal use
@@ -2664,8 +2472,6 @@ enum nl80211_reg_rule_attr {
 
 	NL80211_ATTR_POWER_RULE_MAX_ANT_GAIN,
 	NL80211_ATTR_POWER_RULE_MAX_EIRP,
-
-	NL80211_ATTR_DFS_CAC_TIME,
 
 	/* keep last */
 	__NL80211_REG_RULE_ATTR_AFTER_LAST,
@@ -2714,12 +2520,8 @@ enum nl80211_sched_scan_match_attr {
  * @NL80211_RRF_DFS: DFS support is required to be used
  * @NL80211_RRF_PTP_ONLY: this is only for Point To Point links
  * @NL80211_RRF_PTMP_ONLY: this is only for Point To Multi Point links
- * @NL80211_RRF_NO_IR: no mechanisms that initiate radiation are allowed,
- * 	this includes probe requests or modes of operation that require
- * 	beaconing.
- * @NL80211_RRF_AUTO_BW: maximum available bandwidth should be calculated
- *	base on contiguous rules and wider channels will be allowed to cross
- *	multiple contiguous/overlapping frequency ranges.
+ * @NL80211_RRF_PASSIVE_SCAN: passive scan is required
+ * @NL80211_RRF_NO_IBSS: no IBSS is allowed
  */
 enum nl80211_reg_rule_flags {
 	NL80211_RRF_NO_OFDM		= 1<<0,
@@ -2729,17 +2531,9 @@ enum nl80211_reg_rule_flags {
 	NL80211_RRF_DFS			= 1<<4,
 	NL80211_RRF_PTP_ONLY		= 1<<5,
 	NL80211_RRF_PTMP_ONLY		= 1<<6,
-	NL80211_RRF_NO_IR		= 1<<7,
-	__NL80211_RRF_NO_IBSS		= 1<<8,
-	NL80211_RRF_AUTO_BW		= 1<<11,
+	NL80211_RRF_PASSIVE_SCAN	= 1<<7,
+	NL80211_RRF_NO_IBSS		= 1<<8,
 };
-
-#define NL80211_RRF_PASSIVE_SCAN	NL80211_RRF_NO_IR
-#define NL80211_RRF_NO_IBSS		NL80211_RRF_NO_IR
-#define NL80211_RRF_NO_IR		NL80211_RRF_NO_IR
-
-/* For backport compatibility with older userspace */
-#define NL80211_RRF_NO_IR_ALL		(NL80211_RRF_NO_IR | __NL80211_RRF_NO_IBSS)
 
 /**
  * enum nl80211_dfs_regions - regulatory DFS regions
@@ -2770,13 +2564,10 @@ enum nl80211_dfs_regions {
  *	present has been registered with the wireless core that
  *	has listed NL80211_FEATURE_CELL_BASE_REG_HINTS as a
  *	supported feature.
- * @NL80211_USER_REG_HINT_INDOOR: a user sent an hint indicating that the
- *	platform is operating in an indoor environment.
  */
 enum nl80211_user_reg_hint_type {
 	NL80211_USER_REG_HINT_USER	= 0,
 	NL80211_USER_REG_HINT_CELL_BASE = 1,
-	NL80211_USER_REG_HINT_INDOOR    = 2,
 };
 
 /**
@@ -2832,8 +2623,6 @@ enum nl80211_survey_info {
  * @NL80211_MNTR_FLAG_OTHER_BSS: disable BSSID filtering
  * @NL80211_MNTR_FLAG_COOK_FRAMES: report frames after processing.
  *	overrides all other flags.
- * @NL80211_MNTR_FLAG_ACTIVE: use the configured MAC address
- *	and ACK incoming unicast packets.
  *
  * @__NL80211_MNTR_FLAG_AFTER_LAST: internal use
  * @NL80211_MNTR_FLAG_MAX: highest possible monitor flag
@@ -2845,7 +2634,6 @@ enum nl80211_mntr_flags {
 	NL80211_MNTR_FLAG_CONTROL,
 	NL80211_MNTR_FLAG_OTHER_BSS,
 	NL80211_MNTR_FLAG_COOK_FRAMES,
-	NL80211_MNTR_FLAG_ACTIVE,
 
 	/* keep last */
 	__NL80211_MNTR_FLAG_AFTER_LAST,
@@ -2981,10 +2769,6 @@ enum nl80211_mesh_power_mode {
  *
  * @NL80211_MESHCONF_AWAKE_WINDOW: awake window duration (in TUs)
  *
- * @NL80211_MESHCONF_PLINK_TIMEOUT: If no tx activity is seen from a STA we've
- *	established peering with for longer than this time (in seconds), then
- *	remove it from the STA's list of peers.  Default is 30 minutes.
- *
  * @__NL80211_MESHCONF_ATTR_AFTER_LAST: internal use
  */
 enum nl80211_meshconf_params {
@@ -3016,7 +2800,6 @@ enum nl80211_meshconf_params {
 	NL80211_MESHCONF_HWMP_CONFIRMATION_INTERVAL,
 	NL80211_MESHCONF_POWER_MODE,
 	NL80211_MESHCONF_AWAKE_WINDOW,
-	NL80211_MESHCONF_PLINK_TIMEOUT,
 
 	/* keep last */
 	__NL80211_MESHCONF_ATTR_AFTER_LAST,
@@ -3064,10 +2847,6 @@ enum nl80211_meshconf_params {
  * @NL80211_MESH_SETUP_USERSPACE_MPM: Enable this option if userspace will
  *	implement an MPM which handles peer allocation and state.
  *
- * @NL80211_MESH_SETUP_AUTH_PROTOCOL: Inform the kernel of the authentication
- *	method (u8, as defined in IEEE 8.4.2.100.6, e.g. 0x1 for SAE).
- *	Default is no authentication method required.
- *
  * @NL80211_MESH_SETUP_ATTR_MAX: highest possible mesh setup attribute number
  *
  * @__NL80211_MESH_SETUP_ATTR_AFTER_LAST: Internal use
@@ -3081,7 +2860,6 @@ enum nl80211_mesh_setup_params {
 	NL80211_MESH_SETUP_USERSPACE_AMPE,
 	NL80211_MESH_SETUP_ENABLE_VENDOR_SYNC,
 	NL80211_MESH_SETUP_USERSPACE_MPM,
-	NL80211_MESH_SETUP_AUTH_PROTOCOL,
 
 	/* keep last */
 	__NL80211_MESH_SETUP_ATTR_AFTER_LAST,
@@ -3174,21 +2952,6 @@ enum nl80211_chan_width {
 	NL80211_CHAN_WIDTH_160,
 	NL80211_CHAN_WIDTH_5,
 	NL80211_CHAN_WIDTH_10,
-};
-
-/**
- * enum nl80211_bss_scan_width - control channel width for a BSS
- *
- * These values are used with the %NL80211_BSS_CHAN_WIDTH attribute.
- *
- * @NL80211_BSS_CHAN_WIDTH_20: control channel is 20 MHz wide or compatible
- * @NL80211_BSS_CHAN_WIDTH_10: control channel is 10 MHz wide
- * @NL80211_BSS_CHAN_WIDTH_5: control channel is 5 MHz wide
- */
-enum nl80211_bss_scan_width {
-	NL80211_BSS_CHAN_WIDTH_20,
-	NL80211_BSS_CHAN_WIDTH_10,
-	NL80211_BSS_CHAN_WIDTH_5,
 };
 
 /**
@@ -3386,41 +3149,19 @@ enum nl80211_key_attributes {
  *	in an array of rates as defined in IEEE 802.11 7.3.2.2 (u8 values with
  *	1 = 500 kbps) but without the IE length restriction (at most
  *	%NL80211_MAX_SUPP_RATES in a single array).
- * @NL80211_TXRATE_HT: HT (MCS) rates allowed for TX rate selection
+ * @NL80211_TXRATE_MCS: HT (MCS) rates allowed for TX rate selection
  *	in an array of MCS numbers.
- * @NL80211_TXRATE_VHT: VHT rates allowed for TX rate selection,
- *	see &struct nl80211_txrate_vht
- * @NL80211_TXRATE_GI: configure GI, see &enum nl80211_txrate_gi
  * @__NL80211_TXRATE_AFTER_LAST: internal
  * @NL80211_TXRATE_MAX: highest TX rate attribute
  */
 enum nl80211_tx_rate_attributes {
 	__NL80211_TXRATE_INVALID,
 	NL80211_TXRATE_LEGACY,
-	NL80211_TXRATE_HT,
-	NL80211_TXRATE_VHT,
-	NL80211_TXRATE_GI,
+	NL80211_TXRATE_MCS,
 
 	/* keep last */
 	__NL80211_TXRATE_AFTER_LAST,
 	NL80211_TXRATE_MAX = __NL80211_TXRATE_AFTER_LAST - 1
-};
-
-#define NL80211_TXRATE_MCS NL80211_TXRATE_HT
-#define NL80211_VHT_NSS_MAX		8
-
-/**
- * struct nl80211_txrate_vht - VHT MCS/NSS txrate bitmap
- * @mcs: MCS bitmap table for each NSS (array index 0 for 1 stream, etc.)
- */
-struct nl80211_txrate_vht {
-	__u16 mcs[NL80211_VHT_NSS_MAX];
-};
-
-enum nl80211_txrate_gi {
-	NL80211_TXRATE_DEFAULT_GI,
-	NL80211_TXRATE_FORCE_SGI,
-	NL80211_TXRATE_FORCE_LGI,
 };
 
 /**
@@ -3516,11 +3257,11 @@ enum nl80211_tx_power_setting {
 };
 
 /**
- * enum nl80211_packet_pattern_attr - packet pattern attribute
- * @__NL80211_PKTPAT_INVALID: invalid number for nested attribute
- * @NL80211_PKTPAT_PATTERN: the pattern, values where the mask has
+ * enum nl80211_wowlan_packet_pattern_attr - WoWLAN packet pattern attribute
+ * @__NL80211_WOWLAN_PKTPAT_INVALID: invalid number for nested attribute
+ * @NL80211_WOWLAN_PKTPAT_PATTERN: the pattern, values where the mask has
  *	a zero bit are ignored
- * @NL80211_PKTPAT_MASK: pattern mask, must be long enough to have
+ * @NL80211_WOWLAN_PKTPAT_MASK: pattern mask, must be long enough to have
  *	a bit for each byte in the pattern. The lowest-order bit corresponds
  *	to the first byte of the pattern, but the bytes of the pattern are
  *	in a little-endian-like format, i.e. the 9th byte of the pattern
@@ -3531,49 +3272,38 @@ enum nl80211_tx_power_setting {
  *	Note that the pattern matching is done as though frames were not
  *	802.11 frames but 802.3 frames, i.e. the frame is fully unpacked
  *	first (including SNAP header unpacking) and then matched.
- * @NL80211_PKTPAT_OFFSET: packet offset, pattern is matched after
+ * @NL80211_WOWLAN_PKTPAT_OFFSET: packet offset, pattern is matched after
  *	these fixed number of bytes of received packet
- * @NUM_NL80211_PKTPAT: number of attributes
- * @MAX_NL80211_PKTPAT: max attribute number
+ * @NUM_NL80211_WOWLAN_PKTPAT: number of attributes
+ * @MAX_NL80211_WOWLAN_PKTPAT: max attribute number
  */
-enum nl80211_packet_pattern_attr {
-	__NL80211_PKTPAT_INVALID,
-	NL80211_PKTPAT_MASK,
-	NL80211_PKTPAT_PATTERN,
-	NL80211_PKTPAT_OFFSET,
+enum nl80211_wowlan_packet_pattern_attr {
+	__NL80211_WOWLAN_PKTPAT_INVALID,
+	NL80211_WOWLAN_PKTPAT_MASK,
+	NL80211_WOWLAN_PKTPAT_PATTERN,
+	NL80211_WOWLAN_PKTPAT_OFFSET,
 
-	NUM_NL80211_PKTPAT,
-	MAX_NL80211_PKTPAT = NUM_NL80211_PKTPAT - 1,
+	NUM_NL80211_WOWLAN_PKTPAT,
+	MAX_NL80211_WOWLAN_PKTPAT = NUM_NL80211_WOWLAN_PKTPAT - 1,
 };
 
 /**
- * struct nl80211_pattern_support - packet pattern support information
+ * struct nl80211_wowlan_pattern_support - pattern support information
  * @max_patterns: maximum number of patterns supported
  * @min_pattern_len: minimum length of each pattern
  * @max_pattern_len: maximum length of each pattern
  * @max_pkt_offset: maximum Rx packet offset
  *
  * This struct is carried in %NL80211_WOWLAN_TRIG_PKT_PATTERN when
- * that is part of %NL80211_ATTR_WOWLAN_TRIGGERS_SUPPORTED or in
- * %NL80211_ATTR_COALESCE_RULE_PKT_PATTERN when that is part of
- * %NL80211_ATTR_COALESCE_RULE in the capability information given
- * by the kernel to userspace.
+ * that is part of %NL80211_ATTR_WOWLAN_TRIGGERS_SUPPORTED in the
+ * capability information given by the kernel to userspace.
  */
-struct nl80211_pattern_support {
+struct nl80211_wowlan_pattern_support {
 	__u32 max_patterns;
 	__u32 min_pattern_len;
 	__u32 max_pattern_len;
 	__u32 max_pkt_offset;
 } __attribute__((packed));
-
-/* only for backward compatibility */
-#define __NL80211_WOWLAN_PKTPAT_INVALID __NL80211_PKTPAT_INVALID
-#define NL80211_WOWLAN_PKTPAT_MASK NL80211_PKTPAT_MASK
-#define NL80211_WOWLAN_PKTPAT_PATTERN NL80211_PKTPAT_PATTERN
-#define NL80211_WOWLAN_PKTPAT_OFFSET NL80211_PKTPAT_OFFSET
-#define NUM_NL80211_WOWLAN_PKTPAT NUM_NL80211_PKTPAT
-#define MAX_NL80211_WOWLAN_PKTPAT MAX_NL80211_PKTPAT
-#define nl80211_wowlan_pattern_support nl80211_pattern_support
 
 /**
  * enum nl80211_wowlan_triggers - WoWLAN trigger definitions
@@ -3594,7 +3324,7 @@ struct nl80211_pattern_support {
  *	pattern matching is done after the packet is converted to the MSDU.
  *
  *	In %NL80211_ATTR_WOWLAN_TRIGGERS_SUPPORTED, it is a binary attribute
- *	carrying a &struct nl80211_pattern_support.
+ *	carrying a &struct nl80211_wowlan_pattern_support.
  *
  *	When reporting wakeup. it is a u32 attribute containing the 0-based
  *	index of the pattern that caused the wakeup, in the patterns passed
@@ -3751,7 +3481,7 @@ struct nl80211_wowlan_tcp_data_token_feature {
  * @NL80211_WOWLAN_TCP_WAKE_PAYLOAD: wake packet payload, for advertising a
  *	u32 attribute holding the maximum length
  * @NL80211_WOWLAN_TCP_WAKE_MASK: Wake packet payload mask, not used for
- *	feature advertising. The mask works like @NL80211_PKTPAT_MASK
+ *	feature advertising. The mask works like @NL80211_WOWLAN_PKTPAT_MASK
  *	but on the TCP payload only.
  * @NUM_NL80211_WOWLAN_TCP: number of TCP attributes
  * @MAX_NL80211_WOWLAN_TCP: highest attribute number
@@ -3773,55 +3503,6 @@ enum nl80211_wowlan_tcp_attrs {
 	/* keep last */
 	NUM_NL80211_WOWLAN_TCP,
 	MAX_NL80211_WOWLAN_TCP = NUM_NL80211_WOWLAN_TCP - 1
-};
-
-/**
- * struct nl80211_coalesce_rule_support - coalesce rule support information
- * @max_rules: maximum number of rules supported
- * @pat: packet pattern support information
- * @max_delay: maximum supported coalescing delay in msecs
- *
- * This struct is carried in %NL80211_ATTR_COALESCE_RULE in the
- * capability information given by the kernel to userspace.
- */
-struct nl80211_coalesce_rule_support {
-	__u32 max_rules;
-	struct nl80211_pattern_support pat;
-	__u32 max_delay;
-} __attribute__((packed));
-
-/**
- * enum nl80211_attr_coalesce_rule - coalesce rule attribute
- * @__NL80211_COALESCE_RULE_INVALID: invalid number for nested attribute
- * @NL80211_ATTR_COALESCE_RULE_DELAY: delay in msecs used for packet coalescing
- * @NL80211_ATTR_COALESCE_RULE_CONDITION: condition for packet coalescence,
- *	see &enum nl80211_coalesce_condition.
- * @NL80211_ATTR_COALESCE_RULE_PKT_PATTERN: packet offset, pattern is matched
- *	after these fixed number of bytes of received packet
- * @NUM_NL80211_ATTR_COALESCE_RULE: number of attributes
- * @NL80211_ATTR_COALESCE_RULE_MAX: max attribute number
- */
-enum nl80211_attr_coalesce_rule {
-	__NL80211_COALESCE_RULE_INVALID,
-	NL80211_ATTR_COALESCE_RULE_DELAY,
-	NL80211_ATTR_COALESCE_RULE_CONDITION,
-	NL80211_ATTR_COALESCE_RULE_PKT_PATTERN,
-
-	/* keep last */
-	NUM_NL80211_ATTR_COALESCE_RULE,
-	NL80211_ATTR_COALESCE_RULE_MAX = NUM_NL80211_ATTR_COALESCE_RULE - 1
-};
-
-/**
- * enum nl80211_coalesce_condition - coalesce rule conditions
- * @NL80211_COALESCE_CONDITION_MATCH: coalaesce Rx packets when patterns
- *	in a rule are matched.
- * @NL80211_COALESCE_CONDITION_NO_MATCH: coalesce Rx packets when patterns
- *	in a rule are not matched.
- */
-enum nl80211_coalesce_condition {
-	NL80211_COALESCE_CONDITION_MATCH,
-	NL80211_COALESCE_CONDITION_NO_MATCH
 };
 
 /**
@@ -3862,8 +3543,6 @@ enum nl80211_iface_limit_attrs {
  *	different channels may be used within this group.
  * @NL80211_IFACE_COMB_RADAR_DETECT_WIDTHS: u32 attribute containing the bitmap
  *	of supported channel widths for radar detection.
- * @NL80211_IFACE_COMB_RADAR_DETECT_REGIONS: u32 attribute containing the bitmap
- *	of supported regulatory regions for radar detection.
  * @NUM_NL80211_IFACE_COMB: number of attributes
  * @MAX_NL80211_IFACE_COMB: highest attribute number
  *
@@ -3897,7 +3576,6 @@ enum nl80211_if_combination_attrs {
 	NL80211_IFACE_COMB_STA_AP_BI_MATCH,
 	NL80211_IFACE_COMB_NUM_CHANNELS,
 	NL80211_IFACE_COMB_RADAR_DETECT_WIDTHS,
-	NL80211_IFACE_COMB_RADAR_DETECT_REGIONS,
 
 	/* keep last */
 	NUM_NL80211_IFACE_COMB,
@@ -4071,8 +3749,11 @@ enum nl80211_ap_sme_features {
  * @NL80211_FEATURE_CELL_BASE_REG_HINTS: This driver has been tested
  *	to work properly to suppport receiving regulatory hints from
  *	cellular base stations.
- * @NL80211_FEATURE_P2P_DEVICE_NEEDS_CHANNEL: (no longer available, only
- *	here to reserve the value for API/ABI compatibility)
+ * @NL80211_FEATURE_P2P_DEVICE_NEEDS_CHANNEL: If this is set, an active
+ *	P2P Device (%NL80211_IFTYPE_P2P_DEVICE) requires its own channel
+ *	in the interface combinations, even when it's only used for scan
+ *	and remain-on-channel. This could be due to, for example, the
+ *	remain-on-channel implementation requiring a channel context.
  * @NL80211_FEATURE_SAE: This driver supports simultaneous authentication of
  *	equals (SAE) with user space SME (NL80211_CMD_AUTHENTICATE) in station
  *	mode
@@ -4104,33 +3785,9 @@ enum nl80211_ap_sme_features {
  *	Peering Management entity which may be implemented by registering for
  *	beacons or NL80211_CMD_NEW_PEER_CANDIDATE events. The mesh beacon is
  *	still generated by the driver.
- * @NL80211_FEATURE_ACTIVE_MONITOR: This driver supports an active monitor
- *	interface. An active monitor interface behaves like a normal monitor
- *	interface, but gets added to the driver. It ensures that incoming
- *	unicast packets directed at the configured interface address get ACKed.
  * @NL80211_FEATURE_AP_MODE_CHAN_WIDTH_CHANGE: This driver supports dynamic
  *	channel bandwidth change (e.g., HT 20 <-> 40 MHz channel) during the
  *	lifetime of a BSS.
- * @NL80211_FEATURE_DS_PARAM_SET_IE_IN_PROBES: This device adds a DS Parameter
- *	Set IE to probe requests.
- * @NL80211_FEATURE_WFA_TPC_IE_IN_PROBES: This device adds a WFA TPC Report IE
- *	to probe requests.
- * @NL80211_FEATURE_QUIET: This device, in client mode, supports Quiet Period
- *	requests sent to it by an AP.
- * @NL80211_FEATURE_TX_POWER_INSERTION: This device is capable of inserting the
- *	current tx power value into the TPC Report IE in the spectrum
- *	management TPC Report action frame, and in the Radio Measurement Link
- *	Measurement Report action frame.
- * @NL80211_FEATURE_ACKTO_ESTIMATION: This driver supports dynamic ACK timeout
- *	estimation (dynack). %NL80211_ATTR_WIPHY_DYN_ACK flag attribute is used
- *	to enable dynack.
- * @NL80211_FEATURE_STATIC_SMPS: Device supports static spatial
- *	multiplexing powersave, ie. can turn off all but one chain
- *	even on HT connections that should be using more chains.
- * @NL80211_FEATURE_DYNAMIC_SMPS: Device supports dynamic spatial
- *	multiplexing powersave, ie. can turn off all but one chain
- *	and then wake the rest up as required after, for example,
- *	rts/cts handshake.
  */
 enum nl80211_feature_flags {
 	NL80211_FEATURE_SK_TX_STATUS			= 1 << 0,
@@ -4150,15 +3807,7 @@ enum nl80211_feature_flags {
 	NL80211_FEATURE_ADVERTISE_CHAN_LIMITS		= 1 << 14,
 	NL80211_FEATURE_FULL_AP_CLIENT_STATE		= 1 << 15,
 	NL80211_FEATURE_USERSPACE_MPM			= 1 << 16,
-	NL80211_FEATURE_ACTIVE_MONITOR			= 1 << 17,
 	NL80211_FEATURE_AP_MODE_CHAN_WIDTH_CHANGE	= 1 << 18,
-	NL80211_FEATURE_DS_PARAM_SET_IE_IN_PROBES	= 1 << 19,
-	NL80211_FEATURE_WFA_TPC_IE_IN_PROBES		= 1 << 20,
-	NL80211_FEATURE_QUIET				= 1 << 21,
-	NL80211_FEATURE_TX_POWER_INSERTION		= 1 << 22,
-	NL80211_FEATURE_ACKTO_ESTIMATION		= 1 << 23,
-	NL80211_FEATURE_STATIC_SMPS			= 1 << 24,
-	NL80211_FEATURE_DYNAMIC_SMPS			= 1 << 25,
 };
 
 /**
@@ -4233,25 +3882,6 @@ enum nl80211_acl_policy {
 };
 
 /**
- * enum nl80211_smps_mode - SMPS mode
- *
- * Requested SMPS mode (for AP mode)
- *
- * @NL80211_SMPS_OFF: SMPS off (use all antennas).
- * @NL80211_SMPS_STATIC: static SMPS (use a single antenna)
- * @NL80211_SMPS_DYNAMIC: dynamic smps (start with a single antenna and
- *	turn on other antennas after CTS/RTS).
- */
-enum nl80211_smps_mode {
-	NL80211_SMPS_OFF,
-	NL80211_SMPS_STATIC,
-	NL80211_SMPS_DYNAMIC,
-
-	__NL80211_SMPS_AFTER_LAST,
-	NL80211_SMPS_MAX = __NL80211_SMPS_AFTER_LAST - 1
-};
-
-/**
  * enum nl80211_radar_event - type of radar event for DFS operation
  *
  * Type of event to be used with NL80211_ATTR_RADAR_EVENT to inform userspace
@@ -4278,12 +3908,13 @@ enum nl80211_radar_event {
  *
  * Channel states used by the DFS code.
  *
- * @NL80211_DFS_USABLE: The channel can be used, but channel availability
+ * @IEEE80211_DFS_USABLE: The channel can be used, but channel availability
  *	check (CAC) must be performed before using it for AP or IBSS.
- * @NL80211_DFS_UNAVAILABLE: A radar has been detected on this channel, it
+ * @IEEE80211_DFS_UNAVAILABLE: A radar has been detected on this channel, it
  *	is therefore marked as not available.
- * @NL80211_DFS_AVAILABLE: The channel has been CAC checked and is available.
+ * @IEEE80211_DFS_AVAILABLE: The channel has been CAC checked and is available.
  */
+
 enum nl80211_dfs_state {
 	NL80211_DFS_USABLE,
 	NL80211_DFS_UNAVAILABLE,
@@ -4322,17 +3953,6 @@ enum nl80211_crit_proto_id {
 
 /* maximum duration for critical protocol measures */
 #define NL80211_CRIT_PROTO_MAX_DURATION		5000 /* msec */
-
-/**
- * enum nl80211_rxmgmt_flags - flags for received management frame.
- *
- * Used by cfg80211_rx_mgmt()
- *
- * @NL80211_RXMGMT_FLAG_ANSWERED: frame was answered by device/driver.
- */
-enum nl80211_rxmgmt_flags {
-	NL80211_RXMGMT_FLAG_ANSWERED = 1 << 0,
-};
 
 /*
  * If this flag is unset, the lower 24 bits are an OUI, if set

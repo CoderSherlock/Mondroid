@@ -753,7 +753,7 @@ static int getoptions(char *c, struct trusted_key_payload *pay,
 				return -EINVAL;
 			break;
 		case Opt_keyhandle:
-			res = kstrtoul(args[0].from, 16, &handle);
+			res = strict_strtoul(args[0].from, 16, &handle);
 			if (res < 0)
 				return -EINVAL;
 			opt->keytype = SEAL_keytype;
@@ -782,7 +782,7 @@ static int getoptions(char *c, struct trusted_key_payload *pay,
 				return -EINVAL;
 			break;
 		case Opt_pcrlock:
-			res = kstrtoul(args[0].from, 10, &lock);
+			res = strict_strtoul(args[0].from, 10, &lock);
 			if (res < 0)
 				return -EINVAL;
 			opt->pcrlock = lock;
@@ -820,7 +820,7 @@ static int datablob_parse(char *datablob, struct trusted_key_payload *p,
 		c = strsep(&datablob, " \t");
 		if (!c)
 			return -EINVAL;
-		ret = kstrtol(c, 10, &keylen);
+		ret = strict_strtol(c, 10, &keylen);
 		if (ret < 0 || keylen < MIN_KEY_SIZE || keylen > MAX_KEY_SIZE)
 			return -EINVAL;
 		p->key_len = keylen;
@@ -984,16 +984,13 @@ static void trusted_rcu_free(struct rcu_head *rcu)
  */
 static int trusted_update(struct key *key, struct key_preparsed_payload *prep)
 {
-	struct trusted_key_payload *p;
+	struct trusted_key_payload *p = key->payload.data;
 	struct trusted_key_payload *new_p;
 	struct trusted_key_options *new_o;
 	size_t datalen = prep->datalen;
 	char *datablob;
 	int ret = 0;
 
-	if (test_bit(KEY_FLAG_NEGATIVE, &key->flags))
-		return -ENOKEY;
-	p = key->payload.data;
 	if (!p->migratable)
 		return -EPERM;
 	if (datalen <= 0 || datalen > 32767 || !prep->data)
@@ -1099,6 +1096,7 @@ struct key_type key_type_trusted = {
 	.name = "trusted",
 	.instantiate = trusted_instantiate,
 	.update = trusted_update,
+	.match = user_match,
 	.destroy = trusted_destroy,
 	.describe = user_describe,
 	.read = trusted_read,

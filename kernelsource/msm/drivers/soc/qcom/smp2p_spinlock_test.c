@@ -235,7 +235,7 @@ static void smp2p_ut_remote_spinlock_core(struct seq_file *s, int remote_pid,
 				(int)wait_for_completion_timeout(
 					&cb_in.cb_completion, HZ * 2),
 				>, 0);
-			reinit_completion(&cb_in.cb_completion);
+			INIT_COMPLETION(cb_in.cb_completion);
 			ret = msm_smp2p_in_read(remote_pid,
 					SMP2P_RLPB_ENTRY_NAME, &test_response);
 			UT_ASSERT_INT(ret, ==, 0);
@@ -372,11 +372,6 @@ static void smp2p_ut_remote_spinlock_wcnss(struct seq_file *s)
 	smp2p_ut_remote_spinlock_pid(s, SMP2P_WIRELESS_PROC, false);
 }
 
-static void smp2p_ut_remote_spinlock_tz(struct seq_file *s)
-{
-	smp2p_ut_remote_spinlock_pid(s, SMP2P_TZ_PROC, false);
-}
-
 /**
  * smp2p_ut_remote_spinlock_rpm - Verify remote spinlock.
  *
@@ -413,7 +408,7 @@ static void smp2p_ut_remote_spinlock_rpm(struct seq_file *s)
 			if (readl_relaxed(&data_ptr->rpm_cmd) !=
 					RPM_CMD_INVALID)
 				break;
-			usleep_range(1000, 1200);
+			usleep(1000);
 		}
 		if (readl_relaxed(&data_ptr->rpm_cmd) == RPM_CMD_INVALID) {
 			/* timeout waiting for RPM */
@@ -751,11 +746,6 @@ static void smp2p_ut_remote_spinlock_track_wcnss(struct seq_file *s)
 	smp2p_ut_remote_spinlock_track(s, SMP2P_WIRELESS_PROC);
 }
 
-static void smp2p_ut_remote_spinlock_track_tz(struct seq_file *s)
-{
-	smp2p_ut_remote_spinlock_track(s, SMP2P_TZ_PROC);
-}
-
 static int __init smp2p_debugfs_init(void)
 {
 	/*
@@ -781,8 +771,6 @@ static int __init smp2p_debugfs_init(void)
 		smp2p_ut_remote_spinlock_dsps);
 	smp2p_debug_create("ut_remote_spinlock_wcnss",
 		smp2p_ut_remote_spinlock_wcnss);
-	smp2p_debug_create("ut_remote_spinlock_tz",
-		smp2p_ut_remote_spinlock_tz);
 	smp2p_debug_create("ut_remote_spinlock_rpm",
 		smp2p_ut_remote_spinlock_rpm);
 	smp2p_debug_create_u32("ut_remote_spinlock_time",
@@ -797,8 +785,6 @@ static int __init smp2p_debugfs_init(void)
 		&smp2p_ut_remote_spinlock_track_dsps);
 	smp2p_debug_create("ut_remote_spinlock_track_wcnss",
 		&smp2p_ut_remote_spinlock_track_wcnss);
-	smp2p_debug_create("ut_remote_spinlock_track_tz",
-		&smp2p_ut_remote_spinlock_track_tz);
 	return 0;
 }
 module_init(smp2p_debugfs_init);

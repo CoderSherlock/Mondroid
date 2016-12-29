@@ -21,8 +21,7 @@ LED sub-node properties:
   on).  The "keep" setting will keep the LED at whatever its current
   state is, without producing a glitch.  The default is off if this
   property is not present.
-- retain-state-suspended: (optional) The suspend state can be retained.Such
-  as charge-led gpio.
+- retain-state-suspended: (optional) Retain the LED status on suspending.
 
 Examples:
 
@@ -50,15 +49,5 @@ run-control {
 	green {
 		gpios = <&mpc8572 7 0>;
 		default-state = "on";
-	};
-};
-
-leds {
-	compatible = "gpio-leds";
-
-	charger-led {
-		gpios = <&gpio1 2 0>;
-		linux,default-trigger = "max8903-charger-charging";
-		retain-state-suspended;
 	};
 };

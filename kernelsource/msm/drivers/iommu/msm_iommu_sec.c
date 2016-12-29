@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,12 +28,10 @@
 #include <linux/kmemleak.h>
 #include <linux/dma-mapping.h>
 #include <soc/qcom/scm.h>
-#include <soc/qcom/secure_buffer.h>
 
 #include <asm/cacheflush.h>
-#include <linux/sizes.h>
+#include <asm/sizes.h>
 
-#include "msm_iommu_pagetable.h"
 #include "msm_iommu_perfmon.h"
 #include "msm_iommu_hw-v1.h"
 #include "msm_iommu_priv.h"
@@ -138,9 +136,7 @@ static int msm_iommu_dump_fault_regs(int smmu_id, int cb_num,
 
 	desc.args[0] = req_info.id = smmu_id;
 	desc.args[1] = req_info.cb_num = cb_num;
-	/* virt_to_phys(regs) may be greater than 4GB */
-	req_info.buff = virt_to_phys(regs);
-	desc.args[2] =  virt_to_phys(regs);
+	desc.args[2] = req_info.buff = virt_to_phys(regs);
 	desc.args[3] = req_info.len = sizeof(*regs);
 	desc.arginfo = SCM_ARGS(4, SCM_VAL, SCM_VAL, SCM_RW, SCM_VAL);
 
@@ -176,7 +172,6 @@ static int msm_iommu_reg_dump_to_regs(
 		uint32_t addr	= *it;
 		uint32_t val	= *(it + 1);
 		struct msm_iommu_context_reg *reg = NULL;
-
 		if (addr < phys_base) {
 			pr_err("Bogus-looking register (0x%x) for Iommu with base at %pa. Skipping.\n",
 				addr, &phys_base);
@@ -188,7 +183,6 @@ static int msm_iommu_reg_dump_to_regs(
 			struct dump_regs_tbl_entry dump_reg = dump_regs_tbl[j];
 			void *test_reg;
 			unsigned int test_offset;
-
 			switch (dump_reg.dump_reg_type) {
 			case DRT_CTX_REG:
 				test_reg = CTX_REG(dump_reg.reg_offset,
@@ -253,25 +247,6 @@ static int msm_iommu_reg_dump_to_regs(
 	return ret;
 }
 
-static void print_iova_to_phys(struct msm_iommu_ctx_drvdata *ctx_drvdata,
-		struct msm_iommu_context_reg ctx_regs[MAX_DUMP_REGS])
-{
-	phys_addr_t pagetable_phys;
-	u64 faulty_iova = 0;
-
-	if (ctx_drvdata->attached_domain &&
-			!ctx_drvdata->secure_context) {
-		faulty_iova = COMBINE_DUMP_REG(
-				ctx_regs[DUMP_REG_FAR1].val,
-				ctx_regs[DUMP_REG_FAR0].val);
-		pagetable_phys = msm_iommu_iova_to_phys_soft(
-					ctx_drvdata->attached_domain,
-					faulty_iova);
-		pr_err("Page table in DDR shows PA = %lx\n",
-					(unsigned long) pagetable_phys);
-	}
-}
-
 irqreturn_t msm_iommu_secure_fault_handler_v2(int irq, void *dev_id)
 {
 	struct platform_device *pdev = dev_id;
@@ -291,8 +266,10 @@ irqreturn_t msm_iommu_secure_fault_handler_v2(int irq, void *dev_id)
 	BUG_ON(!ctx_drvdata);
 
 	regs = kzalloc(sizeof(*regs), GFP_KERNEL);
-	if (!regs)
+	if (!regs) {
+		pr_err("%s: Couldn't allocate memory\n", __func__);
 		goto lock_release;
+	}
 
 	if (!drvdata->ctx_attach_count) {
 		pr_err("Unexpected IOMMU page fault from secure context bank!\n");
@@ -309,24 +286,24 @@ irqreturn_t msm_iommu_secure_fault_handler_v2(int irq, void *dev_id)
 	iommu_access_ops->iommu_clk_on(drvdata);
 	tmp = msm_iommu_dump_fault_regs(drvdata->sec_id,
 					ctx_drvdata->num, regs);
+	iommu_access_ops->iommu_clk_off(drvdata);
 
 	if (tmp) {
 		pr_err("%s: Couldn't dump fault registers (%d) %s, ctx: %d\n",
 			__func__, tmp, drvdata->name, ctx_drvdata->num);
-		goto clock_off;
+		goto free_regs;
 	} else {
 		struct msm_iommu_context_reg ctx_regs[MAX_DUMP_REGS];
-
 		memset(ctx_regs, 0, sizeof(ctx_regs));
 		tmp = msm_iommu_reg_dump_to_regs(
 			ctx_regs, regs, drvdata, ctx_drvdata);
 		if (tmp < 0) {
 			ret = IRQ_NONE;
 			pr_err("Incorrect response from secure environment\n");
-			goto clock_off;
+			goto free_regs;
 		}
 
-		if (ctx_regs[DUMP_REG_FSR].val & 0x1FF) {
+		if (ctx_regs[DUMP_REG_FSR].val) {
 			if (tmp)
 				pr_err("Incomplete fault register dump. Printout will be incomplete.\n");
 			if (!ctx_drvdata->attached_domain) {
@@ -350,14 +327,11 @@ irqreturn_t msm_iommu_secure_fault_handler_v2(int irq, void *dev_id)
 					ctx_drvdata->num);
 				pr_err("Interesting registers:\n");
 				print_ctx_regs(ctx_regs);
-				print_iova_to_phys(ctx_drvdata, ctx_regs);
 			}
 		} else {
 			ret = IRQ_NONE;
 		}
 	}
-clock_off:
-	iommu_access_ops->iommu_clk_off(drvdata);
 free_regs:
 	kfree(regs);
 lock_release:
@@ -374,7 +348,7 @@ static int msm_iommu_sec_ptbl_init(void)
 		unsigned int spare;
 	} pinit = {0};
 	int psize[2] = {0, 0};
-	unsigned int spare = 0;
+	unsigned int spare;
 	int ret, ptbl_ret = 0;
 	int version;
 	/* Use a dummy device for dma_alloc_attrs allocation */
@@ -453,9 +427,7 @@ static int msm_iommu_sec_ptbl_init(void)
 		goto fail;
 	}
 
-	pinit.paddr = (unsigned int)paddr;
-	/* paddr may be a physical address > 4GB */
-	desc.args[0] = paddr;
+	desc.args[0] = pinit.paddr = (unsigned int)paddr;
 	desc.args[1] = pinit.size = psize[0];
 	desc.args[2] = pinit.spare;
 	desc.arginfo = SCM_ARGS(3, SCM_RW, SCM_VAL, SCM_VAL);
@@ -493,7 +465,6 @@ int msm_iommu_sec_program_iommu(struct msm_iommu_drvdata *drvdata,
 	if (drvdata->smmu_local_base) {
 		writel_relaxed(0xFFFFFFFF, drvdata->smmu_local_base +
 						SMMU_INTR_SEL_NS);
-		/* make sure SMMU_INTR_SEL_NS is seen */
 		mb();
 	}
 
@@ -519,7 +490,11 @@ static int msm_iommu_sec_map2(struct msm_scm_map2_req *map)
 	desc.args[4] = map->info.ctx_id;
 	desc.args[5] = map->info.va;
 	desc.args[6] = map->info.size;
+#ifdef CONFIG_MSM_IOMMU_TLBINVAL_ON_MAP
+	desc.args[7] = map->flags = IOMMU_TLBINVAL_FLAG;
+#else
 	desc.args[7] = map->flags = 0;
+#endif
 	desc.arginfo = SCM_ARGS(8, SCM_RW, SCM_VAL, SCM_VAL, SCM_VAL, SCM_VAL,
 				SCM_VAL, SCM_VAL, SCM_VAL);
 	if (!is_scm_armv8()) {
@@ -579,7 +554,6 @@ static unsigned int get_phys_addr(struct scatterlist *sg)
 	 * struct page associated with them.
 	 */
 	unsigned int pa = sg_dma_address(sg);
-
 	if (pa == 0)
 		pa = sg_phys(sg);
 	return pa;
@@ -628,7 +602,7 @@ static int msm_iommu_sec_ptbl_map_range(struct msm_iommu_drvdata *iommu_drvdata,
 			cnt += sgiter->length / SZ_1M;
 		}
 
-		pa_list = kmalloc_array(cnt, sizeof(*pa_list), GFP_KERNEL);
+		pa_list = kmalloc(cnt * sizeof(*pa_list), GFP_KERNEL);
 		if (!pa_list)
 			return -ENOMEM;
 
@@ -640,7 +614,8 @@ static int msm_iommu_sec_ptbl_map_range(struct msm_iommu_drvdata *iommu_drvdata,
 			return -EINVAL;
 		}
 		while (offset < len) {
-			pa_list[cnt] = pa + chunk_offset;
+			pa += chunk_offset;
+			pa_list[cnt] = pa;
 			chunk_offset += SZ_1M;
 			offset += SZ_1M;
 			cnt++;
@@ -744,9 +719,6 @@ static int msm_iommu_attach_dev(struct iommu_domain *domain, struct device *dev)
 		ret = -EINVAL;
 		goto fail;
 	}
-
-	if (!(priv->client_name))
-		priv->client_name = dev_name(dev);
 
 	iommu_drvdata = dev_get_drvdata(dev->parent);
 	ctx_drvdata = dev_get_drvdata(dev);
@@ -900,8 +872,8 @@ fail:
 	return len;
 }
 
-static int msm_iommu_map_range(struct iommu_domain *domain, unsigned long va,
-			       struct scatterlist *sg, size_t len,
+static int msm_iommu_map_range(struct iommu_domain *domain, unsigned int va,
+			       struct scatterlist *sg, unsigned int len,
 			       int prot)
 {
 	int ret;
@@ -922,30 +894,9 @@ fail:
 	return ret;
 }
 
-static size_t msm_iommu_map_sg(struct iommu_domain *domain, unsigned long va,
-				struct scatterlist *sg, unsigned int nr_entries,
-				int prot)
-{
-	int ret, i;
-	struct scatterlist *tmp;
-	unsigned long len = 0;
 
-	/*
-	 * Longer term work: convert over to generic page table management
-	 * which means we can work on scattergather lists and the whole range
-	 */
-	for_each_sg(sg, tmp, nr_entries, i)
-		len += tmp->length;
-
-	ret = msm_iommu_map_range(domain, va, sg, len, prot);
-	if (ret)
-		return 0;
-	else
-		return len;
-}
-
-static int msm_iommu_unmap_range(struct iommu_domain *domain, unsigned long va,
-				 size_t len)
+static int msm_iommu_unmap_range(struct iommu_domain *domain, unsigned int va,
+				 unsigned int len)
 {
 	struct msm_iommu_drvdata *iommu_drvdata;
 	struct msm_iommu_ctx_drvdata *ctx_drvdata;
@@ -975,9 +926,15 @@ static phys_addr_t msm_iommu_iova_to_phys(struct iommu_domain *domain,
 	return 0;
 }
 
-static bool msm_iommu_capable(enum iommu_cap cap)
+static int msm_iommu_domain_has_cap(struct iommu_domain *domain,
+				    unsigned long cap)
 {
-	return false;
+	return 0;
+}
+
+static phys_addr_t msm_iommu_get_pt_base_addr(struct iommu_domain *domain)
+{
+	return 0;
 }
 
 void msm_iommu_check_scm_call_avail(void)
@@ -1000,76 +957,11 @@ int is_vfe_secure(void)
 {
 	if (secure_camera_enabled == -1) {
 		u32 ver = scm_get_feat_version(SCM_SVC_SEC_CAMERA);
-
 		secure_camera_enabled = ver >= MAKE_VERSION(1, 0, 0);
 	}
 	return secure_camera_enabled;
 }
 
-static int msm_iommu_dma_supported(struct iommu_domain *domain,
-				  struct device *dev, u64 mask)
-{
-	return ((1ULL << 32) - 1) < mask ? 0 : 1;
-}
-
-static int msm_iommu_domain_set_attr(struct iommu_domain *domain,
-				enum iommu_attr attr, void *data)
-{
-	switch (attr) {
-	case DOMAIN_ATTR_COHERENT_HTW_DISABLE:
-		/*
-		 * Just quietly bail out as L2-redirect feature
-		 * cannot be enabled for Secure context banks.
-		 */
-		break;
-	case DOMAIN_ATTR_SECURE_VMID:
-		/*
-		 * MSM iommu driver doesn't set the VMID for
-		 * any domain.
-		 */
-		break;
-	case DOMAIN_ATTR_ATOMIC:
-		/*
-		 * Map / unmap in legacy driver are by default atomic. So
-		 * we don't need to do anything here.
-		 */
-		break;
-	default:
-		return -EINVAL;
-	}
-	return 0;
-}
-
-static int msm_iommu_domain_get_attr(struct iommu_domain *domain,
-				enum iommu_attr attr, void *data)
-{
-	struct msm_iommu_priv *priv = domain->priv;
-	struct msm_iommu_ctx_drvdata *ctx_drvdata;
-
-	switch (attr) {
-	case DOMAIN_ATTR_COHERENT_HTW_DISABLE:
-		/*
-		 * This is the case always for secure
-		 * context banks
-		 */
-		*((unsigned int *) data) = 1;
-		break;
-	case DOMAIN_ATTR_SECURE_VMID:
-		*((int *) data) = -VMID_INVAL;
-		break;
-	case DOMAIN_ATTR_CONTEXT_BANK:
-		if (list_empty(&priv->list_attached))
-			return -ENODEV;
-
-		ctx_drvdata = list_first_entry(&priv->list_attached,
-			struct msm_iommu_ctx_drvdata, attached_elm);
-		*((unsigned int *) data) = ctx_drvdata->num;
-		break;
-	default:
-		return -EINVAL;
-	}
-	return 0;
-}
 
 static struct iommu_ops msm_iommu_ops = {
 	.domain_init = msm_iommu_domain_init,
@@ -1079,14 +971,11 @@ static struct iommu_ops msm_iommu_ops = {
 	.map = msm_iommu_map,
 	.unmap = msm_iommu_unmap,
 	.map_range = msm_iommu_map_range,
-	.map_sg = msm_iommu_map_sg,
 	.unmap_range = msm_iommu_unmap_range,
 	.iova_to_phys = msm_iommu_iova_to_phys,
-	.capable = msm_iommu_capable,
+	.domain_has_cap = msm_iommu_domain_has_cap,
+	.get_pt_base_addr = msm_iommu_get_pt_base_addr,
 	.pgsize_bitmap = MSM_IOMMU_PGSIZES,
-	.domain_set_attr = msm_iommu_domain_set_attr,
-	.domain_get_attr = msm_iommu_domain_get_attr,
-	.dma_supported = msm_iommu_dma_supported,
 };
 
 static int __init msm_iommu_sec_init(void)

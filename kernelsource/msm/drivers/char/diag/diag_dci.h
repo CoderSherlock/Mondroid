@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,6 +25,7 @@
 #define DISABLE_LOG_MASK	0
 #define MAX_EVENT_SIZE		512
 #define DCI_CLIENT_INDEX_INVALID -1
+#define DCI_PKT_REQ_MIN_LEN		9
 #define DCI_LOG_CON_MIN_LEN		14
 #define DCI_EVENT_CON_MIN_LEN		16
 
@@ -78,18 +79,6 @@ extern unsigned int dci_max_clients;
 
 #define DCI_MAGIC		(0xAABB1122)
 
-struct dci_pkt_req_t {
-	int uid;
-	int client_id;
-} __packed;
-
-struct dci_stream_req_t {
-	int type;
-	int client_id;
-	int set_flag;
-	int count;
-} __packed;
-
 struct dci_pkt_req_entry_t {
 	int client_id;
 	int uid;
@@ -141,7 +130,6 @@ struct diag_dci_buf_peripheral_t {
 };
 
 struct diag_dci_client_tbl {
-	int tgid;
 	struct diag_dci_reg_tbl_t client_info;
 	struct task_struct *client;
 	unsigned char *dci_log_mask;
@@ -231,22 +219,6 @@ enum {
 	DIAG_DCI_TABLE_ERR	/* Error dealing with registration tables */
 };
 
-#define DCI_HDR_SIZE					\
-	((sizeof(struct diag_dci_pkt_header_t) >	\
-	  sizeof(struct diag_dci_header_t)) ?		\
-	(sizeof(struct diag_dci_pkt_header_t) + 1) :	\
-	(sizeof(struct diag_dci_header_t) + 1))		\
-
-#define DCI_BUF_SIZE (uint32_t)(DIAG_MAX_REQ_SIZE + DCI_HDR_SIZE)
-
-#define DCI_REQ_HDR_SIZE				\
-	((sizeof(struct dci_pkt_req_t) >		\
-	  sizeof(struct dci_stream_req_t)) ?		\
-	(sizeof(struct dci_pkt_req_t)) :		\
-	(sizeof(struct dci_stream_req_t)))		\
-
-#define DCI_REQ_BUF_SIZE (uint32_t)(DIAG_MAX_REQ_SIZE + DCI_REQ_HDR_SIZE)
-
 #ifdef CONFIG_DEBUG_FS
 /* To collect debug information during each smd read */
 struct diag_dci_data_info {
@@ -263,23 +235,22 @@ extern struct mutex dci_stat_mutex;
 #endif
 
 int diag_dci_init(void);
-void diag_dci_channel_init(void);
 void diag_dci_exit(void);
 int diag_dci_register_client(struct diag_dci_reg_tbl_t *reg_entry);
 int diag_dci_deinit_client(struct diag_dci_client_tbl *entry);
-void diag_dci_channel_open_work(struct work_struct *);
+void diag_update_smd_dci_work_fn(struct work_struct *);
 void diag_dci_notify_client(int peripheral_mask, int data, int proc);
 void diag_dci_wakeup_clients(void);
 void diag_process_apps_dci_read_data(int data_type, void *buf, int recd_bytes);
-void diag_dci_process_peripheral_data(struct diagfwd_info *p_info, void *buf,
-				      int recd_bytes);
+int diag_process_smd_dci_read_data(struct diag_smd_info *smd_info, void *buf,
+								int recd_bytes);
 int diag_process_dci_transaction(unsigned char *buf, int len);
 void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 			 int token);
 void extract_dci_ctrl_pkt(unsigned char *buf, int len, int token);
 struct diag_dci_client_tbl *diag_dci_get_client_entry(int client_id);
-struct diag_dci_client_tbl *dci_lookup_client_entry_pid(int tgid);
-void diag_process_remote_dci_read_data(int index, void *buf, int recd_bytes);
+struct diag_dci_client_tbl *dci_lookup_client_entry_pid(int pid);
+int diag_process_remote_dci_read_data(int index, void *buf, int recd_bytes);
 int diag_dci_get_support_list(struct diag_dci_peripherals_t *support_list);
 /* DCI Log streaming functions */
 void update_dci_cumulative_log_mask(int offset, unsigned int byte_index,
@@ -305,8 +276,7 @@ uint8_t diag_dci_get_cumulative_real_time(int token);
 int diag_dci_set_real_time(struct diag_dci_client_tbl *entry,
 			   uint8_t real_time);
 int diag_dci_copy_health_stats(struct diag_dci_health_stats_proc *stats_proc);
-int diag_dci_write_proc(uint8_t peripheral, int pkt_type, char *buf, int len);
-void dci_drain_data(unsigned long data);
+int diag_dci_write_proc(int peripheral, int pkt_type, char *buf, int len);
 
 #ifdef CONFIG_DIAGFWD_BRIDGE_CODE
 int diag_send_dci_log_mask_remote(int token);

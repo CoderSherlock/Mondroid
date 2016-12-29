@@ -299,17 +299,12 @@ static void _rcar_thermal_irq_ctrl(struct rcar_thermal_priv *priv, int enable)
 static void rcar_thermal_work(struct work_struct *work)
 {
 	struct rcar_thermal_priv *priv;
-	unsigned long cctemp, nctemp;
 
 	priv = container_of(work, struct rcar_thermal_priv, work.work);
 
-	rcar_thermal_get_temp(priv->zone, &cctemp);
 	rcar_thermal_update_temp(priv);
 	rcar_thermal_irq_enable(priv);
-
-	rcar_thermal_get_temp(priv->zone, &nctemp);
-	if (nctemp != cctemp)
-		thermal_zone_device_update(priv->zone);
+	thermal_zone_device_update(priv->zone);
 }
 
 static u32 rcar_thermal_had_changed(struct rcar_thermal_priv *priv, u32 status)
@@ -318,7 +313,7 @@ static u32 rcar_thermal_had_changed(struct rcar_thermal_priv *priv, u32 status)
 
 	status = (status >> rcar_id_to_shift(priv)) & 0x3;
 
-	if (status) {
+	if (status & 0x3) {
 		dev_dbg(dev, "thermal%d %s%s\n",
 			priv->id,
 			(status & 0x2) ? "Rising " : "",
@@ -372,11 +367,12 @@ static int rcar_thermal_probe(struct platform_device *pdev)
 	int i;
 	int ret = -ENODEV;
 	int idle = IDLE_INTERVAL;
-	u32 enr_bits = 0;
 
 	common = devm_kzalloc(dev, sizeof(*common), GFP_KERNEL);
-	if (!common)
+	if (!common) {
+		dev_err(dev, "Could not allocate common\n");
 		return -ENOMEM;
+	}
 
 	INIT_LIST_HEAD(&common->head);
 	spin_lock_init(&common->lock);
@@ -393,6 +389,11 @@ static int rcar_thermal_probe(struct platform_device *pdev)
 		 * platform has IRQ support.
 		 * Then, drier use common register
 		 */
+		res = platform_get_resource(pdev, IORESOURCE_MEM, mres++);
+		if (!res) {
+			dev_err(dev, "Could not get platform resource\n");
+			return -ENODEV;
+		}
 
 		ret = devm_request_irq(dev, irq->start, rcar_thermal_irq, 0,
 				       dev_name(dev), common);
@@ -404,12 +405,14 @@ static int rcar_thermal_probe(struct platform_device *pdev)
 		/*
 		 * rcar_has_irq_support() will be enabled
 		 */
-		res = platform_get_resource(pdev, IORESOURCE_MEM, mres++);
 		common->base = devm_ioremap_resource(dev, res);
 		if (IS_ERR(common->base))
 			return PTR_ERR(common->base);
 
-		idle = 0; /* polling delay is not needed */
+		/* enable temperature comparation */
+		rcar_thermal_common_write(common, ENR, 0x00030303);
+
+		idle = 0; /* polling delaye is not needed */
 	}
 
 	for (i = 0;; i++) {
@@ -419,6 +422,7 @@ static int rcar_thermal_probe(struct platform_device *pdev)
 
 		priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 		if (!priv) {
+			dev_err(dev, "Could not allocate priv\n");
 			ret = -ENOMEM;
 			goto error_unregister;
 		}
@@ -450,18 +454,11 @@ static int rcar_thermal_probe(struct platform_device *pdev)
 			rcar_thermal_irq_enable(priv);
 
 		list_move_tail(&priv->list, &common->head);
-
-		/* update ENR bits */
-		enr_bits |= 3 << (i * 8);
 	}
-
-	/* enable temperature comparation */
-	if (irq)
-		rcar_thermal_common_write(common, ENR, enr_bits);
 
 	platform_set_drvdata(pdev, common);
 
-	dev_info(dev, "%d sensor probed\n", i);
+	dev_info(dev, "%d sensor proved\n", i);
 
 	return 0;
 
@@ -472,7 +469,7 @@ error_unregister:
 			rcar_thermal_irq_disable(priv);
 	}
 
-	pm_runtime_put(dev);
+	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
 
 	return ret;
@@ -490,7 +487,9 @@ static int rcar_thermal_remove(struct platform_device *pdev)
 			rcar_thermal_irq_disable(priv);
 	}
 
-	pm_runtime_put(dev);
+	platform_set_drvdata(pdev, NULL);
+
+	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
 
 	return 0;

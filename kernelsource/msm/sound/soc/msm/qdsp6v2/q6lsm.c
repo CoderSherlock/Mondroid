@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016, Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -32,7 +32,6 @@
 #include <linux/msm_audio_ion.h>
 #include <sound/q6afe-v2.h>
 #include <sound/audio_cal_utils.h>
-#include <sound/adsp_err.h>
 
 #define APR_TIMEOUT	(5 * HZ)
 #define LSM_ALIGN_BOUNDARY 512
@@ -135,7 +134,7 @@ static int q6lsm_callback(struct apr_client_data *data, void *priv)
 	uint32_t *payload;
 
 	if (!client || !data) {
-		pr_err("%s: client %pK data %pK\n",
+		pr_err("%s: client %p data %p\n",
 			__func__, client, data);
 		WARN_ON(1);
 		return -EINVAL;
@@ -386,15 +385,10 @@ static int q6lsm_apr_send_pkt(struct lsm_client *client, void *handle,
 					 APR_TIMEOUT);
 		if (likely(ret)) {
 			/* q6 returned error */
-			if (client->cmd_err_code) {
-				pr_err("%s: DSP returned error[%s]\n",
-					__func__, adsp_err_get_err_str(
-					client->cmd_err_code));
-				ret = adsp_err_get_lnx_err_code(
-						client->cmd_err_code);
-			} else {
+			if (client->cmd_err_code)
+				ret = -EINVAL;
+			else
 				ret = 0;
-			}
 		} else {
 			pr_err("%s: wait timedout, apr_opcode = 0x%x, size = %d\n",
 				__func__, msg_hdr->opcode, msg_hdr->pkt_size);
@@ -488,8 +482,7 @@ static int q6lsm_send_custom_topologies(struct lsm_client *client)
 	cstm_top.data_payload_addr_lsw =
 			lower_32_bits(cal_block->cal_data.paddr);
 	cstm_top.data_payload_addr_msw =
-			msm_audio_populate_upper_32_bits(
-					cal_block->cal_data.paddr);
+			upper_32_bits(cal_block->cal_data.paddr);
 	cstm_top.mem_map_handle = cal_block->map_data.q6map_handle;
 	cstm_top.buffer_size = cal_block->cal_data.size;
 
@@ -855,14 +848,13 @@ int q6lsm_register_sound_model(struct lsm_client *client,
 	q6lsm_add_hdr(client, &cmd.hdr, sizeof(cmd), true);
 	cmd.hdr.opcode = LSM_SESSION_CMD_REGISTER_SOUND_MODEL;
 	cmd.model_addr_lsw = lower_32_bits(client->sound_model.phys);
-	cmd.model_addr_msw = msm_audio_populate_upper_32_bits(
-						client->sound_model.phys);
+	cmd.model_addr_msw = upper_32_bits(client->sound_model.phys);
 	cmd.model_size = client->sound_model.size;
 	/* read updated mem_map_handle by q6lsm_mmapcallback */
 	rmb();
 	cmd.mem_map_handle = client->sound_model.mem_map_handle;
 
-	pr_debug("%s: addr %pK, size %d, handle 0x%x\n", __func__,
+	pr_debug("%s: addr %pa, size %d, handle 0x%x\n", __func__,
 		&client->sound_model.phys, cmd.model_size, cmd.mem_map_handle);
 	rc = q6lsm_apr_send_pkt(client, client->apr, &cmd, true, NULL);
 	if (rc)
@@ -936,7 +928,7 @@ static int q6lsm_memory_map_regions(struct lsm_client *client,
 	int rc;
 	int cmd_size = 0;
 
-	pr_debug("%s: dma_addr_p 0x%pK, dma_buf_sz %d, mmap_p 0x%pK, session %d\n",
+	pr_debug("%s: dma_addr_p 0x%pa, dma_buf_sz %d, mmap_p 0x%p, session %d\n",
 		__func__, &dma_addr_p, dma_buf_sz, mmap_p,
 		client->session);
 	if (CHECK_SESSION(client->session)) {
@@ -965,7 +957,7 @@ static int q6lsm_memory_map_regions(struct lsm_client *client,
 	mregions = (struct avs_shared_map_region_payload *)payload;
 
 	mregions->shm_addr_lsw = lower_32_bits(dma_addr_p);
-	mregions->shm_addr_msw = msm_audio_populate_upper_32_bits(dma_addr_p);
+	mregions->shm_addr_msw = upper_32_bits(dma_addr_p);
 	mregions->mem_size_bytes = dma_buf_sz;
 
 	rc = q6lsm_apr_send_pkt(client, client->mmap_apr, mmap_region_cmd,
@@ -1048,8 +1040,7 @@ static int q6lsm_send_cal(struct lsm_client *client,
 	q6lsm_set_param_hdr_info(params_hdr,
 			cal_block->cal_data.size,
 			lower_32_bits(client->lsm_cal_phy_addr),
-			msm_audio_populate_upper_32_bits(
-				client->lsm_cal_phy_addr),
+			upper_32_bits(client->lsm_cal_phy_addr),
 			client->sound_model.mem_map_handle);
 
 	pr_debug("%s: Cal Size = %zd", __func__,
@@ -1213,7 +1204,7 @@ int q6lsm_snd_model_buf_alloc(struct lsm_client *client, size_t len,
 	if (cal_block == NULL)
 		goto fail;
 
-	pr_debug("%s:Snd Model len = %zd cal size %zd phys addr %pK", __func__,
+	pr_debug("%s:Snd Model len = %zd cal size %zd phys addr %pa", __func__,
 		len, cal_block->cal_data.size,
 		&cal_block->cal_data.paddr);
 	if (!cal_block->cal_data.paddr) {
@@ -1268,8 +1259,8 @@ int q6lsm_snd_model_buf_alloc(struct lsm_client *client, size_t len,
 	memcpy((client->sound_model.data + pad_zero +
 		client->sound_model.size),
 	       (uint32_t *)cal_block->cal_data.kvaddr, client->lsm_cal_size);
-	pr_debug("%s: Copy cal start virt_addr %pK phy_addr %pK\n"
-			 "Offset cal virtual Addr %pK\n", __func__,
+	pr_debug("%s: Copy cal start virt_addr %p phy_addr %pa\n"
+			 "Offset cal virtual Addr %p\n", __func__,
 			 client->sound_model.data, &client->sound_model.phys,
 			 (pad_zero + client->sound_model.data +
 			 client->sound_model.size));
@@ -1395,7 +1386,7 @@ int q6lsm_set_one_param(struct lsm_client *client,
 	struct lsm_module_param_ids ids;
 	u8 *packet;
 
-	memset(&ids, 0, sizeof(ids));
+	memset(&ids, sizeof(ids), 0);
 	switch (param_type) {
 	case LSM_ENDPOINT_DETECT_THRESHOLD: {
 		ids.module_id = p_info->module_id;
@@ -1470,8 +1461,7 @@ int q6lsm_set_one_param(struct lsm_client *client,
 		q6lsm_set_param_hdr_info(&model_param.param_hdr,
 				payload_size,
 				lower_32_bits(client->sound_model.phys),
-				msm_audio_populate_upper_32_bits(
-					client->sound_model.phys),
+				upper_32_bits(client->sound_model.phys),
 				client->sound_model.mem_map_handle);
 
 		rc = q6lsm_apr_send_pkt(client, client->apr,
@@ -1588,7 +1578,7 @@ int q6lsm_lab_control(struct lsm_client *client, u32 enable)
 	u32 param_size;
 
 	if (!client) {
-		pr_err("%s: invalid param client %pK\n", __func__, client);
+		pr_err("%s: invalid param client %p\n", __func__, client);
 		return -EINVAL;
 	}
 	/* enable/disable lab on dsp */
@@ -1616,10 +1606,10 @@ int q6lsm_lab_control(struct lsm_client *client, u32 enable)
 	q6lsm_add_hdr(client, &lab_config.msg_hdr, sizeof(lab_config), true);
 	lab_config.msg_hdr.opcode = LSM_SESSION_CMD_SET_PARAMS;
 	q6lsm_set_param_hdr_info(&lab_config.params_hdr,
-				 sizeof(struct lsm_lab_config),
+				 sizeof(struct lsm_lab_enable),
 				 0, 0, 0);
 	lab_ids.module_id = LSM_MODULE_ID_LAB;
-	lab_ids.param_id = LSM_PARAM_ID_LAB_CONFIG;
+	lab_ids.param_id = LSM_PARAM_ID_LAB_ENABLE;
 	param_size = (sizeof(struct lsm_lab_config) -
 		      sizeof(struct lsm_param_payload_common));
 	q6lsm_set_param_common(&lab_config.lab_config.common,
@@ -1645,7 +1635,7 @@ int q6lsm_stop_lab(struct lsm_client *client)
 {
 	int rc = 0;
 	if (!client) {
-		pr_err("%s: invalid param client %pK\n", __func__, client);
+		pr_err("%s: invalid param client %p\n", __func__, client);
 		return -EINVAL;
 	}
 	rc = q6lsm_cmd(client, LSM_SESSION_CMD_EOB, true);
@@ -1658,7 +1648,7 @@ int q6lsm_read(struct lsm_client *client, struct lsm_cmd_read *read)
 {
 	int rc = 0;
 	if (!client || !read) {
-		pr_err("%s: Invalid params client %pK read %pK\n", __func__,
+		pr_err("%s: Invalid params client %p read %p\n", __func__,
 			client, read);
 		return -EINVAL;
 	}
@@ -1728,7 +1718,7 @@ int q6lsm_lab_buffer_alloc(struct lsm_client *client, bool alloc)
 			kfree(client->lab_buffer);
 			client->lab_buffer = NULL;
 		} else {
-			pr_debug("%s: Memory map handle %x phys %pK size %d\n",
+			pr_debug("%s: Memory map handle %x phys %pa size %d\n",
 				__func__,
 				client->lab_buffer[0].mem_map_handle,
 				&client->lab_buffer[0].phys,

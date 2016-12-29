@@ -317,7 +317,7 @@ ext4_io_end_t *ext4_get_io_end(ext4_io_end_t *io_end)
 static void ext4_end_bio(struct bio *bio, int error)
 {
 	ext4_io_end_t *io_end = bio->bi_private;
-	sector_t bi_sector = bio->bi_iter.bi_sector;
+	sector_t bi_sector = bio->bi_sector;
 
 	BUG_ON(!io_end);
 	bio->bi_end_io = NULL;
@@ -362,14 +362,6 @@ void ext4_io_submit(struct ext4_io_submit *io)
 
 	if (bio) {
 		bio_get(io->io_bio);
-
-#ifdef CONFIG_EXT4_FS_ENCRYPTION
-		if (io->io_crypt_inode) {
-			ext4_set_bio_crypt_context(io->io_crypt_inode,
-						   io->io_bio);
-		}
-#endif
-
 		submit_bio(io->io_op, io->io_bio);
 		BUG_ON(bio_flagged(io->io_bio, BIO_EOPNOTSUPP));
 		bio_put(io->io_bio);
@@ -394,7 +386,7 @@ static int io_submit_init_bio(struct ext4_io_submit *io,
 	bio = bio_alloc(GFP_NOIO, min(nvecs, BIO_MAX_PAGES));
 	if (!bio)
 		return -ENOMEM;
-	bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
+	bio->bi_sector = bh->b_blocknr * (bh->b_size >> 9);
 	bio->bi_bdev = bh->b_bdev;
 	bio->bi_end_io = ext4_end_bio;
 	bio->bi_private = ext4_get_io_end(io->io_end);
@@ -501,11 +493,7 @@ int ext4_bio_write_page(struct ext4_io_submit *io,
 		gfp_t gfp_flags = GFP_NOFS;
 
 	retry_encrypt:
-		if (ext4_using_hardware_encryption(inode))
-			io->io_crypt_inode = inode;
-		else
-			data_page = ext4_encrypt(inode, page, gfp_flags);
-
+		data_page = ext4_encrypt(inode, page, gfp_flags);
 		if (IS_ERR(data_page)) {
 			ret = PTR_ERR(data_page);
 			if (ret == ENOMEM && wbc->sync_mode == WB_SYNC_ALL) {
@@ -519,8 +507,7 @@ int ext4_bio_write_page(struct ext4_io_submit *io,
 			data_page = NULL;
 			goto out;
 		}
-	} else
-		io->io_crypt_inode = NULL;
+	}
 
 	/* Now submit buffers to write */
 	do {

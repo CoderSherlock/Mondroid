@@ -6,14 +6,34 @@
  * Authors: Felipe Balbi <balbi@ti.com>,
  *	    Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2  of
- * the License as published by the Free Software Foundation.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions, and the following disclaimer,
+ *    without modification.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. The names of the above-listed copyright holders may not be used
+ *    to endorse or promote products derived from this software without
+ *    specific prior written permission.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * ALTERNATIVELY, this software may be distributed under the terms of the
+ * GNU General Public License ("GPL") version 2, as published by the Free
+ * Software Foundation.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+ * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <linux/module.h>
@@ -746,8 +766,6 @@ static int dwc3_ep_trbs_show(struct seq_file *s, void *unused)
 
 	spin_lock_irqsave(&dwc->lock, flags);
 	dep = dwc->eps[ep_num];
-	if (!dep->trb_pool)
-		return 0;
 
 	seq_printf(s, "%s trb pool: flags:0x%x freeslot:%d busyslot:%d\n",
 		dep->name, dep->flags, dep->free_slot, dep->busy_slot);
@@ -1171,19 +1189,16 @@ static int dwc3_gadget_int_events_show(struct seq_file *s, void *unused)
 	seq_puts(s, "\nhard irq time (us):\t");
 	for (i = 0; i < MAX_INTR_STATS; i++)
 		seq_printf(s, "%d\t", dwc->irq_completion_time[i]);
-	seq_puts(s, "\nevents count:\t\t");
+	seq_puts(s, "\nevents count:\t");
 	for (i = 0; i < MAX_INTR_STATS; i++)
 		seq_printf(s, "%d\t", dwc->irq_event_count[i]);
 	seq_puts(s, "\nbh handled count:\t");
 	for (i = 0; i < MAX_INTR_STATS; i++)
 		seq_printf(s, "%d\t", dwc->bh_handled_evt_cnt[i]);
-	seq_puts(s, "\nirq thread time (us):\t");
+	seq_puts(s, "\ntasklet time:\t");
 	for (i = 0; i < MAX_INTR_STATS; i++)
 		seq_printf(s, "%d\t", dwc->bh_completion_time[i]);
-	seq_putc(s, '\n');
-
-	seq_printf(s, "t_pwr evt irq : %lld\t",
-			ktime_to_us(dwc->t_pwr_evt_irq));
+	seq_puts(s, "\n(usec)\n");
 
 	spin_unlock_irqrestore(&dwc->lock, flags);
 	return 0;

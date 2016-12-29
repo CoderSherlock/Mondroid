@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -12,6 +12,8 @@
 #define PACMAN_VERSION	"1.1"
 #define CLASS_NAME "msm_pacman"
 #define DEVICE_NAME "msm_pacman"
+/* Enable pr_debug() logs */
+/* #define DEBUG */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -39,8 +41,6 @@ static struct pacman_control_s pacman_ctl;
 ******************************************************************************/
 /* Number of QUPs supported */
 #define NUM_QUPS 12
-#define READ_BUF_SZ 256
-#define WRITE_BUF_SZ 64
 
 /* Bypass bus bind/unbind calls and return success */
 /* #define DEBUG_BYPASS_BINDING */
@@ -72,53 +72,62 @@ static int tz_configure_blsp_ownership(u32 qup_id, u32 subsystem_id)
 }
 #endif
 
+/******************************************************************************
+* State Machine Framework
+******************************************************************************/
 /* State Machine Input Events (edges) */
-enum state_machine_input_t {
+typedef enum state_machine_input_enum state_machine_input_t;
+
+/* State Machine States (nodes are represented as function pointers) */
+typedef struct state_machine_s state_machine_t;
+typedef void (*state_machine_state_fn)(state_machine_t *sm,
+					state_machine_input_t input,
+					void *arg);
+struct state_machine_s {
+	state_machine_state_fn curr_state; /* Read only */
+	state_machine_state_fn next_state; /* Update in state function */
+	char *curr_state_string;           /* Read only */
+
+	/* Pseudo v-table */
+	void (*init)(state_machine_t *this);
+	void (*run)(state_machine_t *this, state_machine_input_t input,
+			void *arg);
+};
+
+/* State Machine Member Function Prototypes */
+static void state_machine_init(state_machine_t *this);
+static void state_machine_run(state_machine_t *this,
+		state_machine_input_t input, void *arg);
+
+/******************************************************************************
+* State Machine Definition
+******************************************************************************/
+/* State Machine Input Events (edges) */
+enum state_machine_input_enum {
 	INIT = 0,
 	ENABLE = 1,
 	DISABLE = 2,
 	SSR = 3
 };
 
-struct state_machine_t {
-	void (*curr_state)(struct state_machine_t *sm,
-					enum state_machine_input_t input,
-					void *arg);
-	void (*next_state)(struct state_machine_t *sm,
-					enum state_machine_input_t input,
-					void *arg);
-	char *curr_state_string;
-
-	/* Pseudo v-table */
-	void (*init)(struct state_machine_t *this);
-	void (*run)(struct state_machine_t *this,
-					enum state_machine_input_t input,
-					void *arg);
-};
-
-/* State Machine Member Function Prototypes */
-static void state_machine_init(struct state_machine_t *this);
-static void state_machine_run(struct state_machine_t *this,
-		enum state_machine_input_t input, void *arg);
-
 /* State Machine States (nodes) */
 /* If adding a state, be sure to also update state_machine_run() strings */
-static void pacman_state_init(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg);
-static void pacman_state_disabled(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg);
-static void pacman_state_enabling(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg);
-static void pacman_state_enabled(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg);
-static void pacman_state_disabling(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg);
+static void pacman_state_init(state_machine_t *this,
+			state_machine_input_t input, void *arg);
+static void pacman_state_disabled(state_machine_t *this,
+			state_machine_input_t input, void *arg);
+static void pacman_state_enabling(state_machine_t *this,
+			state_machine_input_t input, void *arg);
+static void pacman_state_enabled(state_machine_t *this,
+			state_machine_input_t input, void *arg);
+static void pacman_state_disabling(state_machine_t *this,
+			state_machine_input_t input, void *arg);
 
 /* State Machine Member Functions */
-static void state_machine_init(struct state_machine_t *this)
+static void state_machine_init(state_machine_t *this)
 {
 	pr_debug("%s\n", __func__);
-	memset(this, '0', sizeof(struct state_machine_t));
+	memset(this, '0', sizeof(state_machine_t));
 	this->curr_state = pacman_state_init;
 	this->next_state = pacman_state_init;
 	this->curr_state_string = "INIT";
@@ -131,15 +140,13 @@ static void state_machine_init(struct state_machine_t *this)
 	this->run(this, INIT, NULL);
 }
 
-static void state_machine_run(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg)
+static void state_machine_run(state_machine_t *this,
+			state_machine_input_t input, void *arg)
 {
-	void (*tmp_state)(struct state_machine_t *sm,
-					enum state_machine_input_t input,
-					void *arg);
+	state_machine_state_fn tmp_state;
 
 	pr_debug("%s: input %u\n", __func__, input);
-	if (this == NULL || this->curr_state == NULL)
+	if (NULL == this || NULL == this->curr_state)
 		return;
 
 	/* Execute the current state with the given input event */
@@ -170,7 +177,9 @@ static void state_machine_run(struct state_machine_t *this,
 	}
 }
 
-/* QUP Framework (struct qup_instance passed as argument to state machine) */
+/******************************************************************************
+* QUP Framework (struct qup_instance passed as argument to state machine)
+******************************************************************************/
 enum subsystem {
 	NONE = 0,
 	APSS = 1,
@@ -187,7 +196,7 @@ struct qup_instance {
 	int id;
 	enum subsystem owner;
 	enum subsystem next_owner;
-	struct state_machine_t state_machine;
+	state_machine_t state_machine;
 	struct device *bus_dev;
 	struct device_driver *bus_drv;
 };
@@ -197,17 +206,16 @@ struct qup_instance {
 ******************************************************************************/
 static void pacman_framework_init(void);
 static void pacman_run(char *command_string);
-static void pacman_dump(char *buf, size_t length);
+static void pacman_dump(char *my_buff, size_t length);
 
 /* Globals */
 static DEFINE_MUTEX(pacman_mutex);
 static struct qup_instance QUP_TABLE[NUM_QUPS];
-static int pacman_adsp_in_ssr;
+static int PACMAN_ADSP_IN_SSR;
 
 static void pacman_framework_init(void)
 {
 	int i;
-
 	pr_debug("%s: Number of QUPs = %i\n", __func__, NUM_QUPS);
 
 	/* Initialize Global QUP Table */
@@ -223,21 +231,28 @@ static void pacman_framework_init(void)
 	mutex_init(&pacman_mutex);
 }
 
+/*
+ * Expect format to be "<string bus_id> <string subsytem_name>"
+ * i.e. "f9928000.i2c ADSP"
+ * Bus IDs
+ *   i2c: /sys/bus/platform/drivers/i2c-msm-v2/
+ *   SPI: /sys/bus/platform/drivers/spi_qsd/
+ */
 static void pacman_run(char *command_string)
 {
-	char buf[32], bus_string[16], subsystem_string[8];
+	char my_buff[32], bus_string[16], subsystem_string[8];
 	char *str, *str_running;
-	const char delimiters[] = "\n";
+	const char delimiters[] = " \n";
 	struct device *bus_dev;
 	enum subsystem subsystem;
 	int qup_id;
 
 	mutex_lock(&pacman_mutex);
-	strlcpy(buf, command_string, sizeof(buf));
-	buf[31] = '\0';
-	str_running = (char *)&buf;
+	strlcpy(my_buff, command_string, sizeof(my_buff));
+	my_buff[31] = '\0';
+	str_running = (char *)&my_buff;
 
-	pr_debug("%s: %s\n", __func__, (char *)&buf);
+	pr_debug("%s: %s\n", __func__, (char *)&my_buff);
 
 	/* Parse Bus ID */
 	str = strsep(&str_running, delimiters);
@@ -272,10 +287,8 @@ static void pacman_run(char *command_string)
 		goto error;
 	}
 
-	/*
-	 * Validate Bus to QUP ID mapping exists in device tree
-	 * i.e. Device tree contains aliases{ qup5 = &i2c5; }
-	 */
+	/* Validate Bus to QUP ID mapping exists in device tree */
+	/* i.e. Device tree contains aliases{ qup5 = &i2c5; } */
 	qup_id = of_alias_get_id(bus_dev->of_node, "qup");
 	if (qup_id < 0) {
 		pr_err("%s: ERROR QUP ID not found\n", __func__);
@@ -294,7 +307,7 @@ static void pacman_run(char *command_string)
 		goto error;
 	}
 
-	pr_debug("%s: Bus=%s QUP=%i Subsystem=%s\n", __func__,
+	pr_info("%s: Bus=%s QUP=%i Subsystem=%s\n", __func__,
 		bus_string, qup_id, subsystem_string);
 
 	/* Flag QUP as valid upon first PACman invocation */
@@ -310,32 +323,40 @@ static void pacman_run(char *command_string)
 				&QUP_TABLE[qup_id].state_machine,
 				ENABLE, &QUP_TABLE[qup_id]);
 		if (QUP_TABLE[qup_id].state_machine.curr_state ==
-			pacman_state_enabled)
+			pacman_state_enabled) {
 			QUP_TABLE[qup_id].owner = APSS;
-		else
+		} else {
 			QUP_TABLE[qup_id].owner = NONE;
+		}
 		break;
 	case ADSP:
 		QUP_TABLE[qup_id].state_machine.run(
 				&QUP_TABLE[qup_id].state_machine,
 				DISABLE, &QUP_TABLE[qup_id]);
 		if (QUP_TABLE[qup_id].state_machine.curr_state ==
-			pacman_state_disabled)
+			pacman_state_disabled) {
 			QUP_TABLE[qup_id].owner = ADSP;
-		else
+		} else {
 			QUP_TABLE[qup_id].owner = NONE;
+		}
 		break;
 	case NONE: /* SSR */
-		pr_debug("%s: SSR initiated on QUP %i\n", __func__, qup_id);
+		pr_info("%s: SSR initiated on QUP %i\n", __func__, qup_id);
 		QUP_TABLE[qup_id].state_machine.run(
 				&QUP_TABLE[qup_id].state_machine,
 				SSR, &QUP_TABLE[qup_id]);
 
+		/* TODO: Notify client of SSR event via poll() implementation */
+		/* Currently ownership is passed back after SSR */
+		/* Do not update the table owner for now - used to detect SSR */
 		/*
-		 * TODO: Notify client of SSR event via poll() implementation
-		 * Currently ownership is passed back after SSR
-		 * Do not update the table owner for now - used to detect SSR
-		 */
+		if (QUP_TABLE[qup_id].state_machine.curr_state ==
+			pacman_state_enabled) {
+			QUP_TABLE[qup_id].owner = APSS;
+		} else {
+			QUP_TABLE[qup_id].owner = NONE;
+		}
+		*/
 		break;
 	default:
 		pr_err("%s: ERROR owner not supported\n", __func__);
@@ -344,16 +365,17 @@ static void pacman_run(char *command_string)
 
 error:
 	mutex_unlock(&pacman_mutex);
+	return;
 }
 
-static void pacman_dump(char *buf, size_t length)
+static void pacman_dump(char *my_buff, size_t length)
 {
-	char working_buf[32];
+	char my_working_buff[32];
 	int rc, i;
 
 	pr_debug("%s\n", __func__);
 
-	if (buf == NULL || length < 256) {
+	if (NULL == my_buff || length < 256) {
 		pr_debug("%s: ERROR input buffer too small\n", __func__);
 		return;
 	}
@@ -361,20 +383,20 @@ static void pacman_dump(char *buf, size_t length)
 	mutex_lock(&pacman_mutex);
 
 	/* Parse QUP table and dump state*/
-	buf[0] = '\0';
+	my_buff[0] = '\0';
 
 	for (i = 0; i < NUM_QUPS; i++) {
 		/* Check if enabled for dumping */
 		if (QUP_TABLE[i].id >= 0) {
-			rc = snprintf((char *)(&working_buf),
-				sizeof(working_buf),
+			rc = snprintf((char *)(&my_working_buff),
+				sizeof(my_working_buff),
 				"%u %s %s\n", QUP_TABLE[i].id,
 				subsystem_strings[QUP_TABLE[i].owner],
 				QUP_TABLE[i].state_machine.curr_state_string);
-			strlcat(buf, (char *)&working_buf, length);
+			strlcat(my_buff, (char *)&my_working_buff, length);
 			/* Check for overflow */
-			if ((length - strlen(buf) - 1) <
-				sizeof(working_buf)) {
+			if ((length - strlen(my_buff) - 1) <
+				sizeof(my_working_buff)) {
 				pr_debug("%s Overflow Detected\n",
 						__func__);
 				break;
@@ -397,8 +419,7 @@ static void pacman_dump(char *buf, size_t length)
 /* QMI Client Port Handles */
 static struct qmi_handle *pacman_qmi_client_port_adsp;
 
-/*
- * TODO: Scale worker threads for other subsystems by passing the QMI
+/* TODO: Scale worker threads for other subsystems by passing the QMI
  * port handle from the callback function to the worker thread
  */
 /* QMI Worker Threads */
@@ -413,6 +434,24 @@ static DECLARE_DELAYED_WORK(work_qmi_client_port_notify,
 		pacman_qmi_client_port_notify_worker);
 static struct workqueue_struct *pacman_qmi_notification_workqueue;
 static struct workqueue_struct *pacman_qmi_rx_workqueue;
+
+
+/* Prototypes */
+static int pacman_qmi_init(void);
+static void pacman_qmi_deinit(void);
+static int pacman_qmi_client_notify_cb(struct notifier_block *this,
+					unsigned long code, void *cmd);
+static void pacman_qmi_client_port_notify_cb(struct qmi_handle *handle,
+						enum qmi_event_type event,
+						void *notify_priv);
+static int pacman_qmi_send_sync_ready_msg(struct qmi_handle *qmi_port_handle,
+						int qup_id);
+static int pacman_qmi_send_sync_take_ownership_msg(
+					struct qmi_handle *qmi_port_handle,
+					int qup_id);
+static int pacman_qmi_send_sync_give_ownership_msg(
+					struct qmi_handle *qmi_port_handle,
+					int qup_id);
 
 /* QMI Callbacks */
 static int pacman_qmi_client_notify_cb(struct notifier_block *this,
@@ -493,12 +532,12 @@ static void pacman_qmi_client_notify_arrive_worker(struct work_struct *w_s)
 		return;
 	}
 
-	/*
-	 * Re-establish ADSP ownership if SSR occurred
-	 * Note: Notification work queue serializes use of
+	/* Re-establish ADSP ownership if SSR occurred */
+	/* Note: Notification work queue serializes use of
 	 * IN_SSR flag and SSR
 	 */
-	if (pacman_adsp_in_ssr) {
+	if (PACMAN_ADSP_IN_SSR) {
+		/* pacman_run("<QUP_ID> ADSP"); */
 		for (i = 0; i < NUM_QUPS; i++) {
 			if (QUP_TABLE[i].owner == ADSP) {
 				snprintf((char *)&buff, sizeof(buff),
@@ -508,7 +547,7 @@ static void pacman_qmi_client_notify_arrive_worker(struct work_struct *w_s)
 			}
 		}
 
-		pacman_adsp_in_ssr = 0;
+		PACMAN_ADSP_IN_SSR = 0;
 	}
 }
 
@@ -518,7 +557,7 @@ static void pacman_qmi_client_notify_exit_worker(struct work_struct *w_s)
 	char buff[12];
 
 	pr_debug("%s\n", __func__);
-	pacman_adsp_in_ssr = 1;
+	PACMAN_ADSP_IN_SSR = 1;
 
 	/* Inject a SSR Event into PACMan for each registered QUP */
 	for (i = 0; i < NUM_QUPS; i++) {
@@ -555,17 +594,11 @@ static int pacman_qmi_init(void)
 	pacman_qmi_client_port_adsp = NULL;
 	pacman_qmi_notification_workqueue =
 		create_singlethread_workqueue("pacman_qmi_notification_wq");
-	if (!pacman_qmi_notification_workqueue) {
-		pr_err("%s: pacman_qmi_notification_wq creation failed\n",
-			__func__);
-		return -EFAULT;
-	}
 	pacman_qmi_rx_workqueue =
 		create_singlethread_workqueue("pacman_qmi_rx_wq");
-	if (!pacman_qmi_rx_workqueue) {
-		pr_err("%s: pacman_qmi_rx_wq creation failed\n",
+	if (!pacman_qmi_notification_workqueue || !pacman_qmi_rx_workqueue) {
+		pr_err("%s: create_singlethread_workqueue failed\n",
 			__func__);
-		destroy_workqueue(pacman_qmi_notification_workqueue);
 		return -EFAULT;
 	}
 
@@ -624,7 +657,7 @@ static int pacman_qmi_send_sync_ready_msg(struct qmi_handle *qmi_port_handle,
 
 	pr_debug("%s\n", __func__);
 
-	if (qmi_port_handle == NULL || qup_id < 0 || qup_id >= NUM_QUPS) {
+	if (NULL == qmi_port_handle || qup_id < 0 || qup_id >= NUM_QUPS) {
 		pr_err("%s: invalid arguments\n", __func__);
 		return -EINVAL;
 	}
@@ -771,8 +804,8 @@ error:
 /******************************************************************************
 * State Machine States
 ******************************************************************************/
-static void pacman_state_init(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg)
+static void pacman_state_init(state_machine_t *this,
+			state_machine_input_t input, void *arg)
 {
 	pr_debug("%s: input %u\n", __func__, input);
 
@@ -793,8 +826,8 @@ static void pacman_state_init(struct state_machine_t *this,
 	this->next_state = pacman_state_disabled;
 }
 
-static void pacman_state_disabled(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg)
+static void pacman_state_disabled(state_machine_t *this,
+			state_machine_input_t input, void *arg)
 {
 	pr_debug("%s: input %u\n", __func__, input);
 
@@ -816,8 +849,8 @@ static void pacman_state_disabled(struct state_machine_t *this,
 		this->next_state = pacman_state_enabling;
 }
 
-static void pacman_state_enabled(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg)
+static void pacman_state_enabled(state_machine_t *this,
+			state_machine_input_t input, void *arg)
 {
 	pr_debug("%s: input %u\n", __func__, input);
 
@@ -839,12 +872,11 @@ static void pacman_state_enabled(struct state_machine_t *this,
 		this->next_state = pacman_state_disabling;
 }
 
-#ifndef DEBUG_BYPASS_BINDING
-static void pacman_state_enabling(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg)
+static void pacman_state_enabling(state_machine_t *this,
+			state_machine_input_t input, void *arg)
 {
 	int rc;
-	struct qup_instance *qup_instance = arg;
+	struct qup_instance	*qup_instance = (struct qup_instance *)arg;
 
 	pr_debug("%s: input %u\n", __func__, input);
 
@@ -899,8 +931,9 @@ ssr_event:
 		goto ownership_cleanup;
 	}
 	/* Enable the bus and all its peripherals by binding the bus driver */
-
+#ifndef DEBUG_BYPASS_BINDING
 	rc = driver_attach(qup_instance->bus_drv);
+#endif
 	if (rc) {
 		pr_err("%s: ERROR calling driver_enable %i\n",
 				__func__, rc);
@@ -915,13 +948,14 @@ tz_cleanup:
 ownership_cleanup:
 general_error:
 	pr_err("%s: CRITICAL ERROR\n", __func__);
+	return;
 }
 
-static void pacman_state_disabling(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg)
+static void pacman_state_disabling(state_machine_t *this,
+			state_machine_input_t input, void *arg)
 {
 	int rc;
-	struct qup_instance *qup_instance = arg;
+	struct qup_instance	*qup_instance = (struct qup_instance *)arg;
 
 	pr_debug("%s: input %u\n", __func__, input);
 
@@ -958,15 +992,13 @@ static void pacman_state_disabling(struct state_machine_t *this,
 	/* Save the current bus device->device_driver for restoring later */
 	qup_instance->bus_drv = qup_instance->bus_dev->driver;
 	/* Disable the bus and peripherals by unbindng the bus */
-
+#ifndef DEBUG_BYPASS_BINDING
 	pr_debug("%s: Unbinding the bus\n", __func__);
 	device_release_driver(qup_instance->bus_dev);
-	/*
-	 * Unfortunately no return code to check here for a successful unbind.
-	 * If a peripheral does not unbind successfully, it may hang here
-	 */
+	/* Unfortunately no return code to check here for a successful unbind */
+	/* If a peripheral does not unbind successfully, it may hang here */
 	pr_debug("%s: Unbinding the bus complete\n", __func__);
-
+#endif
 	/* Call into TrustZone */
 	rc = tz_configure_blsp_ownership(qup_instance->id,
 					qup_instance->next_owner);
@@ -993,155 +1025,30 @@ tz_cleanup:
 		pr_err("%s: CRITICAL ERROR calling into TZ %i\n",
 				__func__, rc);
 driver_disable_cleanup:
+#ifndef DEBUG_BYPASS_BINDING
 	rc = driver_attach(qup_instance->bus_drv);
 	if (rc)
 		pr_err("%s: CRITICAL ERROR driver_enable %i\n",
 				__func__, rc);
-general_error:
-	this->next_state = pacman_state_enabled;
-}
-#else
-static void pacman_state_enabling(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg)
-{
-	int rc;
-	struct qup_instance *qup_instance = arg;
-
-	pr_debug("%s: input %u\n", __func__, input);
-
-	/* Verify expected events while in state */
-	if (input != ENABLE && input != SSR) {
-		pr_err("%s: ERROR with input %u\n", __func__, input);
-		goto general_error;
-	}
-
-	/* Verify inputs */
-	if (NULL == qup_instance) {
-		pr_err("%s: ERROR QUP configuration invalid\n",
-				__func__);
-		goto general_error;
-	}
-
-	pr_debug("%s: QUP ID=%i Subsystem=%s\n", __func__,
-		qup_instance->id,
-		subsystem_strings[qup_instance->next_owner]);
-
-	/* Do not attempt to communicate with ADSP if we have a SSR event */
-	if (input == SSR)
-		goto ssr_event;
-
-	/* APSS should be the requested owner */
-	if (qup_instance->next_owner != APSS) {
-		pr_err("%s: ERROR support for APSS Only\n", __func__);
-		goto general_error;
-	}
-	/* Check if ADSP is OK to release ownership */
-	rc = pacman_qmi_send_sync_ready_msg(pacman_qmi_client_port_adsp,
-					qup_instance->id);
-	if (rc) {
-		pr_err("%s: ERROR pacman_qmi_send_sync_ready_msg %i\n",
-				__func__, rc);
-		goto general_error;
-	}
-	/* APSS needs to be given ownership */
-	rc = pacman_qmi_send_sync_give_ownership_msg(
-						pacman_qmi_client_port_adsp,
-						qup_instance->id);
-	if (rc) {
-		pr_err("%s: ERROR send_sync_give_ownership_msg %i\n",
-				__func__, rc);
-		goto general_error;
-	}
-ssr_event:
-	/* Call into TrustZone */
-	rc = tz_configure_blsp_ownership(qup_instance->id, APSS);
-	if (rc) {
-		pr_err("%s: ERROR calling into TZ %i\n", __func__, rc);
-		goto ownership_cleanup;
-	}
-
-	/* State transition successful */
-	this->next_state = pacman_state_enabled;
-	return;
-
-	/* APSS is master, so the following is a true critical error */
-tz_cleanup:
-ownership_cleanup:
-general_error:
-	pr_err("%s: CRITICAL ERROR\n", __func__);
-}
-
-static void pacman_state_disabling(struct state_machine_t *this,
-			enum state_machine_input_t input, void *arg)
-{
-	int rc;
-	struct qup_instance *qup_instance = arg;
-
-	pr_debug("%s: input %u\n", __func__, input);
-
-	/* Verify expected events while in state */
-	if (input != DISABLE) {
-		pr_err("%s: ERROR with input %u\n", __func__, input);
-		goto general_error;
-	}
-
-	/* Verify inputs */
-	if (NULL == qup_instance) {
-		pr_err("%s: ERROR - QUP configuration invalid\n",
-				__func__);
-		goto general_error;
-	}
-
-	pr_debug("%s: QUP ID=%i Subsystem=%s\n", __func__,
-				qup_instance->id,
-				subsystem_strings[qup_instance->next_owner]);
-
-	/* ADSP should be the owner */
-	if (qup_instance->next_owner != ADSP) {
-		pr_err("%s: ERROR Support for ADSP Only\n", __func__);
-		goto general_error;
-	}
-	/* Check if ADSP is OK to take ownership */
-	rc = pacman_qmi_send_sync_ready_msg(pacman_qmi_client_port_adsp,
-						qup_instance->id);
-	if (rc) {
-		pr_err("%s: ERROR pacman_qmi_send_sync_ready_msg %i\n",
-				__func__, rc);
-		goto general_error;
-	}
-	/* Save the current bus device->device_driver for restoring later */
-	qup_instance->bus_drv = qup_instance->bus_dev->driver;
-
-	/* Call into TrustZone */
-	rc = tz_configure_blsp_ownership(qup_instance->id,
-					qup_instance->next_owner);
-	if (rc) {
-		pr_err("%s: ERROR calling into TZ %i\n", __func__, rc);
-		goto driver_disable_cleanup;
-	}
-	/* Transfer ownership to subsystem */
-	rc = pacman_qmi_send_sync_take_ownership_msg(
-						pacman_qmi_client_port_adsp,
-						qup_instance->id);
-	if (rc) {
-		pr_err("%s: ERROR send_sync_take_ownership_msg %i\n",
-				__func__, rc);
-		goto tz_cleanup;
-	}
-	/* State transition successful */
-	this->next_state = pacman_state_disabled;
-	return;
-
-tz_cleanup:
-	rc = tz_configure_blsp_ownership(qup_instance->id, APSS);
-	if (rc)
-		pr_err("%s: CRITICAL ERROR calling into TZ %i\n",
-				__func__, rc);
-driver_disable_cleanup:
-general_error:
-	this->next_state = pacman_state_enabled;
-}
 #endif
+general_error:
+	this->next_state = pacman_state_enabled;
+	return;
+}
+
+/******************************************************************************
+* Linux Driver
+******************************************************************************/
+static int __init pacman_init(void);
+static void __exit pacman_exit(void);
+static int pacman_probe(struct platform_device *pdev);
+static int pacman_remove(struct platform_device *pdev);
+static int pacman_open(struct inode *ip, struct file *fp);
+static int pacman_close(struct inode *ip, struct file *fp);
+static ssize_t pacman_read(struct file *fp, char __user *buffer,
+				size_t length, loff_t *offset);
+static ssize_t pacman_write(struct file *fp, const char *buffer,
+				size_t length, loff_t *offset);
 
 static int pacman_open(struct inode *ip, struct file *fp)
 {
@@ -1158,18 +1065,18 @@ static int pacman_close(struct inode *ip, struct file *fp)
 static ssize_t pacman_read(struct file *fp, char __user *buffer,
 				size_t length, loff_t *offset)
 {
-	char buf[READ_BUF_SZ];
+	char my_buff[256];
 	int rc;
 
 	pr_debug("%s\n", __func__);
 	if (*offset == 0) {
 		*offset = 1;
-		pacman_dump((char *)&buf, sizeof(buf));
-		if (strlen(buf) < length) {
-			rc = copy_to_user(buffer, buf, strlen(buf));
-			pr_debug("%s:\n%s\n", __func__, (char *)&buf);
+		pacman_dump((char *)&my_buff, sizeof(my_buff));
+		if (strlen(my_buff) < length) {
+			rc = copy_to_user(buffer, my_buff, strlen(my_buff));
+			pr_debug("%s:\n%s\n", __func__, (char *)&my_buff);
 		}
-		return strlen(buf);
+		return strlen(my_buff);
 	} else {
 		return 0;
 	}
@@ -1178,13 +1085,13 @@ static ssize_t pacman_read(struct file *fp, char __user *buffer,
 static ssize_t pacman_write(struct file *fp, const char *buffer,
 				size_t length, loff_t *offset)
 {
-	char buf[WRITE_BUF_SZ];
+	char my_buff[64];
+	int rc;
 
 	pr_debug("%s\n", __func__);
-	if (copy_from_user(buf, buffer, min(length, sizeof(buf))))
-		return -EFAULT;
-	buf[WRITE_BUF_SZ-1] = '\0';
-	pacman_run((char *)&buf);
+	rc = copy_from_user(my_buff, buffer, min(length, sizeof(my_buff)));
+	my_buff[63] = '\0';
+	pacman_run((char *)&my_buff);
 	return length;
 }
 
@@ -1198,7 +1105,7 @@ const struct file_operations pacman_fops = {
 
 static int pacman_probe(struct platform_device *pdev)
 {
-	pr_debug("%s: %s version %s\n", __func__, DEVICE_NAME, PACMAN_VERSION);
+	pr_info("%s: %s version %s\n", __func__, DEVICE_NAME, PACMAN_VERSION);
 
 	pacman_ctl.dev_num = register_chrdev(0, DEVICE_NAME, &pacman_fops);
 	if (pacman_ctl.dev_num < 0) {
@@ -1260,7 +1167,7 @@ static int __init pacman_init(void)
 {
 	int rc = 0;
 
-	pr_debug("%s\n", __func__);
+	pr_info("%s\n", __func__);
 
 	rc = platform_driver_register(&pacman_driver);
 	if (rc) {
@@ -1279,7 +1186,7 @@ static int __init pacman_init(void)
 
 static void __exit pacman_exit(void)
 {
-	pr_debug("%s\n", __func__);
+	pr_info("%s\n", __func__);
 	pacman_qmi_deinit();
 	platform_driver_unregister(&pacman_driver);
 }

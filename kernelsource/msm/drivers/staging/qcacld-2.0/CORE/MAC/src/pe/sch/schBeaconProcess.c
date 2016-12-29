@@ -353,7 +353,6 @@ static void __schBeaconProcessForSession( tpAniSirGlobal      pMac,
      tPowerdBm regMax = 0,maxTxPower = 0;
 #endif
     tANI_U8  cbMode;
-    tPowerdBm  localPowerConstraint;
 
     vos_mem_zero(&beaconParams, sizeof(tUpdateBeaconParams));
     beaconParams.paramChangeBitmap = 0;
@@ -652,42 +651,43 @@ static void __schBeaconProcessForSession( tpAniSirGlobal      pMac,
     regMax = cfgGetRegulatoryMaxTransmitPower( pMac, psessionEntry->currentOperChannel );
 #endif
 
-    localPowerConstraint = regMax;
-
-    if (pMac->roam.configParam.allow_tpc_from_ap) {
-#if defined FEATURE_WLAN_ESE
-        if (pBeacon->eseTxPwr.present) {
-            localPowerConstraint = pBeacon->eseTxPwr.power_limit;
-            schLog(pMac, LOG1, "ESE localPowerConstraint = %d,",
-                    localPowerConstraint);
-        }
-#endif
-
 #if defined WLAN_FEATURE_VOWIFI
-        if (pMac->rrm.rrmPEContext.rrmEnable &&
-                pBeacon->powerConstraintPresent) {
-            localPowerConstraint = regMax;
-            localPowerConstraint -= pBeacon->localPowerConstraint.
-                                                localPowerConstraints;
-            schLog(pMac, LOG1, "localPowerConstraint = %d,",
-                    localPowerConstraint);
+    {
+        tPowerdBm  localRRMConstraint = 0;
+        if ( pMac->rrm.rrmPEContext.rrmEnable && pBeacon->powerConstraintPresent )
+        {
+            localRRMConstraint = pBeacon->localPowerConstraint.localPowerConstraints;
         }
-#endif
+        else
+        {
+            localRRMConstraint = 0;
+        }
+        maxTxPower = limGetMaxTxPower(regMax, regMax - localRRMConstraint,
+                                      pMac->roam.configParam.nTxPowerCap);
     }
+#elif defined FEATURE_WLAN_ESE
+    maxTxPower = regMax;
+#endif
 
-    maxTxPower = limGetMaxTxPower(regMax, localPowerConstraint,
-                                   pMac->roam.configParam.nTxPowerCap);
-
-    schLog(pMac, LOG1, "RegMax = %d, MaxTx pwr = %d",
-            regMax, maxTxPower);
+#if defined FEATURE_WLAN_ESE
+    if( psessionEntry->isESEconnection )
+    {
+        tPowerdBm  localESEConstraint = 0;
+        if (pBeacon->eseTxPwr.present)
+        {
+            localESEConstraint = pBeacon->eseTxPwr.power_limit;
+            maxTxPower = limGetMaxTxPower(maxTxPower, localESEConstraint, pMac->roam.configParam.nTxPowerCap);
+        }
+        schLog( pMac, LOG1, "RegMax = %d, localEseCons = %d, MaxTx = %d", regMax, localESEConstraint, maxTxPower );
+    }
+#endif
 
 #if defined (FEATURE_WLAN_ESE) || defined (WLAN_FEATURE_VOWIFI)
     {
         //If maxTxPower is increased or decreased
         if( maxTxPower != psessionEntry->maxTxPower )
         {
-             schLog(pMac, LOG1, "Local power constraint change..updating new maxTx power %d to HAL from old pwr %d",
-                     maxTxPower, psessionEntry->maxTxPower);
+             schLog( pMac, LOG1, "Local power constraint change..updating new maxTx power %d to HAL",maxTxPower);
              if( limSendSetMaxTxPowerReq ( pMac, maxTxPower, psessionEntry ) == eSIR_SUCCESS )
                    psessionEntry->maxTxPower = maxTxPower;
         }
@@ -757,10 +757,6 @@ void schBeaconProcess(tpAniSirGlobal pMac, tANI_U8* pRxPacketInfo, tpPESession p
     {
         PELOGE(schLog(pMac, LOGE, FL("beacon parsing failed"));)
         pMac->sch.gSchBcnParseErrorCnt++;
-        if ((NULL != psessionEntry) &&
-           (!psessionEntry->currentBssBeaconCnt))
-             lim_parse_beacon_for_tim(pMac,
-                 pRxPacketInfo, psessionEntry);
         return;
     }
 

@@ -792,7 +792,6 @@ typedef struct wma_handle {
 	 */
 	u_int8_t ol_ini_info;
 	v_BOOL_t ssdp;
-	bool enable_mc_list;
 	bool enable_bcst_ptrn;
 #ifdef FEATURE_RUNTIME_PM
 	v_BOOL_t runtime_pm;
@@ -900,8 +899,6 @@ typedef struct wma_handle {
 	/* NAN datapath support enabled in firmware */
 	bool nan_datapath_enabled;
 	tSirLLStatsResults *link_stats_results;
-	vos_timer_t wma_fw_time_sync_timer;
-	struct sir_allowed_action_frames allowed_action_frames;
 }t_wma_handle, *tp_wma_handle;
 
 struct wma_target_cap {
@@ -1829,10 +1826,6 @@ void wma_remove_peer(tp_wma_handle wma, u_int8_t *bssid,
 
 void wma_add_wow_wakeup_event(tp_wma_handle wma, WOW_WAKE_EVENT_TYPE event,
 			bool enable);
-VOS_STATUS wma_create_peer(tp_wma_handle wma, ol_txrx_pdev_handle pdev,
-			   ol_txrx_vdev_handle vdev, u8 peer_addr[6],
-			   u_int32_t peer_type, u_int8_t vdev_id,
-			   v_BOOL_t roam_synch_in_progress);
 WLAN_PHY_MODE wma_chan_to_mode(uint8_t chan, ePhyChanBondState chan_offset,
 		uint8_t vht_capable, uint8_t dot11_mode);
 

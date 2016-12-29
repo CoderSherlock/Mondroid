@@ -76,12 +76,12 @@ extern bool verity_fec_is_enabled(struct dm_verity *v);
 
 extern int verity_fec_decode(struct dm_verity *v, struct dm_verity_io *io,
 			     enum verity_block_type type, sector_t block,
-			     u8 *dest, struct bvec_iter *iter);
+			     u8 *dest, unsigned vector, unsigned offset);
 
 extern unsigned verity_fec_status_table(struct dm_verity *v, unsigned sz,
 					char *result, unsigned maxlen);
 
-extern void verity_fec_finish_io(struct dm_verity_io *io);
+extern void verity_fec_finish_io(struct dm_verity_io *io, int error);
 extern void verity_fec_init_io(struct dm_verity_io *io);
 
 extern bool verity_is_fec_opt_arg(const char *arg_name);
@@ -107,7 +107,7 @@ static inline int verity_fec_decode(struct dm_verity *v,
 				    struct dm_verity_io *io,
 				    enum verity_block_type type,
 				    sector_t block, u8 *dest,
-				    struct bvec_iter *iter)
+				    unsigned vector, unsigned offset)
 {
 	return -EOPNOTSUPP;
 }
@@ -119,7 +119,7 @@ static inline unsigned verity_fec_status_table(struct dm_verity *v,
 	return sz;
 }
 
-static inline void verity_fec_finish_io(struct dm_verity_io *io)
+static inline void verity_fec_finish_io(struct dm_verity_io *io, int error)
 {
 }
 

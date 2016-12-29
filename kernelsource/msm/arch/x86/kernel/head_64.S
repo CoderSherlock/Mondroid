@@ -321,28 +321,26 @@ bad_address:
 	jmp bad_address
 
 	__INIT
-ENTRY(early_idt_handler_array)
+	.globl early_idt_handlers
+early_idt_handlers:
 	# 104(%rsp) %rflags
 	#  96(%rsp) %cs
 	#  88(%rsp) %rip
 	#  80(%rsp) error code
 	i = 0
 	.rept NUM_EXCEPTION_VECTORS
-	.ifeq (EXCEPTION_ERRCODE_MASK >> i) & 1
+	.if (EXCEPTION_ERRCODE_MASK >> i) & 1
+	ASM_NOP2
+	.else
 	pushq $0		# Dummy error code, to make stack frame uniform
 	.endif
 	pushq $i		# 72(%rsp) Vector number
-	jmp early_idt_handler_common
+	jmp early_idt_handler
 	i = i + 1
-	.fill early_idt_handler_array + i*EARLY_IDT_HANDLER_SIZE - ., 1, 0xcc
 	.endr
-ENDPROC(early_idt_handler_array)
 
-early_idt_handler_common:
-	/*
-	 * The stack is the hardware frame, an error code or zero, and the
-	 * vector number.
-	 */
+/* This is global to keep gas from relaxing the jumps */
+ENTRY(early_idt_handler)
 	cld
 
 	cmpl $2,(%rsp)		# X86_TRAP_NMI
@@ -414,7 +412,7 @@ early_idt_handler_common:
 is_nmi:
 	addq $16,%rsp		# drop vector number and error code
 	INTERRUPT_RETURN
-ENDPROC(early_idt_handler_common)
+ENDPROC(early_idt_handler)
 
 	__INITDATA
 
@@ -516,38 +514,17 @@ ENTRY(phys_base)
 	/* This must match the first entry in level2_kernel_pgt */
 	.quad   0x0000000000000000
 
-#ifdef CONFIG_KASAN
-#define FILL(VAL, COUNT)				\
-	.rept (COUNT) ;					\
-	.quad	(VAL) ;					\
-	.endr
-
-NEXT_PAGE(kasan_zero_pte)
-	FILL(kasan_zero_page - __START_KERNEL_map + _KERNPG_TABLE, 512)
-NEXT_PAGE(kasan_zero_pmd)
-	FILL(kasan_zero_pte - __START_KERNEL_map + _KERNPG_TABLE, 512)
-NEXT_PAGE(kasan_zero_pud)
-	FILL(kasan_zero_pmd - __START_KERNEL_map + _KERNPG_TABLE, 512)
-
-#undef FILL
-#endif
-
-
 #include "../../x86/xen/xen-head.S"
 	
+	.section .bss, "aw", @nobits
+	.align PAGE_SIZE
+ENTRY(idt_table)
+	.skip IDT_ENTRIES * 16
+
+	.align L1_CACHE_BYTES
+ENTRY(nmi_idt_table)
+	.skip IDT_ENTRIES * 16
+
 	__PAGE_ALIGNED_BSS
 NEXT_PAGE(empty_zero_page)
 	.skip PAGE_SIZE
-
-#ifdef CONFIG_KASAN
-/*
- * This page used as early shadow. We don't use empty_zero_page
- * at early stages, stack instrumentation could write some garbage
- * to this page.
- * Latter we reuse it as zero shadow for large ranges of memory
- * that allowed to access, but not instrumented by kasan
- * (vmalloc/vmemmap ...).
- */
-NEXT_PAGE(kasan_zero_page)
-	.skip PAGE_SIZE
-#endif

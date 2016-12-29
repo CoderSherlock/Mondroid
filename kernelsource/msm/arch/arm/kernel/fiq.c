@@ -39,6 +39,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/seq_file.h>
 
 #include <asm/cacheflush.h>
@@ -52,8 +53,7 @@
 		(unsigned)&vector_fiq_offset;		\
 	})
 
-static unsigned long dfl_fiq_insn;
-static struct pt_regs dfl_fiq_regs;
+static unsigned long no_fiq_insn;
 
 /* Default reacquire function
  * - we always relinquish FIQ control
@@ -61,15 +61,8 @@ static struct pt_regs dfl_fiq_regs;
  */
 static int fiq_def_op(void *ref, int relinquish)
 {
-	if (!relinquish) {
-		/* Restore default handler and registers */
-		local_fiq_disable();
-		set_fiq_regs(&dfl_fiq_regs);
-		set_fiq_handler(&dfl_fiq_insn, sizeof(dfl_fiq_insn));
-		local_fiq_enable();
-
-		/* FIXME: notify irq controller to standard enable FIQs */
-	}
+	if (!relinquish)
+		set_fiq_handler(&no_fiq_insn, sizeof(no_fiq_insn));
 
 	return 0;
 }
@@ -147,6 +140,11 @@ void disable_fiq(int fiq)
 	disable_irq(fiq + fiq_start);
 }
 
+void fiq_set_type(int fiq, unsigned int type)
+{
+	irq_set_irq_type(fiq + FIQ_START, type);
+}
+
 EXPORT_SYMBOL(set_fiq_handler);
 EXPORT_SYMBOL(__set_fiq_regs);	/* defined in fiqasm.S */
 EXPORT_SYMBOL(__get_fiq_regs);	/* defined in fiqasm.S */
@@ -154,11 +152,11 @@ EXPORT_SYMBOL(claim_fiq);
 EXPORT_SYMBOL(release_fiq);
 EXPORT_SYMBOL(enable_fiq);
 EXPORT_SYMBOL(disable_fiq);
+EXPORT_SYMBOL(fiq_set_type);
 
 void __init init_FIQ(int start)
 {
 	unsigned offset = FIQ_OFFSET;
-	dfl_fiq_insn = *(unsigned long *)(0xffff0000 + offset);
-	get_fiq_regs(&dfl_fiq_regs);
+	no_fiq_insn = *(unsigned long *)(0xffff0000 + offset);
 	fiq_start = start;
 }

@@ -1111,23 +1111,12 @@ limDeactivateAndChangeTimer(tpAniSirGlobal pMac, tANI_U32 timerId)
                    limLog(pMac, LOGE, FL("BTC Active Scan Min Time is Not Set"));
                }
             }
-            if (val)
+            if (tx_timer_change(&pMac->lim.limTimers.gLimPeriodicProbeReqTimer,
+                                val, 0) != TX_SUCCESS)
             {
-               if (tx_timer_change(&pMac->lim.limTimers.gLimPeriodicProbeReqTimer,
-                                   val, 0) != TX_SUCCESS)
-               {
-                   // Could not change min channel timer.
-                   // Log error
-                   limLog(pMac, LOGP, FL("Unable to change periodic timer"));
-               }
-            }
-            else
-            {
-               limLog(pMac, LOGE, FL("Do not change gLimPeriodicProbeReqTimer values,"
-                       "value = %d minchannel time = %d"
-                       "maxchannel time = %d"), val,
-                       pMac->lim.gpLimMlmScanReq->minChannelTime,
-                       pMac->lim.gpLimMlmScanReq->maxChannelTime);
+                // Could not change min channel timer.
+                // Log error
+                limLog(pMac, LOGP, FL("Unable to change periodic timer"));
             }
 
             break;

@@ -49,7 +49,6 @@
 #define HCI_UART_RESET_ON_INIT	1
 #define HCI_UART_CREATE_AMP	2
 #define HCI_UART_INIT_PENDING	3
-#define HCI_UART_EXT_CONFIG	4
 
 #include <linux/interrupt.h>
 
@@ -75,7 +74,6 @@ struct hci_uart {
 	struct work_struct	write_work;
 
 	struct hci_uart_proto	*proto;
-	struct mutex		proto_lock;
 	void			*priv;
 
 	struct sk_buff		*tx_skb;

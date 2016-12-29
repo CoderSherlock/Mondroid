@@ -501,7 +501,6 @@ VOS_STATUS vos_open( v_CONTEXT_t *pVosContext, v_SIZE_t hddContextSize )
 
   macOpenParms.ssdp = pHddCtx->cfg_ini->ssdp;
   macOpenParms.enable_bcst_ptrn = pHddCtx->cfg_ini->bcastptrn;
-  macOpenParms.enable_mc_list = pHddCtx->cfg_ini->fEnableMCAddrList;
 
 #ifdef FEATURE_WLAN_RA_FILTERING
    macOpenParms.RArateLimitInterval = pHddCtx->cfg_ini->RArateLimitInterval;
@@ -2735,8 +2734,7 @@ void vos_get_log_and_reset_completion(uint32_t *is_fatal,
 
 	if ((WLAN_LOG_INDICATOR_HOST_DRIVER == *indicator) &&
 	    ((WLAN_LOG_REASON_SME_OUT_OF_CMD_BUF == *reason_code) ||
-		 (WLAN_LOG_REASON_SME_COMMAND_STUCK == *reason_code) ||
-		 (WLAN_LOG_REASON_STALE_SESSION_FOUND == *reason_code)))
+		 (WLAN_LOG_REASON_SME_COMMAND_STUCK == *reason_code)))
 		*is_ssr_needed = true;
 	else
 		*is_ssr_needed = false;

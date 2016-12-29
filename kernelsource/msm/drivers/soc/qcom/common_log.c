@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -16,13 +16,10 @@
 #include <linux/init.h>
 #include <linux/kallsyms.h>
 #include <linux/slab.h>
-#include <linux/kmemleak.h>
 #include <soc/qcom/memory_dump.h>
 
 #define MISC_DUMP_DATA_LEN		4096
 #define PMIC_DUMP_DATA_LEN		4096
-#define VSENSE_DUMP_DATA_LEN		4096
-#define RPM_DUMP_DATA_LEN		(160 * 1024)
 
 void register_misc_dump(void)
 {
@@ -95,86 +92,6 @@ err0:
 	}
 }
 
-static void register_vsense_dump(void)
-{
-	static void *dump_addr;
-	int ret;
-	struct msm_dump_entry dump_entry;
-	struct msm_dump_data *dump_data;
-
-	if (MSM_DUMP_MAJOR(msm_dump_table_version()) > 1) {
-		dump_data = kzalloc(sizeof(struct msm_dump_data), GFP_KERNEL);
-		if (!dump_data) {
-			pr_err("dump data structure allocation failed for vsense data\n");
-			return;
-		}
-		dump_addr = kzalloc(VSENSE_DUMP_DATA_LEN, GFP_KERNEL);
-		if (!dump_addr) {
-			pr_err("buffer space allocation failed for vsense data\n");
-			goto err0;
-		}
-
-		dump_data->addr = virt_to_phys(dump_addr);
-		dump_data->len = VSENSE_DUMP_DATA_LEN;
-		dump_entry.id = MSM_DUMP_DATA_VSENSE;
-		dump_entry.addr = virt_to_phys(dump_data);
-		ret = msm_dump_data_register(MSM_DUMP_TABLE_APPS, &dump_entry);
-		if (ret) {
-			pr_err("Registering vsense dump region failed\n");
-			goto err1;
-		}
-		return;
-err1:
-		kfree(dump_addr);
-err0:
-		kfree(dump_data);
-	}
-}
-
-void register_rpm_dump(void)
-{
-#if !defined(CONFIG_HTC_RAMDUMP_CODERAM_BACKUP)
-	static void *dump_addr;
-#endif //CONFIG_HTC_RAMDUMP_CODERAM_BACKUP
-	int ret;
-	struct msm_dump_entry dump_entry;
-	struct msm_dump_data *dump_data;
-
-	if (MSM_DUMP_MAJOR(msm_dump_table_version()) > 1) {
-		dump_data = kzalloc(sizeof(struct msm_dump_data), GFP_KERNEL);
-		if (!dump_data) {
-			pr_err("rpm dump data structure allocation failed\n");
-			return;
-		}
-#if !defined(CONFIG_HTC_RAMDUMP_CODERAM_BACKUP)
-		dump_addr = kzalloc(RPM_DUMP_DATA_LEN, GFP_KERNEL);
-		if (!dump_addr) {
-			pr_err("rpm dump buffer space allocation failed\n");
-			goto err0;
-		}
-
-		dump_data->addr = virt_to_phys(dump_addr);
-#else //CONFIG_HTC_RAMDUMP_CODERAM_BACKUP
-		dump_data->addr = CONFIG_HTC_RAMDUMP_CODERAM_BACKUP_ADDR;
-#endif //CONFIG_HTC_RAMDUMP_CODERAM_BACKUP
-		dump_data->len = RPM_DUMP_DATA_LEN;
-		dump_entry.id = MSM_DUMP_DATA_RPM;
-		dump_entry.addr = virt_to_phys(dump_data);
-		ret = msm_dump_data_register(MSM_DUMP_TABLE_APPS, &dump_entry);
-		if (ret) {
-			pr_err("Registering rpm dump region failed\n");
-			goto err1;
-		}
-		return;
-err1:
-#if !defined(CONFIG_HTC_RAMDUMP_CODERAM_BACKUP)
-		kfree(dump_addr);
-err0:
-#endif //CONFIG_HTC_RAMDUMP_CODERAM_BACKUP
-		kfree(dump_data);
-	}
-}
-
 static void __init common_log_register_log_buf(void)
 {
 	char **log_bufp;
@@ -219,9 +136,7 @@ static void __init common_log_register_log_buf(void)
 							&entry_log_buf)) {
 			kfree(dump_data);
 			pr_err("Unable to register %d.\n", entry_log_buf.id);
-		} else
-			kmemleak_not_leak(dump_data);
-
+		}
 		if (fist_idxp) {
 			dump_data = kzalloc(sizeof(struct msm_dump_data),
 							GFP_KERNEL);
@@ -233,12 +148,9 @@ static void __init common_log_register_log_buf(void)
 			entry_first_idx.id = MSM_DUMP_DATA_LOG_BUF_FIRST_IDX;
 			entry_first_idx.addr = virt_to_phys(dump_data);
 			if (msm_dump_data_register(MSM_DUMP_TABLE_APPS,
-						&entry_first_idx)) {
-				kfree(dump_data);
+						&entry_first_idx))
 				pr_err("Unable to register %d.\n",
 						entry_first_idx.id);
-			} else
-				kmemleak_not_leak(dump_data);
 		}
 	}
 }
@@ -248,8 +160,6 @@ static int __init msm_common_log_init(void)
 	common_log_register_log_buf();
 	register_misc_dump();
 	register_pmic_dump();
-	register_vsense_dump();
-	register_rpm_dump();
 	return 0;
 }
 late_initcall(msm_common_log_init);

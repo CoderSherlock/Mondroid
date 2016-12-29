@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -22,8 +22,6 @@
 #include <linux/of_coresight.h>
 #include <linux/coresight.h>
 #include <linux/of.h>
-#include <linux/gpio.h>
-#include <linux/of_gpio.h>
 #include <linux/regulator/consumer.h>
 
 #include "coresight-priv.h"
@@ -53,7 +51,6 @@ struct qpdi_drvdata {
 	unsigned int		reg_high_io;
 	unsigned int		reg_lpm_io;
 	unsigned int		reg_hpm_io;
-	int			pmic_gpio_vote;
 	bool			enable;
 };
 
@@ -126,13 +123,11 @@ static int qpdi_enable(struct qpdi_drvdata *drvdata)
 	if (drvdata->enable)
 		goto out;
 
-	if (drvdata->pmic_gpio_vote < 0) {
-		ret = __qpdi_enable(drvdata);
-		if (ret)
-			goto err;
-	}
+	ret = __qpdi_enable(drvdata);
+	if (ret)
+		goto err;
 
-	qpdi_writel(drvdata, 0x2, QPDI_DISABLE_CFG);
+	qpdi_writel(drvdata, 0, QPDI_DISABLE_CFG);
 
 	drvdata->enable = true;
 	dev_info(drvdata->dev, "qpdi enabled\n");
@@ -164,10 +159,9 @@ static void qpdi_disable(struct qpdi_drvdata *drvdata)
 		return;
 	}
 
-	qpdi_writel(drvdata, 0x3, QPDI_DISABLE_CFG);
+	qpdi_writel(drvdata, 1, QPDI_DISABLE_CFG);
 
-	if (drvdata->pmic_gpio_vote < 0)
-		__qpdi_disable(drvdata);
+	__qpdi_disable(drvdata);
 
 	drvdata->enable = false;
 	mutex_unlock(&drvdata->mutex);
@@ -227,7 +221,7 @@ static int qpdi_parse_of_data(struct platform_device *pdev,
 	struct device_node *reg_node = NULL;
 	struct device *dev = &pdev->dev;
 	const __be32 *prop;
-	int len, ret;
+	int len;
 
 	reg_node = of_parse_phandle(node, "vdd-supply", 0);
 	if (reg_node) {
@@ -281,25 +275,6 @@ static int qpdi_parse_of_data(struct platform_device *pdev,
 		dev_err(dev,
 			"sdc io voltage supply not specified or available\n");
 	}
-
-	drvdata->pmic_gpio_vote = of_get_named_gpio(pdev->dev.of_node,
-						"qcom,pmic-carddetect-gpio", 0);
-	if (drvdata->pmic_gpio_vote < 0)
-		dev_info(dev, "QPDI hotplug card detection is not supported\n");
-	else {
-		ret = gpio_request(drvdata->pmic_gpio_vote, "qpdi_gpio_hp");
-		if (ret) {
-			dev_err(dev, "failed to allocate the GPIO\n");
-			return ret;
-		}
-
-		ret = gpio_direction_input(drvdata->pmic_gpio_vote);
-		if (ret) {
-			dev_err(dev, "failed to set the gpio to input\n");
-			gpio_free(drvdata->pmic_gpio_vote);
-			return ret;
-		}
-	}
 	return 0;
 }
 
@@ -315,10 +290,12 @@ static int qpdi_probe(struct platform_device *pdev)
 	if (coresight_fuse_qpdi_access_disabled())
 		return -EPERM;
 
-	pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
-	if (IS_ERR(pdata))
-		return PTR_ERR(pdata);
-	pdev->dev.platform_data = pdata;
+	if (pdev->dev.of_node) {
+		pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
+		if (IS_ERR(pdata))
+			return PTR_ERR(pdata);
+		pdev->dev.platform_data = pdata;
+	}
 
 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
 	if (!drvdata)
@@ -336,9 +313,11 @@ static int qpdi_probe(struct platform_device *pdev)
 
 	mutex_init(&drvdata->mutex);
 
-	ret = qpdi_parse_of_data(pdev, drvdata);
-	if (ret)
-		return ret;
+	if (pdev->dev.of_node) {
+		ret = qpdi_parse_of_data(pdev, drvdata);
+		if (ret)
+			return ret;
+	}
 
 	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
 	if (!desc)
@@ -363,9 +342,6 @@ static int qpdi_probe(struct platform_device *pdev)
 static int qpdi_remove(struct platform_device *pdev)
 {
 	struct qpdi_drvdata *drvdata = platform_get_drvdata(pdev);
-
-	if (drvdata->pmic_gpio_vote > -1)
-		gpio_free(drvdata->pmic_gpio_vote);
 
 	coresight_unregister(drvdata->csdev);
 	return 0;

@@ -15,10 +15,6 @@
 #define _WCNSS_WLAN_H_
 
 #include <linux/device.h>
-#include <linux/sched.h>
-
-#define IRIS_REGULATORS		4
-#define PRONTO_REGULATORS	3
 
 enum wcnss_opcode {
 	WCNSS_WLAN_SWITCH_OFF = 0,
@@ -30,22 +26,11 @@ enum wcnss_hw_type {
 	WCNSS_PRONTO_HW,
 };
 
-struct vregs_level {
-	int nominal_min;
-	int low_power_min;
-	int max_voltage;
-	int uA_load;
-};
-
 struct wcnss_wlan_config {
 	int	use_48mhz_xo;
-	int	is_pronto_vadc;
+	int	is_pronto_vt;
 	int	is_pronto_v3;
 	void __iomem	*msm_wcnss_base;
-	int	iris_id;
-	int	vbatt;
-	struct vregs_level pronto_vlevel[PRONTO_REGULATORS];
-	struct vregs_level iris_vlevel[IRIS_REGULATORS];
 };
 
 enum {
@@ -63,16 +48,10 @@ enum {
 	WCNSS_WLAN_MAX_GPIO,
 };
 
-#define WCNSS_VBATT_THRESHOLD           3500000
-#define WCNSS_VBATT_GUARD               20000
-#define WCNSS_VBATT_HIGH                3700000
-#define WCNSS_VBATT_LOW                 3300000
-#define WCNSS_VBATT_INITIAL             3000000
 #define WCNSS_WLAN_IRQ_INVALID -1
 #define HAVE_WCNSS_SUSPEND_RESUME_NOTIFY 1
 #define HAVE_WCNSS_RESET_INTR 1
 #define HAVE_WCNSS_CAL_DOWNLOAD 1
-#define HAVE_CBC_DONE 1
 #define HAVE_WCNSS_RX_BUFF_COUNT 1
 #define WLAN_MAC_ADDR_SIZE (6)
 #define WLAN_RF_REG_ADDR_START_OFFSET	0x3
@@ -119,26 +98,18 @@ void wcnss_prevent_suspend(void);
 int wcnss_hardware_type(void);
 void *wcnss_prealloc_get(unsigned int size);
 int wcnss_prealloc_put(void *ptr);
-void wcnss_reset_fiq(bool clk_chk_en);
+void wcnss_reset_intr(void);
 void wcnss_suspend_notify(void);
 void wcnss_resume_notify(void);
 void wcnss_riva_log_debug_regs(void);
 void wcnss_pronto_log_debug_regs(void);
 int wcnss_is_hw_pronto_ver3(void);
 int wcnss_device_ready(void);
-bool wcnss_cbc_complete(void);
 int wcnss_device_is_shutdown(void);
 void wcnss_riva_dump_pmic_regs(void);
 int wcnss_xo_auto_detect_enabled(void);
 u32 wcnss_get_wlan_rx_buff_count(void);
 int wcnss_wlan_iris_xo_mode(void);
-void wcnss_flush_work(struct work_struct *work);
-void wcnss_flush_delayed_work(struct delayed_work *dwork);
-void wcnss_init_work(struct work_struct *work , void *callbackptr);
-void wcnss_init_delayed_work(struct delayed_work *dwork , void *callbackptr);
-int wcnss_get_iris_name(char *iris_version);
-void wcnss_dump_stack(struct task_struct *task);
-
 #ifdef CONFIG_WCNSS_REGISTER_DUMP_ON_BITE
 void wcnss_log_debug_regs_on_bite(void);
 #else

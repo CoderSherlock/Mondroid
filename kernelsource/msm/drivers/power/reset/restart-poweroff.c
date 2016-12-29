@@ -20,8 +20,7 @@
 
 static void restart_poweroff_do_poweroff(void)
 {
-	reboot_mode = REBOOT_HARD;
-	machine_restart(NULL);
+	arm_pm_restart(REBOOT_HARD, NULL);
 }
 
 static int restart_poweroff_probe(struct platform_device *pdev)
@@ -63,5 +62,5 @@ module_platform_driver(restart_poweroff_driver);
 
 MODULE_AUTHOR("Andrew Lunn <andrew@lunn.ch");
 MODULE_DESCRIPTION("restart poweroff driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPLv2");
 MODULE_ALIAS("platform:poweroff-restart");

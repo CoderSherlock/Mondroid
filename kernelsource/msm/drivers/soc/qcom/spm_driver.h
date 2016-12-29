@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,37 +15,37 @@
 #include <soc/qcom/spm.h>
 
 enum {
-	MSM_SPM_REG_SAW_CFG,
-	MSM_SPM_REG_SAW_AVS_CTL,
-	MSM_SPM_REG_SAW_AVS_HYSTERESIS,
-	MSM_SPM_REG_SAW_SPM_CTL,
-	MSM_SPM_REG_SAW_PMIC_DLY,
-	MSM_SPM_REG_SAW_AVS_LIMIT,
-	MSM_SPM_REG_SAW_AVS_DLY,
-	MSM_SPM_REG_SAW_SPM_DLY,
-	MSM_SPM_REG_SAW_PMIC_DATA_0,
-	MSM_SPM_REG_SAW_PMIC_DATA_1,
-	MSM_SPM_REG_SAW_PMIC_DATA_2,
-	MSM_SPM_REG_SAW_PMIC_DATA_3,
-	MSM_SPM_REG_SAW_PMIC_DATA_4,
-	MSM_SPM_REG_SAW_PMIC_DATA_5,
-	MSM_SPM_REG_SAW_PMIC_DATA_6,
-	MSM_SPM_REG_SAW_PMIC_DATA_7,
-	MSM_SPM_REG_SAW_RST,
+	MSM_SPM_REG_SAW2_CFG,
+	MSM_SPM_REG_SAW2_AVS_CTL,
+	MSM_SPM_REG_SAW2_AVS_HYSTERESIS,
+	MSM_SPM_REG_SAW2_SPM_CTL,
+	MSM_SPM_REG_SAW2_PMIC_DLY,
+	MSM_SPM_REG_SAW2_AVS_LIMIT,
+	MSM_SPM_REG_SAW2_AVS_DLY,
+	MSM_SPM_REG_SAW2_SPM_DLY,
+	MSM_SPM_REG_SAW2_PMIC_DATA_0,
+	MSM_SPM_REG_SAW2_PMIC_DATA_1,
+	MSM_SPM_REG_SAW2_PMIC_DATA_2,
+	MSM_SPM_REG_SAW2_PMIC_DATA_3,
+	MSM_SPM_REG_SAW2_PMIC_DATA_4,
+	MSM_SPM_REG_SAW2_PMIC_DATA_5,
+	MSM_SPM_REG_SAW2_PMIC_DATA_6,
+	MSM_SPM_REG_SAW2_PMIC_DATA_7,
+	MSM_SPM_REG_SAW2_RST,
 
-	MSM_SPM_REG_NR_INITIALIZE = MSM_SPM_REG_SAW_RST,
+	MSM_SPM_REG_NR_INITIALIZE = MSM_SPM_REG_SAW2_RST,
 
-	MSM_SPM_REG_SAW_ID,
-	MSM_SPM_REG_SAW_SECURE,
-	MSM_SPM_REG_SAW_STS0,
-	MSM_SPM_REG_SAW_STS1,
-	MSM_SPM_REG_SAW_STS2,
-	MSM_SPM_REG_SAW_VCTL,
-	MSM_SPM_REG_SAW_SEQ_ENTRY,
-	MSM_SPM_REG_SAW_SPM_STS,
-	MSM_SPM_REG_SAW_AVS_STS,
-	MSM_SPM_REG_SAW_PMIC_STS,
-	MSM_SPM_REG_SAW_VERSION,
+	MSM_SPM_REG_SAW2_ID,
+	MSM_SPM_REG_SAW2_SECURE,
+	MSM_SPM_REG_SAW2_STS0,
+	MSM_SPM_REG_SAW2_STS1,
+	MSM_SPM_REG_SAW2_STS2,
+	MSM_SPM_REG_SAW2_VCTL,
+	MSM_SPM_REG_SAW2_SEQ_ENTRY,
+	MSM_SPM_REG_SAW2_SPM_STS,
+	MSM_SPM_REG_SAW2_AVS_STS,
+	MSM_SPM_REG_SAW2_PMIC_STS,
+	MSM_SPM_REG_SAW2_VERSION,
 
 	MSM_SPM_REG_NR,
 };
@@ -53,7 +53,7 @@ enum {
 struct msm_spm_seq_entry {
 	uint32_t mode;
 	uint8_t *cmd;
-	uint32_t ctl;
+	bool  notify_rpm;
 };
 
 struct msm_spm_platform_data {
@@ -96,11 +96,9 @@ struct msm_spm_driver_data {
 
 int msm_spm_drv_init(struct msm_spm_driver_data *dev,
 		struct msm_spm_platform_data *data);
-int msm_spm_drv_reg_init(struct msm_spm_driver_data *dev,
-		struct msm_spm_platform_data *data);
-void msm_spm_drv_reinit(struct msm_spm_driver_data *dev, bool seq);
+void msm_spm_drv_reinit(struct msm_spm_driver_data *dev);
 int msm_spm_drv_set_low_power_mode(struct msm_spm_driver_data *dev,
-		uint32_t ctl);
+		uint32_t addr, bool pc_mode, bool notify_rpm);
 int msm_spm_drv_set_vdd(struct msm_spm_driver_data *dev,
 		unsigned int vlevel);
 void dump_regs(struct msm_spm_driver_data *dev, int cpu);
@@ -114,21 +112,7 @@ int msm_spm_drv_set_spm_enable(struct msm_spm_driver_data *dev,
 int msm_spm_drv_set_pmic_data(struct msm_spm_driver_data *dev,
 		enum msm_spm_pmic_port port, unsigned int data);
 
-int msm_spm_drv_set_avs_limit(struct msm_spm_driver_data *dev,
-		 uint32_t min_lvl, uint32_t max_lvl);
-
-int msm_spm_drv_set_avs_enable(struct msm_spm_driver_data *dev,
-		 bool enable);
-int msm_spm_drv_get_avs_enable(struct msm_spm_driver_data *dev);
-
-int msm_spm_drv_set_avs_irq_enable(struct msm_spm_driver_data *dev,
-		enum msm_spm_avs_irq irq, bool enable);
-int msm_spm_drv_avs_clear_irq(struct msm_spm_driver_data *dev,
-		enum msm_spm_avs_irq irq);
-
 void msm_spm_reinit(void);
 int msm_spm_init(struct msm_spm_platform_data *data, int nr_devs);
-void msm_spm_drv_upd_reg_shadow(struct msm_spm_driver_data *dev, int id,
-		int val);
-uint32_t msm_spm_drv_get_vdd(struct msm_spm_driver_data *dev);
+
 #endif

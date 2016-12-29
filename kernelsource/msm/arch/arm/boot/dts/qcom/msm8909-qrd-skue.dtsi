@@ -81,7 +81,7 @@
 			pinctrl-1 = <&ts_int_suspend &ts_reset_suspend>;
 			pinctrl-2 = <&ts_release>;
 			focaltech,name = "ft6306";
-			focaltech,family-id = <0x06>;
+			focaltech,family-id = <0x36>;
 			focaltech,reset-gpio = <&msm_gpio 12 0x0>;
 			focaltech,irq-gpio = <&msm_gpio 13 0x0>;
 			focaltech,display-coords = <0 0 480 854>;
@@ -96,7 +96,7 @@
 			focaltech,fw-delay-aa-ms = <30>;
 			focaltech,fw-delay-55-ms = <30>;
 			focaltech,fw-upgrade-id1 = <0x79>;
-			focaltech,fw-upgrade-id2 = <0x08>;
+			focaltech,fw-upgrade-id2 = <0x18>;
 			focaltech,fw-delay-readid-ms = <10>;
 			focaltech,fw-delay-era-flsh-ms = <2000>;
 			focaltech,fw-auto-cal;
@@ -286,23 +286,23 @@
 };
 
 &sdc2_cd_on {
-	/delete-property/ bias-pull-up;
-	bias-pull-down;
+        /delete-property/ bias-pull-up;
+        bias-pull-down;
 };
 
 &sdc2_cd_off {
-	/delete-property/ bias-disable;
-	bias-pull-down;
+        /delete-property/ bias-disable;
+        bias-pull-down;
 };
 
 &sdhc_2 {
-	qcom,nonremovable;
+        qcom,nonremovable;
 
-	interrupts = <0 1>;
-	interrupt-map = <0 &intc 0 125 0
-			1 &intc 0 221 0>;
-	interrupt-names = "hc_irq", "pwr_irq";
-	delete-property/ cd-gpios;
+        interrupts = <0 1>;
+        interrupt-map = <0 &intc 0 125 0
+                1 &intc 0 221 0>;
+        interrupt-names = "hc_irq", "pwr_irq";
+        /delete-property/ cd-gpios;
 };
 
 &pm8909_mpps {
@@ -331,13 +331,14 @@
 	};
 };
 
+#include "dsi-panel-hx8379c-fwvga-video.dtsi"
+
 &mdss_mdp {
 	qcom,mdss-pref-prim-intf = "dsi";
 };
 
 &dsi_hx8379c_fwvga_video {
-	qcom,mdss-dsi-pwm-gpio = <&pm8909_mpps 2 0>;
-	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
+	qcom,cont-splash-enabled;
 };
 
 &pmx_mdss {
@@ -365,12 +366,6 @@
 	};
 };
 
-&pm8909_adc_tm {
-	chan@30 {
-		qcom,scale-function = <8>;
-	};
-};
-
 &pm8909_chg {
 	qcom,vddmax-mv = <4350>;
 	qcom,vddsafe-mv = <4380>;
@@ -378,6 +373,7 @@
 	qcom,batt-hot-percentage = <25>;
 	qcom,batt-cold-percentage = <80>;
 	qcom,tchg-mins = <360>;
+	qcom,bms-controlled-charging;
 	qcom,disable-vbatdet-based-recharge;
 	status = "okay";
 };

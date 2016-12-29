@@ -16,6 +16,7 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+#include <linux/init.h>
 #include <linux/signal.h>
 #include <linux/slab.h>
 #include <linux/module.h>
@@ -116,9 +117,6 @@ MODULE_LICENSE("GPL v2");
  * converted).
  */
 #define EMS_USB_ARM7_CLOCK 8000000
-
-#define CPC_TX_QUEUE_TRIGGER_LOW	25
-#define CPC_TX_QUEUE_TRIGGER_HIGH	35
 
 /*
  * CAN-Message representation in a CPC_MSG. Message object type is
@@ -281,11 +279,6 @@ static void ems_usb_read_interrupt_callback(struct urb *urb)
 	switch (urb->status) {
 	case 0:
 		dev->free_slots = dev->intr_in_buffer[1];
-		if(dev->free_slots > CPC_TX_QUEUE_TRIGGER_HIGH){
-			if (netif_queue_stopped(netdev)){
-				netif_wake_queue(netdev);
-			}
-		}
 		break;
 
 	case -ECONNRESET: /* unlink */
@@ -442,9 +435,10 @@ static void ems_usb_read_bulk_callback(struct urb *urb)
 	if (urb->actual_length > CPC_HEADER_SIZE) {
 		struct ems_cpc_msg *msg;
 		u8 *ibuf = urb->transfer_buffer;
-		u8 msg_count, start;
+		u8 msg_count, again, start;
 
 		msg_count = ibuf[0] & ~0x80;
+		again = ibuf[0] & 0x80;
 
 		start = CPC_HEADER_SIZE;
 
@@ -536,6 +530,8 @@ static void ems_usb_write_bulk_callback(struct urb *urb)
 	/* Release context */
 	context->echo_index = MAX_TX_URBS;
 
+	if (netif_queue_stopped(netdev))
+		netif_wake_queue(netdev);
 }
 
 /*
@@ -595,7 +591,7 @@ static int ems_usb_start(struct ems_usb *dev)
 	int err, i;
 
 	dev->intr_in_buffer[0] = 0;
-	dev->free_slots = 50; /* initial size */
+	dev->free_slots = 15; /* initial size */
 
 	for (i = 0; i < MAX_RX_URBS; i++) {
 		struct urb *urb = NULL;
@@ -629,7 +625,6 @@ static int ems_usb_start(struct ems_usb *dev)
 			usb_unanchor_urb(urb);
 			usb_free_coherent(dev->udev, RX_BUFFER_SIZE, buf,
 					  urb->transfer_dma);
-			usb_free_urb(urb);
 			break;
 		}
 
@@ -803,8 +798,8 @@ static netdev_tx_t ems_usb_start_xmit(struct sk_buff *skb, struct net_device *ne
 	 * allowed (MAX_TX_URBS).
 	 */
 	if (!context) {
+		usb_unanchor_urb(urb);
 		usb_free_coherent(dev->udev, size, buf, urb->transfer_dma);
-		usb_free_urb(urb);
 
 		netdev_warn(netdev, "couldn't find free context\n");
 
@@ -846,7 +841,7 @@ static netdev_tx_t ems_usb_start_xmit(struct sk_buff *skb, struct net_device *ne
 
 		/* Slow down tx path */
 		if (atomic_read(&dev->active_tx_urbs) >= MAX_TX_URBS ||
-		    dev->free_slots < CPC_TX_QUEUE_TRIGGER_LOW) {
+		    dev->free_slots < 5) {
 			netif_stop_queue(netdev);
 		}
 	}
@@ -888,7 +883,6 @@ static const struct net_device_ops ems_usb_netdev_ops = {
 	.ndo_open = ems_usb_open,
 	.ndo_stop = ems_usb_close,
 	.ndo_start_xmit = ems_usb_start_xmit,
-	.ndo_change_mtu = can_change_mtu,
 };
 
 static const struct can_bittiming_const ems_usb_bittiming_const = {

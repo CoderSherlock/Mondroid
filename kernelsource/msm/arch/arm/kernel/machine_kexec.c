@@ -16,7 +16,6 @@
 #include <asm/cacheflush.h>
 #include <asm/fncpy.h>
 #include <asm/mach-types.h>
-#include <asm/smp_plat.h>
 #include <asm/system_misc.h>
 
 extern void relocate_new_kernel(void);
@@ -29,7 +28,6 @@ extern unsigned long kexec_boot_atags;
 
 static atomic_t waiting_for_crash_ipi;
 
-static unsigned long dt_mem;
 /*
  * Provide a dummy crash_notes definition while crash dump arrives to arm.
  * This prevents breakage of crash_notes attribute in kernel/ksysfs.c.
@@ -40,14 +38,6 @@ int machine_kexec_prepare(struct kimage *image)
 	struct kexec_segment *current_segment;
 	__be32 header;
 	int i, err;
-
-	/*
-	 * Validate that if the current HW supports SMP, then the SW supports
-	 * and implements CPU hotplug for the current HW. If not, we won't be
-	 * able to kexec reliably, so fail the prepare operation.
-	 */
-	if (num_possible_cpus() > 1 && !platform_can_cpu_hotplug())
-		return -EINVAL;
 
 	/*
 	 * No segment at default ATAGs address. try to locate
@@ -65,7 +55,7 @@ int machine_kexec_prepare(struct kimage *image)
 			return err;
 
 		if (be32_to_cpu(header) == OF_DT_HEADER)
-			dt_mem = current_segment->mem;
+			kexec_boot_atags = current_segment->mem;
 	}
 	return 0;
 }
@@ -148,13 +138,10 @@ void machine_kexec(struct kimage *image)
 	unsigned long reboot_entry_phys;
 	void *reboot_code_buffer;
 
-	/*
-	 * This can only happen if machine_shutdown() failed to disable some
-	 * CPU, and that can only happen if the checks in
-	 * machine_kexec_prepare() were not correct. If this fails, we can't
-	 * reliably kexec anyway, so BUG_ON is appropriate.
-	 */
-	BUG_ON(num_online_cpus() > 1);
+	if (num_online_cpus() > 1) {
+		pr_err("kexec: error: multiple CPUs still online\n");
+		return;
+	}
 
 	page_list = image->head & PAGE_MASK;
 
@@ -164,12 +151,12 @@ void machine_kexec(struct kimage *image)
 	reboot_code_buffer = page_address(image->control_code_page);
 
 	/* Prepare parameters for reboot_code_buffer*/
-	set_kernel_text_rw();
 	kexec_start_address = image->start;
 	kexec_indirection_page = page_list;
 	kexec_mach_type = machine_arch_type;
-	kexec_boot_atags = dt_mem ?: image->start - KEXEC_ARM_ZIMAGE_OFFSET
-				     + KEXEC_ARM_ATAGS_OFFSET;
+	if (!kexec_boot_atags)
+		kexec_boot_atags = image->start - KEXEC_ARM_ZIMAGE_OFFSET + KEXEC_ARM_ATAGS_OFFSET;
+
 
 	/* copy our kernel relocation code to the control code page */
 	reboot_entry = fncpy(reboot_code_buffer,

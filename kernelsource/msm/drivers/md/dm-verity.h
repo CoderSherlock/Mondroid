@@ -2,10 +2,6 @@
  * Copyright (C) 2012 Red Hat, Inc.
  * Copyright (C) 2015 Google, Inc.
  *
- * Author: Mikulas Patocka <mpatocka@redhat.com>
- *
- * Based on Chromium dm-verity driver (C) 2011 The Chromium OS Authors
- *
  * This file is released under the GPLv2.
  */
 
@@ -16,7 +12,9 @@
 #include <linux/device-mapper.h>
 #include <crypto/hash.h>
 
+#define DM_VERITY_IO_VEC_INLINE		16
 #define DM_VERITY_MAX_LEVELS		63
+
 
 enum verity_mode {
 	DM_VERITY_MODE_EIO,
@@ -28,8 +26,6 @@ enum verity_block_type {
 	DM_VERITY_BLOCK_TYPE_DATA,
 	DM_VERITY_BLOCK_TYPE_METADATA
 };
-
-struct dm_verity_fec;
 
 struct dm_verity {
 	struct dm_dev *data_dev;
@@ -57,6 +53,8 @@ struct dm_verity {
 	enum verity_mode mode;	/* mode for handling verification errors */
 	unsigned corrupted_errs;/* Number of errors for corrupted blocks */
 
+	mempool_t *vec_mempool;	/* mempool of bio vector */
+
 	struct workqueue_struct *verify_wq;
 
 	/* starting blocks for each tree level. 0 is the lowest level. */
@@ -75,9 +73,14 @@ struct dm_verity_io {
 	sector_t block;
 	unsigned n_blocks;
 
-	struct bvec_iter iter;
+	/* saved bio vector */
+	struct bio_vec *io_vec;
+	unsigned io_vec_size;
 
 	struct work_struct work;
+
+	/* A space for short vectors; longer vectors are allocated separately. */
+	struct bio_vec io_vec_inline[DM_VERITY_IO_VEC_INLINE];
 
 	/*
 	 * Three variably-size fields follow this struct:
@@ -116,7 +119,7 @@ static inline u8 *verity_io_digest_end(struct dm_verity *v,
 }
 
 extern int verity_for_bv_block(struct dm_verity *v, struct dm_verity_io *io,
-			       struct bvec_iter *iter,
+			       unsigned *vector, unsigned *offset,
 			       int (*process)(struct dm_verity *v,
 					      struct dm_verity_io *io,
 					      u8 *data, size_t len));
@@ -127,16 +130,4 @@ extern int verity_hash(struct dm_verity *v, struct shash_desc *desc,
 extern int verity_hash_for_block(struct dm_verity *v, struct dm_verity_io *io,
 				 sector_t block, u8 *digest, bool *is_zero);
 
-extern void verity_status(struct dm_target *ti, status_type_t type,
-			unsigned status_flags, char *result, unsigned maxlen);
-extern int verity_ioctl(struct dm_target *ti, unsigned cmd,
-			unsigned long arg);
-extern int verity_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-			struct bio_vec *biovec, int max_size);
-extern int verity_iterate_devices(struct dm_target *ti,
-				iterate_devices_callout_fn fn, void *data);
-extern void verity_io_hints(struct dm_target *ti, struct queue_limits *limits);
-extern void verity_dtr(struct dm_target *ti);
-extern int verity_ctr(struct dm_target *ti, unsigned argc, char **argv);
-extern int verity_map(struct dm_target *ti, struct bio *bio);
 #endif /* DM_VERITY_H */

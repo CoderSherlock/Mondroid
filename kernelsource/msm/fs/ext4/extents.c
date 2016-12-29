@@ -377,7 +377,7 @@ static int ext4_valid_extent(struct inode *inode, struct ext4_extent *ext)
 	ext4_lblk_t lblock = le32_to_cpu(ext->ee_block);
 	ext4_lblk_t last = lblock + len - 1;
 
-	if (len == 0 || lblock > last)
+	if (lblock > last)
 		return 0;
 	return ext4_data_block_valid(EXT4_SB(inode->i_sb), block, len);
 }
@@ -4798,6 +4798,12 @@ static long ext4_zero_range(struct file *file, loff_t offset,
 	else
 		max_blocks -= lblk;
 
+	flags = EXT4_GET_BLOCKS_CREATE_UNWRIT_EXT |
+		EXT4_GET_BLOCKS_CONVERT_UNWRITTEN |
+		EXT4_EX_NOCACHE;
+	if (mode & FALLOC_FL_KEEP_SIZE)
+		flags |= EXT4_GET_BLOCKS_KEEP_SIZE;
+
 	mutex_lock(&inode->i_mutex);
 
 	/*
@@ -4814,28 +4820,15 @@ static long ext4_zero_range(struct file *file, loff_t offset,
 		ret = inode_newsize_ok(inode, new_size);
 		if (ret)
 			goto out_mutex;
+		/*
+		 * If we have a partial block after EOF we have to allocate
+		 * the entire block.
+		 */
+		if (partial_end)
+			max_blocks += 1;
 	}
 
-	flags = EXT4_GET_BLOCKS_CREATE_UNWRIT_EXT;
-	if (mode & FALLOC_FL_KEEP_SIZE)
-		flags |= EXT4_GET_BLOCKS_KEEP_SIZE;
-
-	/* Preallocate the range including the unaligned edges */
-	if (partial_begin || partial_end) {
-		ret = ext4_alloc_file_blocks(file,
-				round_down(offset, 1 << blkbits) >> blkbits,
-				(round_up((offset + len), 1 << blkbits) -
-				 round_down(offset, 1 << blkbits)) >> blkbits,
-				new_size, flags, mode);
-		if (ret)
-			goto out_mutex;
-
-	}
-
-	/* Zero range excluding the unaligned edges */
 	if (max_blocks > 0) {
-		flags |= (EXT4_GET_BLOCKS_CONVERT_UNWRITTEN |
-			  EXT4_EX_NOCACHE);
 
 		/* Now release the pages and zero block aligned part of pages*/
 		truncate_pagecache_range(inode, start, end - 1);
@@ -4847,6 +4840,19 @@ static long ext4_zero_range(struct file *file, loff_t offset,
 
 		ret = ext4_alloc_file_blocks(file, lblk, max_blocks, new_size,
 					     flags, mode);
+		if (ret)
+			goto out_dio;
+		/*
+		 * Remove entire range from the extent status tree.
+		 *
+		 * ext4_es_remove_extent(inode, lblk, max_blocks) is
+		 * NOT sufficient.  I'm not sure why this is the case,
+		 * but let's be conservative and remove the extent
+		 * status tree for the entire inode.  There should be
+		 * no outstanding delalloc extents thanks to the
+		 * filemap_write_and_wait_range() call above.
+		 */
+		ret = ext4_es_remove_extent(inode, 0, EXT_MAX_BLOCKS);
 		if (ret)
 			goto out_dio;
 	}
@@ -4937,6 +4943,13 @@ long ext4_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 	if (ret)
 		return ret;
 
+	/*
+	 * currently supporting (pre)allocate mode for extent-based
+	 * files _only_
+	 */
+	if (!(ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)))
+		return -EOPNOTSUPP;
+
 	if (mode & FALLOC_FL_COLLAPSE_RANGE)
 		return ext4_collapse_range(inode, offset, len);
 
@@ -4957,14 +4970,6 @@ long ext4_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 		flags |= EXT4_GET_BLOCKS_KEEP_SIZE;
 
 	mutex_lock(&inode->i_mutex);
-
-	/*
-	 * We only support preallocation for extent-based files only
-	 */
-	if (!(ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))) {
-		ret = -EOPNOTSUPP;
-		goto out;
-	}
 
 	if (!(mode & FALLOC_FL_KEEP_SIZE) &&
 	     offset + len > i_size_read(inode)) {
@@ -5406,6 +5411,7 @@ int ext4_collapse_range(struct inode *inode, loff_t offset, loff_t len)
 	handle_t *handle;
 	unsigned int credits;
 	loff_t new_size, ioffset;
+	loff_t oldsize = i_size_read(inode);
 	int ret;
 
 	/* Collapse range works only on fs block size aligned offsets. */
@@ -5447,7 +5453,7 @@ int ext4_collapse_range(struct inode *inode, loff_t offset, loff_t len)
 	 * There is no need to overlap collapse range with EOF, in which case
 	 * it is effectively a truncate operation
 	 */
-	if (offset + len >= i_size_read(inode)) {
+	if (offset + len >= oldsize) {
 		ret = -EINVAL;
 		goto out_mutex;
 	}
@@ -5458,7 +5464,7 @@ int ext4_collapse_range(struct inode *inode, loff_t offset, loff_t len)
 		goto out_mutex;
 	}
 
-	truncate_pagecache(inode, ioffset);
+	truncate_pagecache(inode, oldsize, ioffset);
 
 	/* Wait for existing dio to complete */
 	ext4_inode_block_unlocked_dio(inode);

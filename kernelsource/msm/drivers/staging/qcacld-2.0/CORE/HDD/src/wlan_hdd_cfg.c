@@ -995,13 +995,6 @@ REG_TABLE_ENTRY g_registry_table[] =
                  CFG_MAX_TX_POWER_MIN,
                  CFG_MAX_TX_POWER_MAX ),
 
-   REG_VARIABLE( CFG_TX_POWER_CTRL_NAME, WLAN_PARAM_Integer,
-                hdd_config_t, allow_tpc_from_ap,
-                VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
-                CFG_TX_POWER_CTRL_DEFAULT,
-                CFG_TX_POWER_CTRL_MIN,
-                CFG_TX_POWER_CTRL_MAX ),
-
    REG_VARIABLE( CFG_LOW_GAIN_OVERRIDE_NAME, WLAN_PARAM_Integer,
                  hdd_config_t, fIsLowGainOverride,
                  VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
@@ -2279,13 +2272,6 @@ REG_TABLE_ENTRY g_registry_table[] =
                  CFG_VHT_ENABLE_2x2_CAP_FEATURE_MIN,
                  CFG_VHT_ENABLE_2x2_CAP_FEATURE_MAX ),
 
-   REG_VARIABLE(CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK, WLAN_PARAM_Integer,
-                 hdd_config_t, enable_dynamic_sta_chainmask,
-                 VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
-                 CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK_DEFAULT,
-                 CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK_MIN,
-                 CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK_MAX),
-
    REG_VARIABLE( CFG_CHAIN_MASK_2G, WLAN_PARAM_Integer,
                  hdd_config_t, chain_mask_2g,
                  VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
@@ -2782,6 +2768,13 @@ REG_TABLE_ENTRY g_registry_table[] =
                  CFG_ENABLE_VHT_FOR_24GHZ_MIN,
                  CFG_ENABLE_VHT_FOR_24GHZ_MAX),
 #endif
+
+   REG_VARIABLE( CFG_SCAN_OFFLOAD_NAME, WLAN_PARAM_Integer,
+                 hdd_config_t, fScanOffload,
+                 VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
+                 CFG_SCAN_OFFLOAD_DEFAULT,
+                 CFG_SCAN_OFFLOAD_DISABLE,
+                 CFG_SCAN_OFFLOAD_ENABLE ),
 
 #ifdef WLAN_FEATURE_ROAM_SCAN_OFFLOAD
    REG_DYNAMIC_VARIABLE( CFG_ENABLE_FAST_ROAM_IN_CONCURRENCY, WLAN_PARAM_Integer,
@@ -3538,13 +3531,6 @@ REG_TABLE_ENTRY g_registry_table[] =
                 CFG_TCP_DELACK_THRESHOLD_LOW_DEFAULT,
                 CFG_TCP_DELACK_THRESHOLD_LOW_MIN,
                 CFG_TCP_DELACK_THRESHOLD_LOW_MAX ),
-
-   REG_VARIABLE( CFG_TCP_DELACK_TIMER_COUNT, WLAN_PARAM_Integer,
-                hdd_config_t, tcpDelackTimerCount,
-                VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
-                CFG_TCP_DELACK_TIMER_COUNT_DEFAULT,
-                CFG_TCP_DELACK_TIMER_COUNT_MIN,
-                CFG_TCP_DELACK_TIMER_COUNT_MAX ),
 
     REG_VARIABLE( CFG_TCP_TX_HIGH_TPUT_THRESHOLD_NAME, WLAN_PARAM_Integer,
                  hdd_config_t, tcp_tx_high_tput_thres,
@@ -4569,27 +4555,6 @@ REG_TABLE_ENTRY g_registry_table[] =
                 CFG_EDCA_BE_AIFS_VALUE_MIN,
                 CFG_EDCA_BE_AIFS_VALUE_MAX),
 
-   REG_VARIABLE(CFG_SAP_FORCE_11N_FOR_11AC_NAME, WLAN_PARAM_Integer,
-                hdd_config_t, sap_force_11n_for_11ac,
-                VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
-                CFG_SAP_FORCE_11N_FOR_11AC_DEFAULT,
-                CFG_SAP_FORCE_11N_FOR_11AC_MIN,
-                CFG_SAP_FORCE_11N_FOR_11AC_MAX),
-
-   REG_VARIABLE(CFG_TGT_GTX_USR_CFG_NAME, WLAN_PARAM_Integer,
-                hdd_config_t, tgt_gtx_usr_cfg,
-                VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
-                CFG_TGT_GTX_USR_CFG_DEFAULT,
-                CFG_TGT_GTX_USR_CFG_MIN,
-                CFG_TGT_GTX_USR_CFG_MAX),
-
-   REG_VARIABLE(CFG_CH_AVOID_SAP_RESTART_NAME, WLAN_PARAM_Integer,
-                hdd_config_t, sap_restrt_ch_avoid,
-                VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
-                CFG_CH_AVOID_SAP_RESTART_DEFAULT,
-                CFG_CH_AVOID_SAP_RESTART_MIN,
-                CFG_CH_AVOID_SAP_RESTART_MAX),
-
    REG_VARIABLE(CFG_RX_WAKELOCK_TIMEOUT_NAME, WLAN_PARAM_Integer,
                 hdd_config_t, rx_wakelock_timeout,
                 VAR_FLAGS_OPTIONAL | VAR_FLAGS_RANGE_CHECK_ASSUME_DEFAULT,
@@ -4958,7 +4923,6 @@ void print_hdd_cfg(hdd_context_t *pHddCtx)
   VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH, "Name = [FastTransitionEnabled] Value = [%u] ",pHddCtx->cfg_ini->isFastTransitionEnabled);
   VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH, "Name = [gTxPowerCap] Value = [%u] dBm ",pHddCtx->cfg_ini->nTxPowerCap);
 #endif
-  VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH, "Name = [gAllowTPCfromAP] Value = [%u] dBm ", pHddCtx->cfg_ini->allow_tpc_from_ap);
 #ifdef FEATURE_WLAN_LFR
   VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH, "Name = [FastRoamEnabled] Value = [%u] ",pHddCtx->cfg_ini->isFastRoamIniFeatureEnabled);
   VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH, "Name = [MAWCEnabled] Value = [%u] ",pHddCtx->cfg_ini->MAWCEnabled);
@@ -5167,9 +5131,6 @@ void print_hdd_cfg(hdd_context_t *pHddCtx)
   VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH,
           "Name = [gTcpDelAckThresholdLow] Value = [%u] ",
           pHddCtx->cfg_ini->tcpDelackThresholdLow);
-  VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH,
-          "Name = [tcpDelackTimerCount] Value = [%u] ",
-          pHddCtx->cfg_ini->tcpDelackTimerCount);
   VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH,
           "Name = [%s] Value = [%u] ", CFG_TCP_TX_HIGH_TPUT_THRESHOLD_NAME,
           pHddCtx->cfg_ini->tcp_tx_high_tput_thres);
@@ -5409,20 +5370,6 @@ void print_hdd_cfg(hdd_context_t *pHddCtx)
   hddLog(LOG2, "Name = [%s] Value = [%u]",
           CFG_EDCA_BE_AIFS_VALUE_NAME,
           pHddCtx->cfg_ini->edca_be_aifs);
-  hddLog(LOG2, "Name = [%s] Value = [%u]",
-          CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK,
-          pHddCtx->cfg_ini->enable_dynamic_sta_chainmask);
-
-  hddLog(LOG2, "Name = [%s] Value = [%u]",
-                CFG_SAP_FORCE_11N_FOR_11AC_NAME,
-                pHddCtx->cfg_ini->sap_force_11n_for_11ac);
-  hddLog(LOG2, "Name = [%s] Value = [%u]",
-                 CFG_TGT_GTX_USR_CFG_NAME,
-                 pHddCtx->cfg_ini->tgt_gtx_usr_cfg);
-
-  hddLog(LOG2, "Name = [%s] Value = [%u]",
-                 CFG_CH_AVOID_SAP_RESTART_NAME,
-                 pHddCtx->cfg_ini->sap_restrt_ch_avoid);
   hddLog(LOG2, "Name = [%s] Value = [%u]",
                  CFG_ACTIVE_MODE_OFFLOAD,
                  pHddCtx->cfg_ini->active_mode_offload);
@@ -6981,15 +6928,6 @@ v_BOOL_t hdd_update_config_dat( hdd_context_t *pHddCtx )
       fStatus = FALSE;
       hddLog(LOGE, "Could not pass on WNI_CFG_IBSS_ATIM_WIN_SIZE to CCM");
    }
-
-   if (ccmCfgSetInt(pHddCtx->hHal, WNI_CFG_TGT_GTX_USR_CFG,
-                    pConfig->tgt_gtx_usr_cfg, NULL,
-                    eANI_BOOLEAN_FALSE) == eHAL_STATUS_FAILURE)
-   {
-      fStatus = FALSE;
-      hddLog(LOGE, "Could not pass on WNI_CFG_TGT_GTX_USR_CFG to CCM");
-   }
-
    return fStatus;
 }
 
@@ -7108,16 +7046,6 @@ VOS_STATUS hdd_set_sme_config( hdd_context_t *pHddCtx )
    hdd_hex_string_to_u8_array(pConfig->rm_capability,
                           smeConfig->rrmConfig.rm_capability, &rrm_capab_len,
                           DOT11F_IE_RRMENABLEDCAP_MAX_LEN);
-   /*
-    * Update the INI values gRrmOperChanMax and gRrmNonOperChanMax appropriately
-    */
-   smeConfig->rrmConfig.rm_capability[2] =
-                          ((pConfig->nOutChanMeasMaxDuration <<
-                               CAP_NONOPER_CHAN_MAX_DURATION_OFFSET) |
-                           (pConfig->nOutChanMeasMaxDuration <<
-                               CAP_OPER_CHAN_MAX_DURATION_OFFSET) |
-                           (smeConfig->rrmConfig.rm_capability[2] &
-                              (RM_CAP_RM_MIB | RM_CAP_AP_CHAN_REPORT)));
 #endif
    //Remaining config params not obtained from registry
    // On RF EVB beacon using channel 1.
@@ -7149,7 +7077,6 @@ VOS_STATUS hdd_set_sme_config( hdd_context_t *pHddCtx )
    smeConfig->csrConfig.bgScanInterval            = 0;
    smeConfig->csrConfig.eBand                     = pConfig->nBandCapability;
    smeConfig->csrConfig.nTxPowerCap = pConfig->nTxPowerCap;
-   smeConfig->csrConfig.allow_tpc_from_ap = pConfig->allow_tpc_from_ap;
    smeConfig->csrConfig.fEnableBypass11d          = pConfig->enableBypass11d;
    smeConfig->csrConfig.fEnableDFSChnlScan        = pConfig->enableDFSChnlScan;
 #if  defined (WLAN_FEATURE_VOWIFI_11R) || defined (FEATURE_WLAN_ESE) || defined(FEATURE_WLAN_LFR)
@@ -7284,7 +7211,7 @@ VOS_STATUS hdd_set_sme_config( hdd_context_t *pHddCtx )
    /* update SSR config */
    sme_UpdateEnableSSR((tHalHandle)(pHddCtx->hHal), pHddCtx->cfg_ini->enableSSR);
    /* Update the Directed scan offload setting */
-   smeConfig->fScanOffload =  true;
+   smeConfig->fScanOffload =  pHddCtx->cfg_ini->fScanOffload;
 
    /* Update the p2p listen offload setting */
    smeConfig->fP2pListenOffload =  pHddCtx->cfg_ini->fP2pListenOffload;

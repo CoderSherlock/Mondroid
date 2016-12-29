@@ -8,7 +8,8 @@
  */
 #include <linux/vga_switcheroo.h>
 #include <linux/slab.h>
-#include <linux/acpi.h>
+#include <acpi/acpi.h>
+#include <acpi/acpi_bus.h>
 #include <linux/pci.h>
 
 #include "radeon_acpi.h"
@@ -57,14 +58,6 @@ struct atpx_mux {
 	u16 size;
 	u16 mux;
 } __packed;
-
-bool radeon_has_atpx(void) {
-	return radeon_atpx_priv.atpx_detected;
-}
-
-bool radeon_has_atpx_dgpu_power_cntl(void) {
-	return radeon_atpx_priv.atpx.functions.power_cntl;
-}
 
 /**
  * radeon_atpx_call - call an ATPX method
@@ -145,6 +138,10 @@ static void radeon_atpx_parse_functions(struct radeon_atpx_functions *f, u32 mas
  */
 static int radeon_atpx_validate(struct radeon_atpx *atpx)
 {
+	/* make sure required functions are enabled */
+	/* dGPU power control is required */
+	atpx->functions.power_cntl = true;
+
 	if (atpx->functions.px_params) {
 		union acpi_object *info;
 		struct atpx_px_params output;
@@ -447,7 +444,7 @@ static bool radeon_atpx_pci_probe_handle(struct pci_dev *pdev)
 	acpi_handle dhandle, atpx_handle;
 	acpi_status status;
 
-	dhandle = ACPI_HANDLE(&pdev->dev);
+	dhandle = DEVICE_ACPI_HANDLE(&pdev->dev);
 	if (!dhandle)
 		return false;
 
@@ -493,7 +490,7 @@ static int radeon_atpx_init(void)
  */
 static int radeon_atpx_get_client_id(struct pci_dev *pdev)
 {
-	if (radeon_atpx_priv.dhandle == ACPI_HANDLE(&pdev->dev))
+	if (radeon_atpx_priv.dhandle == DEVICE_ACPI_HANDLE(&pdev->dev))
 		return VGA_SWITCHEROO_IGD;
 	else
 		return VGA_SWITCHEROO_DIS;

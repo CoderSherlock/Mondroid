@@ -153,9 +153,6 @@ struct input_keymap_entry {
 
 #define EVIOCGRAB		_IOW('E', 0x90, int)			/* Grab/Release device */
 
-/* HACK: disable conflicting EVIOCREVOKE until Android userspace stops using EVIOCSSUSPENDBLOCK */
-/*#define EVIOCREVOKE		_IOW('E', 0x91, int)*/			/* Revoke device access */
-
 #define EVIOCGSUSPENDBLOCK	_IOR('E', 0x91, int)			/* get suspend block enable */
 #define EVIOCSSUSPENDBLOCK	_IOW('E', 0x91, int)			/* set suspend block enable */
 
@@ -169,9 +166,7 @@ struct input_keymap_entry {
 #define INPUT_PROP_DIRECT		0x01	/* direct input devices */
 #define INPUT_PROP_BUTTONPAD		0x02	/* has button(s) under pad */
 #define INPUT_PROP_SEMI_MT		0x03	/* touch rectangle only */
-#define INPUT_PROP_TOPBUTTONPAD		0x04	/* softbuttons at top of pad */
-#define INPUT_PROP_POINTING_STICK	0x05	/* is a pointing stick */
-#define INPUT_PROP_NO_DUMMY_RELEASE	0x06	/* no dummy event */
+#define INPUT_PROP_NO_DUMMY_RELEASE	0x04	/* no dummy event */
 
 #define INPUT_PROP_MAX			0x1f
 #define INPUT_PROP_CNT			(INPUT_PROP_MAX + 1)
@@ -203,8 +198,8 @@ struct input_keymap_entry {
 #define SYN_CONFIG		1
 #define SYN_MT_REPORT		2
 #define SYN_DROPPED		3
-#define SYN_MAX			0xf
-#define SYN_CNT			(SYN_MAX+1)
+#define SYN_TIME_SEC		4
+#define SYN_TIME_NSEC		5
 
 /*
  * Keys and buttons
@@ -708,6 +703,7 @@ struct input_keymap_entry {
 #define KEY_NUMERIC_STAR	0x20a
 #define KEY_NUMERIC_POUND	0x20b
 
+#define KEY_CAMERA_SNAPSHOT	0x2fe
 #define KEY_CAMERA_FOCUS	0x210
 #define KEY_WPS_BUTTON		0x211	/* WiFi Protected Setup key */
 
@@ -744,13 +740,6 @@ struct input_keymap_entry {
 
 #define KEY_BRIGHTNESS_MIN		0x250	/* Set Brightness to Minimum */
 #define KEY_BRIGHTNESS_MAX		0x251	/* Set Brightness to Maximum */
-
-#define KEY_KBDINPUTASSIST_PREV		0x260
-#define KEY_KBDINPUTASSIST_NEXT		0x261
-#define KEY_KBDINPUTASSIST_PREVGROUP		0x262
-#define KEY_KBDINPUTASSIST_NEXTGROUP		0x263
-#define KEY_KBDINPUTASSIST_ACCEPT		0x264
-#define KEY_KBDINPUTASSIST_CANCEL		0x265
 
 #define BTN_TRIGGER_HAPPY		0x2c0
 #define BTN_TRIGGER_HAPPY1		0x2c0
@@ -849,8 +838,6 @@ struct input_keymap_entry {
 
 #define ABS_MISC		0x28
 
-#define ABS_MT_POSITION		0x2a	/* Group a set of X and Y */
-#define ABS_MT_AMPLITUDE	0x2b	/* Group a set of Z and W */
 #define ABS_MT_SLOT		0x2f	/* MT slot being modified */
 #define ABS_MT_TOUCH_MAJOR	0x30	/* Major axis of touching ellipse */
 #define ABS_MT_TOUCH_MINOR	0x31	/* Minor axis (omit if circular) */
@@ -866,7 +853,7 @@ struct input_keymap_entry {
 #define ABS_MT_DISTANCE		0x3b	/* Contact hover distance */
 #define ABS_MT_TOOL_X		0x3c	/* Center X tool position */
 #define ABS_MT_TOOL_Y		0x3d	/* Center Y tool position */
-#define ABS_MT_GLOVE		0x3e
+
 
 #define ABS_MAX			0x3f
 #define ABS_CNT			(ABS_MAX+1)

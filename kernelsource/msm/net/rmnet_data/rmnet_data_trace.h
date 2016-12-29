@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -39,8 +39,8 @@ DECLARE_EVENT_CLASS(rmnet_handler_template,
 		__assign_str(name, skb->dev->name);
 	),
 
-	TP_printk("dev=%s skbaddr=%pK len=%u",
-		  __get_str(name), __entry->skbaddr, __entry->len)
+	TP_printk("dev=%s skbaddr=%p len=%u",
+		__get_str(name), __entry->skbaddr, __entry->len)
 )
 
 DEFINE_EVENT(rmnet_handler_template, rmnet_egress_handler,
@@ -128,9 +128,8 @@ DECLARE_EVENT_CLASS(rmnet_aggregation_template,
 		__entry->num = num_agg_pakcets;
 	),
 
-	TP_printk("dev=%s skbaddr=%pK len=%u agg_count: %d",
-		  __get_str(name), __entry->skbaddr, __entry->len,
-		  __entry->num)
+	TP_printk("dev=%s skbaddr=%p len=%u agg_count: %d",
+		__get_str(name), __entry->skbaddr, __entry->len, __entry->num)
 )
 
 DEFINE_EVENT(rmnet_aggregation_template, rmnet_map_aggregate,
@@ -306,24 +305,6 @@ DEFINE_EVENT(rmnet_physdev_action_template, rmnet_unassociate,
 
 	TP_ARGS(dev)
 );
-
-TRACE_EVENT(rmnet_gro_downlink,
-
-	TP_PROTO(gro_result_t gro_res),
-
-	TP_ARGS(gro_res),
-
-	TP_STRUCT__entry(
-		__field(gro_result_t, res)
-	),
-
-	TP_fast_assign(
-		__entry->res = gro_res;
-	),
-
-	TP_printk("GRO res: %d", __entry->res)
-)
-
 #endif /* _RMNET_DATA_TRACE_H_ */
 
 /* This part must be outside protection */

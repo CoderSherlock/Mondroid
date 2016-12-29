@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,8 +19,6 @@
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
-#include <linux/cpu.h>
-#include <linux/cpu_pm.h>
 #include <linux/export.h>
 #include <linux/printk.h>
 #include <linux/ratelimit.h>
@@ -46,9 +44,7 @@
 #define BMVAL(val, lsb, msb)	((val & BM(lsb, msb)) >> lsb)
 #define BVAL(val, n)		((val & BIT(n)) >> n)
 
-#ifdef CONFIG_ARM64
 #define ARM_DEBUG_ARCH_V8	(0x6)
-#endif
 
 #define MAX_DBG_REGS		(66)
 #define MAX_DBG_STATE_SIZE	(MAX_DBG_REGS * num_possible_cpus())
@@ -79,9 +75,6 @@ struct dbg_ctx {
 };
 
 static struct dbg_ctx dbg;
-static struct notifier_block jtag_hotcpu_save_notifier;
-static struct notifier_block jtag_hotcpu_restore_notifier;
-static struct notifier_block jtag_cpu_pm_notifier;
 
 #ifdef CONFIG_ARM64
 static int dbg_read_arch64_bxr(uint64_t *state, int i, int j)
@@ -878,7 +871,7 @@ void msm_jtag_save_state(void)
 	/* ensure counter is updated before moving forward */
 	mb();
 
-	msm_jtag_etm_save_state();
+	msm_jtag_mm_save_state();
 	if (dbg.save_restore_enabled)
 		dbg_save_state(cpu);
 }
@@ -910,7 +903,7 @@ void msm_jtag_restore_state(void)
 
 	if (dbg.save_restore_enabled)
 		dbg_restore_state(cpu);
-	msm_jtag_etm_restore_state();
+	msm_jtag_mm_restore_state();
 }
 EXPORT_SYMBOL(msm_jtag_restore_state);
 
@@ -924,56 +917,6 @@ static inline bool dbg_arch_supported(uint8_t arch)
 	}
 	return true;
 }
-
-static int jtag_hotcpu_save_callback(struct notifier_block *nfb,
-				unsigned long action, void *hcpu)
-{
-	switch (action & (~CPU_TASKS_FROZEN)) {
-	case CPU_DYING:
-		msm_jtag_save_state();
-		break;
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block jtag_hotcpu_save_notifier = {
-	.notifier_call = jtag_hotcpu_save_callback,
-};
-
-static int jtag_hotcpu_restore_callback(struct notifier_block *nfb,
-					unsigned long action, void *hcpu)
-{
-	switch (action & (~CPU_TASKS_FROZEN)) {
-	case CPU_STARTING:
-		msm_jtag_restore_state();
-		break;
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block jtag_hotcpu_restore_notifier = {
-	.notifier_call = jtag_hotcpu_restore_callback,
-	.priority = 1,
-};
-
-static int jtag_cpu_pm_callback(struct notifier_block *nfb,
-				unsigned long action, void *hcpu)
-{
-	switch (action) {
-	case CPU_PM_ENTER:
-		msm_jtag_save_state();
-		break;
-	case CPU_PM_ENTER_FAILED:
-	case CPU_PM_EXIT:
-		msm_jtag_restore_state();
-		break;
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block jtag_cpu_pm_notifier = {
-	.notifier_call = jtag_cpu_pm_callback,
-};
 
 static int __init msm_jtag_dbg_init(void)
 {
@@ -1007,10 +950,6 @@ static int __init msm_jtag_dbg_init(void)
 		ret = -ENOMEM;
 		goto dbg_err;
 	}
-
-	register_hotcpu_notifier(&jtag_hotcpu_save_notifier);
-	register_hotcpu_notifier(&jtag_hotcpu_restore_notifier);
-	cpu_pm_register_notifier(&jtag_cpu_pm_notifier);
 dbg_out:
 	return 0;
 dbg_err:

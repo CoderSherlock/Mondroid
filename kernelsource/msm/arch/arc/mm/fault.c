@@ -15,7 +15,6 @@
 #include <linux/uaccess.h>
 #include <linux/kdebug.h>
 #include <asm/pgalloc.h>
-#include <asm/mmu.h>
 
 static int handle_vmalloc_fault(unsigned long address)
 {
@@ -52,14 +51,14 @@ bad_area:
 	return 1;
 }
 
-void do_page_fault(unsigned long address, struct pt_regs *regs)
+void do_page_fault(struct pt_regs *regs, int write, unsigned long address,
+		   unsigned long cause_code)
 {
 	struct vm_area_struct *vma = NULL;
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
 	siginfo_t info;
 	int fault, ret;
-	int write = regs->ecr_cause & ECR_C_PROTV_STORE;  /* ST/EX */
 	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	/*
@@ -111,8 +110,7 @@ good_area:
 
 	/* Handle protection violation, execute on heap or stack */
 
-	if ((regs->ecr_vec == ECR_V_PROTV) &&
-	    (regs->ecr_cause == ECR_C_PROTV_INST_FETCH))
+	if (cause_code == ((ECR_V_PROTV << 16) | ECR_C_PROTV_INST_FETCH))
 		goto bad_area;
 
 	if (write) {
@@ -159,10 +157,9 @@ good_area:
 		return;
 	}
 
+	/* TBD: switch to pagefault_out_of_memory() */
 	if (fault & VM_FAULT_OOM)
 		goto out_of_memory;
-	else if (fault & VM_FAULT_SIGSEGV)
-		goto bad_area;
 	else if (fault & VM_FAULT_SIGBUS)
 		goto do_sigbus;
 
@@ -180,6 +177,7 @@ bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
 	if (user_mode(regs)) {
 		tsk->thread.fault_address = address;
+		tsk->thread.cause_code = cause_code;
 		info.si_signo = SIGSEGV;
 		info.si_errno = 0;
 		/* info.si_code has been set above */
@@ -200,7 +198,7 @@ no_context:
 	if (fixup_exception(regs))
 		return;
 
-	die("Oops", regs, address);
+	die("Oops", regs, address, cause_code);
 
 out_of_memory:
 	up_read(&mm->mmap_sem);
@@ -219,6 +217,7 @@ do_sigbus:
 		goto no_context;
 
 	tsk->thread.fault_address = address;
+	tsk->thread.cause_code = cause_code;
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;

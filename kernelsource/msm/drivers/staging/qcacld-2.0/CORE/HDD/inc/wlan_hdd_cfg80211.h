@@ -137,8 +137,7 @@ typedef struct {
 enum qca_nl80211_vendor_subcmds {
     QCA_NL80211_VENDOR_SUBCMD_UNSPEC = 0,
     QCA_NL80211_VENDOR_SUBCMD_TEST = 1,
-    /* subcmds 2..8 not yet allocated */
-    QCA_NL80211_VENDOR_SUBCMD_ROAMING = 9,
+    /* subcmds 2..9 not yet allocated */
     QCA_NL80211_VENDOR_SUBCMD_AVOID_FREQUENCY = 10,
     QCA_NL80211_VENDOR_SUBCMD_DFS_CAPABILITY =  11,
     QCA_NL80211_VENDOR_SUBCMD_NAN =  12,
@@ -264,7 +263,6 @@ enum qca_nl80211_vendor_subcmds {
 	/* subcommand to get link properties */
 	QCA_NL80211_VENDOR_SUBCMD_LINK_PROPERTIES = 101,
 	QCA_NL80211_VENDOR_SUBCMD_SETBAND = 105,
-	QCA_NL80211_VENDOR_SUBCMD_SET_SAP_CONFIG  = 118,
 };
 
 enum qca_nl80211_vendor_subcmds_index {
@@ -416,11 +414,9 @@ enum qca_wlan_vendor_attr {
     QCA_WLAN_VENDOR_ATTR_NAN = 2,
     /* used by QCA_NL80211_VENDOR_SUBCMD_STATS_EXT */
     QCA_WLAN_VENDOR_ATTR_STATS_EXT = 3,
-    /* used by QCA_NL80211_VENDOR_SUBCMD_STATS_EXT */
     QCA_WLAN_VENDOR_ATTR_IFINDEX = 4,
 
-    /* used by QCA_NL80211_VENDOR_SUBCMD_ROAMING */
-    QCA_WLAN_VENDOR_ATTR_ROAMING_POLICY = 5,
+    /* used by QCA_NL80211_VENDOR_SUBCMD_LINK_PROPERTIES */
     QCA_WLAN_VENDOR_ATTR_MAC_ADDR = 6,
 
     /* used by QCA_NL80211_VENDOR_SUBCMD_GET_FEATURES */
@@ -1807,22 +1803,6 @@ enum qca_wlan_vendor_attr_wake_stats {
 		QCA_WLAN_VENDOR_GET_WAKE_STATS_AFTER_LAST - 1,
 };
 
- /**
-  * enum qca_wlan_vendor_attr_sap_config - config params for sap configuration
-  * @QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_INVALID: invalid
-  * @QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_CHANNEL: Channel on which SAP should start
-  * @QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_AFTER_LAST: after last
-  * @QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_MAX: max attribute
-  */
-enum qca_wlan_vendor_attr_sap_config {
-	QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_INVALID = 0,
-	QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_CHANNEL,
-
-	QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_AFTER_LAST,
-	QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_MAX =
-		QCA_WLAN_VENDOR_ATTR_SAP_CONFIG_AFTER_LAST - 1,
-};
-
 struct cfg80211_bss* wlan_hdd_cfg80211_update_bss_db( hdd_adapter_t *pAdapter,
                                       tCsrRoamInfo *pRoamInfo
                                       );
@@ -1979,25 +1959,4 @@ void wlan_hdd_clear_link_layer_stats(hdd_adapter_t *adapter);
 static inline void wlan_hdd_clear_link_layer_stats(hdd_adapter_t *adapter) {}
 #endif
 
-struct cfg80211_bss *wlan_hdd_cfg80211_inform_bss_frame(hdd_adapter_t *pAdapter,
-		tSirBssDescription *bss_desc);
-
-#if defined(CFG80211_DISCONNECTED_V2) || \
-(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0))
-static inline void wlan_hdd_cfg80211_indicate_disconnect(struct net_device *dev,
-							bool locally_generated,
-							int reason)
-{
-	cfg80211_disconnected(dev, reason, NULL, 0,
-				locally_generated, GFP_KERNEL);
-}
-#else
-static inline void wlan_hdd_cfg80211_indicate_disconnect(struct net_device *dev,
-							bool locally_generated,
-							int reason)
-{
-	cfg80211_disconnected(dev, reason, NULL, 0,
-				GFP_KERNEL);
-}
-#endif
 #endif

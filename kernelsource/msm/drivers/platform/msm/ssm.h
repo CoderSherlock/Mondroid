@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, 2016 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -37,7 +37,7 @@ enum ssm_ipc_req {
 	SSM_INVALID_REQ,
 };
 
-/* OEM request commands list.*/
+/* OEM reuest commands list.*/
 enum oem_req {
 	SSM_READY,
 	SSM_MODE_INFO_READY,
@@ -53,7 +53,7 @@ enum modem_mode_status {
 	FAILED = -1,
 };
 
-/* tzapp encode mode request.*/
+/* tzapp encode mode reuest.*/
 __packed struct tzapp_mode_enc_req {
 	uint32_t tzapp_ssm_cmd;
 	uint8_t  mode_info[4];

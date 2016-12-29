@@ -26,7 +26,6 @@
 #include "drm_fb_helper.h"
 
 static LIST_HEAD(module_list);
-static bool slave_probing;
 
 void tilcdc_module_init(struct tilcdc_module *mod, const char *name,
 		const struct tilcdc_module_ops *funcs)
@@ -40,11 +39,6 @@ void tilcdc_module_init(struct tilcdc_module *mod, const char *name,
 void tilcdc_module_cleanup(struct tilcdc_module *mod)
 {
 	list_del(&mod->list);
-}
-
-void tilcdc_slave_probedefer(bool defered)
-{
-	slave_probing = defered;
 }
 
 static struct of_device_id tilcdc_of_match[];
@@ -121,6 +115,7 @@ static int cpufreq_transition(struct notifier_block *nb,
 static int tilcdc_unload(struct drm_device *dev)
 {
 	struct tilcdc_drm_private *priv = dev->dev_private;
+	struct tilcdc_module *mod, *cur;
 
 	drm_fbdev_cma_fini(priv->fbdev);
 	drm_kms_helper_poll_fini(dev);
@@ -149,6 +144,11 @@ static int tilcdc_unload(struct drm_device *dev)
 
 	pm_runtime_disable(dev->dev);
 
+	list_for_each_entry_safe(mod, cur, &module_list, list) {
+		DBG("destroying module: %s", mod->name);
+		mod->funcs->destroy(mod);
+	}
+
 	kfree(priv);
 
 	return 0;
@@ -159,9 +159,7 @@ static int tilcdc_load(struct drm_device *dev, unsigned long flags)
 	struct platform_device *pdev = dev->platformdev;
 	struct device_node *node = pdev->dev.of_node;
 	struct tilcdc_drm_private *priv;
-	struct tilcdc_module *mod;
 	struct resource *res;
-	u32 bpp = 0;
 	int ret;
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
@@ -218,20 +216,7 @@ static int tilcdc_load(struct drm_device *dev, unsigned long flags)
 #endif
 
 	if (of_property_read_u32(node, "max-bandwidth", &priv->max_bandwidth))
-		priv->max_bandwidth = TILCDC_DEFAULT_MAX_BANDWIDTH;
-
-	DBG("Maximum Bandwidth Value %d", priv->max_bandwidth);
-
-	if (of_property_read_u32(node, "ti,max-width", &priv->max_width))
-		priv->max_width = TILCDC_DEFAULT_MAX_WIDTH;
-
-	DBG("Maximum Horizontal Pixel Width Value %dpixels", priv->max_width);
-
-	if (of_property_read_u32(node, "ti,max-pixelclock",
-					&priv->max_pixelclock))
-		priv->max_pixelclock = TILCDC_DEFAULT_MAX_PIXELCLOCK;
-
-	DBG("Maximum Pixel Clock Value %dKHz", priv->max_pixelclock);
+		priv->max_bandwidth = 1280 * 1024 * 60;
 
 	pm_runtime_enable(dev->dev);
 
@@ -268,7 +253,7 @@ static int tilcdc_load(struct drm_device *dev, unsigned long flags)
 	}
 
 	pm_runtime_get_sync(dev->dev);
-	ret = drm_irq_install(dev, platform_get_irq(dev->platformdev, 0));
+	ret = drm_irq_install(dev);
 	pm_runtime_put_sync(dev->dev);
 	if (ret < 0) {
 		dev_err(dev->dev, "failed to install IRQ handler\n");
@@ -277,15 +262,7 @@ static int tilcdc_load(struct drm_device *dev, unsigned long flags)
 
 	platform_set_drvdata(pdev, dev);
 
-
-	list_for_each_entry(mod, &module_list, list) {
-		DBG("%s: preferred_bpp: %d", mod->name, mod->preferred_bpp);
-		bpp = mod->preferred_bpp;
-		if (bpp > 0)
-			break;
-	}
-
-	priv->fbdev = drm_fbdev_cma_init(dev, bpp,
+	priv->fbdev = drm_fbdev_cma_init(dev, 16,
 			dev->mode_config.num_crtc,
 			dev->mode_config.num_connector);
 	if (IS_ERR(priv->fbdev)) {
@@ -346,7 +323,7 @@ static void tilcdc_lastclose(struct drm_device *dev)
 	drm_fbdev_cma_restore_mode(priv->fbdev);
 }
 
-static irqreturn_t tilcdc_irq(int irq, void *arg)
+static irqreturn_t tilcdc_irq(DRM_IRQ_ARGS)
 {
 	struct drm_device *dev = arg;
 	struct tilcdc_drm_private *priv = dev->dev_private;
@@ -479,7 +456,7 @@ static int tilcdc_mm_show(struct seq_file *m, void *arg)
 {
 	struct drm_info_node *node = (struct drm_info_node *) m->private;
 	struct drm_device *dev = node->minor->dev;
-	return drm_mm_dump_table(m, &dev->vma_offset_manager->vm_addr_space_mm);
+	return drm_mm_dump_table(m, dev->mm_private);
 }
 
 static struct drm_info_list tilcdc_debugfs_list[] = {
@@ -532,6 +509,7 @@ static const struct file_operations fops = {
 #endif
 	.poll               = drm_poll,
 	.read               = drm_read,
+	.fasync             = drm_fasync,
 	.llseek             = no_llseek,
 	.mmap               = drm_gem_cma_mmap,
 };
@@ -542,7 +520,6 @@ static struct drm_driver tilcdc_driver = {
 	.unload             = tilcdc_unload,
 	.preclose           = tilcdc_preclose,
 	.lastclose          = tilcdc_lastclose,
-	.set_busid          = drm_platform_set_busid,
 	.irq_handler        = tilcdc_irq,
 	.irq_preinstall     = tilcdc_irq_preinstall,
 	.irq_postinstall    = tilcdc_irq_postinstall,
@@ -554,7 +531,7 @@ static struct drm_driver tilcdc_driver = {
 	.gem_vm_ops         = &drm_gem_cma_vm_ops,
 	.dumb_create        = drm_gem_cma_dumb_create,
 	.dumb_map_offset    = drm_gem_cma_dumb_map_offset,
-	.dumb_destroy       = drm_gem_dumb_destroy,
+	.dumb_destroy       = drm_gem_cma_dumb_destroy,
 #ifdef CONFIG_DEBUG_FS
 	.debugfs_init       = tilcdc_debugfs_init,
 	.debugfs_cleanup    = tilcdc_debugfs_cleanup,
@@ -621,16 +598,12 @@ static int tilcdc_pdev_probe(struct platform_device *pdev)
 		return -ENXIO;
 	}
 
-	/* defer probing if slave is in deferred probing */
-	if (slave_probing == true)
-		return -EPROBE_DEFER;
-
 	return drm_platform_init(&tilcdc_driver, pdev);
 }
 
 static int tilcdc_pdev_remove(struct platform_device *pdev)
 {
-	drm_put_dev(platform_get_drvdata(pdev));
+	drm_platform_exit(&tilcdc_driver, pdev);
 
 	return 0;
 }
@@ -670,7 +643,7 @@ static void __exit tilcdc_drm_fini(void)
 	tilcdc_tfp410_fini();
 }
 
-module_init(tilcdc_drm_init);
+late_initcall(tilcdc_drm_init);
 module_exit(tilcdc_drm_fini);
 
 MODULE_AUTHOR("Rob Clark <robdclark@gmail.com");

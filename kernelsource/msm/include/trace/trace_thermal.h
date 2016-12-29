@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,7 +19,74 @@
 
 #include <linux/tracepoint.h>
 
-#ifdef TRACE_MSM_LMH
+#ifdef TRACE_SUPPLY_LM
+DECLARE_EVENT_CLASS(supply_lm_scm_ctl,
+
+	TP_PROTO(unsigned int value),
+
+	TP_ARGS(value),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, value)
+	),
+
+	TP_fast_assign(
+		__entry->value = value;
+	),
+
+	TP_printk("inp=0x%x", __entry->value)
+);
+
+DEFINE_EVENT(supply_lm_scm_ctl, supply_lm_pre_scm,
+
+	TP_PROTO(unsigned int value),
+
+	TP_ARGS(value)
+);
+
+DEFINE_EVENT(supply_lm_scm_ctl, supply_lm_post_scm,
+
+	TP_PROTO(unsigned int ret),
+
+	TP_ARGS(ret)
+);
+
+DECLARE_EVENT_CLASS(supply_lm_inp_ctl,
+
+	TP_PROTO(unsigned int inp, unsigned int val),
+
+	TP_ARGS(inp, val),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, inp)
+		__field(unsigned int, val)
+	),
+
+	TP_fast_assign(
+		__entry->inp = inp;
+		__entry->val = val;
+	),
+
+	TP_printk("inp=%u val=%u",
+		 __entry->inp, __entry->val)
+);
+
+DEFINE_EVENT(supply_lm_inp_ctl, supply_lm_inp_start_trig,
+
+	TP_PROTO(unsigned int inp, unsigned int val),
+
+	TP_ARGS(inp, val)
+);
+
+DEFINE_EVENT(supply_lm_inp_ctl, supply_lm_inp_end_trig,
+
+	TP_PROTO(unsigned int inp, unsigned int val),
+
+	TP_ARGS(inp, val)
+);
+
+#elif defined(TRACE_MSM_LMH)
+
 DECLARE_EVENT_CLASS(msm_lmh_print_sensor_reading,
 
 	TP_PROTO(const char *sensor_name, unsigned int intensity),
@@ -85,33 +152,6 @@ DEFINE_EVENT(msm_lmh_print_event, lmh_event_call,
 
 	TP_ARGS(event_name)
 );
-
-TRACE_EVENT(lmh_debug_data,
-	TP_PROTO(const char *pre_data, uint32_t *data_buf, uint32_t buffer_len),
-
-	TP_ARGS(
-		pre_data, data_buf, buffer_len
-	),
-
-	TP_STRUCT__entry(
-		__string(_data, pre_data)
-		__field(u32, _buffer_len)
-		__dynamic_array(u32, _buffer, buffer_len)
-	),
-
-	TP_fast_assign(
-		__assign_str(_data, pre_data);
-		__entry->_buffer_len = buffer_len * sizeof(uint32_t);
-		memcpy(__get_dynamic_array(_buffer), data_buf,
-			buffer_len * sizeof(uint32_t));
-	),
-
-	TP_printk("%s:\t %s",
-		__get_str(_data), __print_hex(__get_dynamic_array(_buffer),
-			__entry->_buffer_len)
-	)
-);
-
 
 #elif defined(TRACE_MSM_THERMAL)
 
@@ -218,137 +258,6 @@ DEFINE_EVENT(msm_thermal_freq_mit, thermal_post_frequency_mit,
 
 	TP_ARGS(cpu, max_freq, min_freq)
 );
-
-#elif defined(_BCL_SW_TRACE) || defined(_BCL_HW_TRACE)
-
-DECLARE_EVENT_CLASS(msm_bcl_print_reading,
-
-	TP_PROTO(const char *sensor_name, long value),
-
-	TP_ARGS(
-		sensor_name, value
-	),
-
-	TP_STRUCT__entry(
-		__string(_name, sensor_name)
-		__field(long, reading)
-	),
-
-	TP_fast_assign(
-		__assign_str(_name, sensor_name);
-		__entry->reading = value;
-	),
-
-	TP_printk(
-		"%s:[%ld]", __get_str(_name), __entry->reading
-	)
-);
-
-DECLARE_EVENT_CLASS(msm_bcl_print_event,
-
-	TP_PROTO(const char *event_name),
-
-	TP_ARGS(
-		event_name
-	),
-
-	TP_STRUCT__entry(
-		__string(_name,	event_name)
-	),
-
-	TP_fast_assign(
-		__assign_str(_name, event_name);
-	),
-
-	TP_printk(
-		"Event:[%s]", __get_str(_name)
-	)
-);
-
-#ifdef _BCL_HW_TRACE
-DECLARE_EVENT_CLASS(msm_bcl_print_reg,
-
-	TP_PROTO(const char *sensor_name, unsigned int address,
-			unsigned int value),
-
-	TP_ARGS(
-		sensor_name, address, value
-	),
-
-	TP_STRUCT__entry(
-		__string(_name, sensor_name)
-		__field(unsigned int, _address)
-		__field(unsigned int, _value)
-	),
-
-	TP_fast_assign(
-		__assign_str(_name, sensor_name);
-		__entry->_address = address;
-		__entry->_value = value;
-	),
-
-	TP_printk(
-		"%s: address 0x%x: data 0x%02x", __get_str(_name),
-		__entry->_address, __entry->_value
-	)
-);
-
-DEFINE_EVENT(msm_bcl_print_reading, bcl_hw_sensor_reading,
-
-	TP_PROTO(const char *sensor_name, long intensity),
-
-	TP_ARGS(sensor_name, intensity)
-);
-
-DEFINE_EVENT(msm_bcl_print_reg, bcl_hw_reg_access,
-
-	TP_PROTO(const char *op_name, unsigned int address, unsigned int value),
-
-	TP_ARGS(op_name, address, value)
-);
-
-DEFINE_EVENT(msm_bcl_print_reading, bcl_hw_mitigation,
-
-	TP_PROTO(const char *sensor_name, long intensity),
-
-	TP_ARGS(sensor_name, intensity)
-);
-
-DEFINE_EVENT(msm_bcl_print_event, bcl_hw_mitigation_event,
-
-	TP_PROTO(const char *event_name),
-
-	TP_ARGS(event_name)
-);
-
-DEFINE_EVENT(msm_bcl_print_reading, bcl_hw_state_event,
-
-	TP_PROTO(const char *sensor_name, long intensity),
-
-	TP_ARGS(sensor_name, intensity)
-);
-
-DEFINE_EVENT(msm_bcl_print_event, bcl_hw_event,
-
-	TP_PROTO(const char *event_name),
-
-	TP_ARGS(event_name)
-);
-#elif defined(_BCL_SW_TRACE)
-DEFINE_EVENT(msm_bcl_print_reading, bcl_sw_mitigation,
-
-	TP_PROTO(const char *sensor_name, long intensity),
-
-	TP_ARGS(sensor_name, intensity)
-);
-
-DEFINE_EVENT(msm_bcl_print_event, bcl_sw_mitigation_event,
-
-	TP_PROTO(const char *event_name),
-
-	TP_ARGS(event_name)
-);
-#endif /* _BCL_HW_TRACE */
 #else
 DECLARE_EVENT_CLASS(tsens,
 

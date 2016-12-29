@@ -21,40 +21,12 @@
 #include <linux/init.h>
 #include <linux/linkage.h>
 
-#include <asm/alternative.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
-#include <asm/cpufeature.h>
 #include <asm/errno.h>
 #include <asm/esr.h>
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
-
-/*
- * Context tracking subsystem.  Used to instrument transitions
- * between user and kernel mode.
- */
-	.macro ct_user_exit, syscall = 0
-#ifdef CONFIG_CONTEXT_TRACKING
-	bl	context_tracking_user_exit
-	.if \syscall == 1
-	/*
-	 * Save/restore needed during syscalls.  Restore syscall arguments from
-	 * the values already saved on stack during kernel_entry.
-	 */
-	ldp	x0, x1, [sp]
-	ldp	x2, x3, [sp, #S_X2]
-	ldp	x4, x5, [sp, #S_X4]
-	ldp	x6, x7, [sp, #S_X6]
-	.endif
-#endif
-	.endm
-
-	.macro ct_user_enter
-#ifdef CONFIG_CONTEXT_TRACKING
-	bl	context_tracking_user_enter
-#endif
-	.endm
 
 /*
  * Bad Abort numbers
@@ -118,28 +90,19 @@
 	.macro	kernel_exit, el, ret = 0
 	ldp	x21, x22, [sp, #S_PC]		// load ELR, SPSR
 	.if	\el == 0
-	ct_user_enter
 	ldr	x23, [sp, #S_SP]		// load return stack pointer
-
+	msr	sp_el0, x23
 #ifdef CONFIG_ARM64_ERRATUM_845719
-	alternative_insn						\
-	"nop",								\
-	"tbz x22, #4, 1f",						\
-	ARM64_WORKAROUND_845719
+	tbz x22, #4, 1f
 #ifdef CONFIG_PID_IN_CONTEXTIDR
-	alternative_insn						\
-	"nop; nop",							\
-	"mrs x29, contextidr_el1; msr contextidr_el1, x29; 1:",		\
-	ARM64_WORKAROUND_845719
+	mrs x29, contextidr_el1
+	msr contextidr_el1, x29
 #else
-	alternative_insn						\
-	"nop",								\
-	"msr contextidr_el1, xzr; 1:",					\
-	ARM64_WORKAROUND_845719
+	msr contextidr_el1, xzr
 #endif
 #endif
 	.endif
-	.if	\ret
+1:	.if	\ret
 	ldr	x1, [sp, #S_X1]			// preserve x0 (syscall return)
 	add	sp, sp, S_X2
 	.else
@@ -188,8 +151,12 @@ tsk	.req	x28		// current thread_info
  * Interrupt handling.
  */
 	.macro	irq_handler
-	adrp	x1, handle_arch_irq
-	ldr	x1, [x1, #:lo12:handle_arch_irq]
+#ifdef CONFIG_STRICT_MEMORY_RWX
+	ldr	x1, =handle_arch_irq
+	ldr	x1, [x1]
+#else
+	ldr	x1, handle_arch_irq
+#endif
 	mov	x0, sp
 	blr	x1
 	.endm
@@ -345,6 +312,7 @@ el1_dbg:
 	mrs	x0, far_el1
 	mov	x2, sp				// struct pt_regs
 	bl	do_debug_exception
+	enable_dbg
 	kernel_exit 1
 el1_inv:
 	// TODO: add support for undefined instructions in kernel mode
@@ -399,6 +367,7 @@ el0_sync:
 	lsr	x24, x25, #ESR_EL1_EC_SHIFT	// exception class
 	cmp	x24, #ESR_EL1_EC_SVC64		// SVC in 64-bit state
 	b.eq	el0_svc
+	adr	lr, ret_to_user
 	cmp	x24, #ESR_EL1_EC_DABT_EL0	// data abort in EL0
 	b.eq	el0_da
 	cmp	x24, #ESR_EL1_EC_IABT_EL0	// instruction abort in EL0
@@ -427,12 +396,13 @@ el0_sync_compat:
 	lsr	x24, x25, #ESR_EL1_EC_SHIFT	// exception class
 	cmp	x24, #ESR_EL1_EC_SVC32		// SVC in 32-bit state
 	b.eq	el0_svc_compat
+	adr	lr, ret_to_user
 	cmp	x24, #ESR_EL1_EC_DABT_EL0	// data abort in EL0
 	b.eq	el0_da
 	cmp	x24, #ESR_EL1_EC_IABT_EL0	// instruction abort in EL0
 	b.eq	el0_ia
 	cmp	x24, #ESR_EL1_EC_FP_ASIMD	// FP/ASIMD access
-	b.eq	el0_fpsimd_acc_compat
+	b.eq	el0_fpsimd_acc
 	cmp	x24, #ESR_EL1_EC_FP_EXC32	// FP/ASIMD exception
 	b.eq	el0_fpsimd_exc
 	cmp	x24, #ESR_EL1_EC_UNKNOWN	// unknown exception in EL0
@@ -469,82 +439,57 @@ el0_da:
 	/*
 	 * Data abort handling
 	 */
-	mrs	x26, far_el1
+	mrs	x0, far_el1
+	bic	x0, x0, #(0xff << 56)
 	// enable interrupts before calling the main handler
 	enable_dbg_and_irq
-	ct_user_exit
-	bic	x0, x26, #(0xff << 56)
 	mov	x1, x25
 	mov	x2, sp
-	bl	do_mem_abort
-	b	ret_to_user
+	b	do_mem_abort
 el0_ia:
 	/*
 	 * Instruction abort handling
 	 */
-	mrs	x26, far_el1
+	mrs	x0, far_el1
 	// enable interrupts before calling the main handler
 	enable_dbg_and_irq
-	ct_user_exit
-	mov	x0, x26
 	orr	x1, x25, #1 << 24		// use reserved ISS bit for instruction aborts
 	mov	x2, sp
-	bl	do_mem_abort
-	b	ret_to_user
+	b	do_mem_abort
 el0_fpsimd_acc:
 	/*
 	 * Floating Point or Advanced SIMD access
 	 */
 	enable_dbg
-	ct_user_exit
 	mov	x0, x25
 	mov	x1, sp
-	bl	do_fpsimd_acc
-	b	ret_to_user
-el0_fpsimd_acc_compat:
-	/*
-	 * Floating Point or Advanced SIMD access
-	 */
-	enable_dbg
-	ct_user_exit
-	mov	x0, x25
-	mov	x1, sp
-	bl	do_fpsimd_acc_compat
-	b	ret_to_user
-
+	b	do_fpsimd_acc
 el0_fpsimd_exc:
 	/*
 	 * Floating Point or Advanced SIMD exception
 	 */
 	enable_dbg
-	ct_user_exit
 	mov	x0, x25
 	mov	x1, sp
-	bl	do_fpsimd_exc
-	b	ret_to_user
+	b	do_fpsimd_exc
 el0_sp_pc:
 	/*
 	 * Stack or PC alignment exception handling
 	 */
-	mrs	x26, far_el1
+	mrs	x0, far_el1
 	// enable interrupts before calling the main handler
 	enable_dbg_and_irq
-	ct_user_exit
-	mov	x0, x26
 	mov	x1, x25
 	mov	x2, sp
-	bl	do_sp_pc_abort
-	b	ret_to_user
+	b	do_sp_pc_abort
 el0_undef:
 	/*
 	 * Undefined instruction
 	 */
 	// enable interrupts before calling the main handler
 	enable_dbg_and_irq
-	ct_user_exit
 	mov	x0, sp
-	bl	do_undefinstr
-	b	ret_to_user
+	b	do_undefinstr
 el0_dbg:
 	/*
 	 * Debug exception handling
@@ -555,16 +500,13 @@ el0_dbg:
 	mov	x2, sp
 	bl	do_debug_exception
 	enable_dbg
-	ct_user_exit
 	b	ret_to_user
 el0_inv:
 	enable_dbg
-	ct_user_exit
 	mov	x0, sp
 	mov	x1, #BAD_SYNC
 	mrs	x2, esr_el1
-	bl	bad_mode
-	b	ret_to_user
+	b	bad_mode
 ENDPROC(el0_sync)
 
 	.align	6
@@ -576,7 +518,6 @@ el0_irq_naked:
 	bl	trace_hardirqs_off
 #endif
 
-	ct_user_exit
 	irq_handler
 
 #ifdef CONFIG_TRACE_IRQFLAGS
@@ -611,33 +552,6 @@ ENTRY(cpu_switch_to)
 	ldp	x27, x28, [x8], #16
 	ldp	x29, x9, [x8], #16
 	ldr	lr, [x8]
-#ifdef CONFIG_ARM64_REG_REBALANCE_ON_CTX_SW
-	orr	x13, x13, x13
-	orr	x14, x14, x14
-	orr	x15, x15, x15
-	orr	x16, x16, x16
-	orr	x17, x17, x17
-	orr	x18, x18, x18
-	orr	x19, x19, x19
-	orr	x20, x20, x20
-	orr	x21, x21, x21
-	mov	v0.16b, v0.16b
-	mov	v1.16b, v1.16b
-	mov	v2.16b, v2.16b
-	mov	v3.16b, v3.16b
-	mov	v4.16b, v4.16b
-	mov	v5.16b, v5.16b
-	mov	v6.16b, v6.16b
-	mov	v7.16b, v7.16b
-	mov	v8.16b, v8.16b
-	mov	v9.16b, v9.16b
-	mov	v10.16b, v10.16b
-	mov	v11.16b, v11.16b
-	mov	v12.16b, v12.16b
-	mov	v13.16b, v13.16b
-	mov	v14.16b, v14.16b
-	mov	v15.16b, v15.16b
-#endif
 	mov	sp, x9
 	ret
 ENDPROC(cpu_switch_to)
@@ -661,7 +575,7 @@ fast_work_pending:
 	str	x0, [sp, #S_X0]			// returned x0
 work_pending:
 	tbnz	x1, #TIF_NEED_RESCHED, work_resched
-	/* TIF_SIGPENDING, TIF_NOTIFY_RESUME or TIF_FOREIGN_FPSTATE case */
+	/* TIF_SIGPENDING or TIF_NOTIFY_RESUME case */
 	ldr	x2, [sp, #S_PSTATE]
 	mov	x0, sp				// 'regs'
 	tst	x2, #PSR_MODE_MASK		// user mode regs?
@@ -708,20 +622,18 @@ el0_svc:
 el0_svc_naked:					// compat entry point
 	stp	x0, scno, [sp, #S_ORIG_X0]	// save the original x0 and syscall number
 	enable_dbg_and_irq
-	ct_user_exit 1
 
 	ldr	x16, [tsk, #TI_FLAGS]		// check for syscall hooks
 	tst	x16, #_TIF_SYSCALL_WORK
 	b.ne	__sys_trace
+	adr	lr, ret_fast_syscall		// return address
 	cmp     scno, sc_nr                     // check upper syscall limit
 	b.hs	ni_sys
 	ldr	x16, [stbl, scno, lsl #3]	// address in the syscall table
-	blr	x16				// call sys_* routine
-	b	ret_fast_syscall
+	br	x16				// call sys_* routine
 ni_sys:
 	mov	x0, sp
-	bl	do_ni_syscall
-	b	ret_fast_syscall
+	b	do_ni_syscall
 ENDPROC(el0_svc)
 
 	/*
@@ -736,18 +648,19 @@ __sys_trace:
 	str	x0, [sp, #S_X0]
 1:	mov	x0, sp
 	bl	syscall_trace_enter
+	adr	lr, __sys_trace_return		// return address
 	cmp	w0, #-1				// skip the syscall?
 	b.eq	__sys_trace_return_skipped
 	uxtw	scno, w0			// syscall number (possibly new)
 	mov	x1, sp				// pointer to regs
 	cmp	scno, sc_nr			// check upper syscall limit
-	b.hs	__ni_sys_trace
+	b.hs	ni_sys
 	ldp	x0, x1, [sp]			// restore the syscall args
 	ldp	x2, x3, [sp, #S_X2]
 	ldp	x4, x5, [sp, #S_X4]
 	ldp	x6, x7, [sp, #S_X6]
 	ldr	x16, [stbl, scno, lsl #3]	// address in the syscall table
-	blr	x16				// call sys_* routine
+	br	x16				// call sys_* routine
 
 __sys_trace_return:
 	str	x0, [sp, #S_X0]			// save returned x0
@@ -756,11 +669,6 @@ __sys_trace_return_skipped:
 	bl	syscall_trace_exit
 	b	ret_to_user
 
-__ni_sys_trace:
-	mov	x0, sp
-	bl	do_ni_syscall
-	b	__sys_trace_return
-
 /*
  * Special system call wrappers.
  */
@@ -768,3 +676,10 @@ ENTRY(sys_rt_sigreturn_wrapper)
 	mov	x0, sp
 	b	sys_rt_sigreturn
 ENDPROC(sys_rt_sigreturn_wrapper)
+
+#ifdef CONFIG_STRICT_MEMORY_RWX
+.data
+#endif
+
+ENTRY(handle_arch_irq)
+	.quad	0

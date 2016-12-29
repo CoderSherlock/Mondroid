@@ -34,6 +34,7 @@
 #include <linux/kallsyms.h>
 #include <linux/init.h>
 #include <linux/cpu.h>
+#include <linux/cpuidle.h>
 #include <linux/elfcore.h>
 #include <linux/pm.h>
 #include <linux/tick.h>
@@ -57,10 +58,36 @@ unsigned long __stack_chk_guard __read_mostly;
 EXPORT_SYMBOL(__stack_chk_guard);
 #endif
 
+static void setup_restart(void)
+{
+	/*
+	 * Tell the mm system that we are going to reboot -
+	 * we may need it to insert some 1:1 mappings so that
+	 * soft boot works.
+	 */
+	setup_mm_for_reboot();
+
+	/* Clean and invalidate caches */
+	flush_cache_all();
+
+	/* Turn D-cache off */
+	cpu_cache_off();
+
+	/* Push out any further dirty data, and ensure cache is empty */
+	flush_cache_all();
+}
+
 void soft_restart(unsigned long addr)
 {
-	setup_mm_for_reboot();
-	cpu_soft_restart(virt_to_phys(cpu_reset), addr);
+	typedef void (*phys_reset_t)(unsigned long);
+	phys_reset_t phys_reset;
+
+	setup_restart();
+
+	/* Switch to the identity mapping */
+	phys_reset = (phys_reset_t)virt_to_phys(cpu_reset);
+	phys_reset(addr);
+
 	/* Should never get here */
 	BUG();
 }
@@ -72,6 +99,7 @@ void (*pm_power_off)(void);
 EXPORT_SYMBOL_GPL(pm_power_off);
 
 void (*arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd);
+EXPORT_SYMBOL_GPL(arm_pm_restart);
 
 /*
  * This is our default idle handler.
@@ -82,8 +110,10 @@ void arch_cpu_idle(void)
 	 * This should do all the clock switching and wait for interrupt
 	 * tricks
 	 */
-	cpu_do_idle();
-	local_irq_enable();
+	if (cpuidle_idle_call()) {
+		cpu_do_idle();
+		local_irq_enable();
+	}
 }
 
 void arch_cpu_idle_enter(void)
@@ -156,19 +186,13 @@ void machine_power_off(void)
  */
 void machine_restart(char *cmd)
 {
-	extern char *saved_command_line;
-
 	/* Disable interrupts first */
 	local_irq_disable();
 	smp_send_stop();
 
-	pr_emerg("Kernel command line: %s\n", saved_command_line);
-
 	/* Now call the architecture specific reboot code. */
 	if (arm_pm_restart)
-		arm_pm_restart(reboot_mode, cmd);
-	else
-		do_kernel_restart(cmd);
+		arm_pm_restart(REBOOT_HARD, cmd);
 
 	/*
 	 * Whoops - the architecture was unable to reboot.
@@ -184,7 +208,7 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 {
 	int	i, j;
 	int	nlines;
-	u32	*p;
+	u64	*p;
 
 	/*
 	 * don't attempt to dump non-kernel addresses or
@@ -196,13 +220,12 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 	printk("\n%s: %#lx:\n", name, addr);
 
 	/*
-	 * round address down to a 32 bit boundary
-	 * and always dump a multiple of 32 bytes
+	 * round address down to a 64 bit boundary
+	 * and always dump a multiple of 64 bytes
 	 */
-	p = (u32 *)(addr & ~(sizeof(u32) - 1));
-	nbytes += (addr & (sizeof(u32) - 1));
-	nlines = (nbytes + 31) / 32;
-
+	p = (u64 *)(addr & ~(sizeof(u64) - 1));
+	nbytes += (addr & (sizeof(u64) - 1));
+	nlines = (nbytes + 63) / 64;
 
 	for (i = 0; i < nlines; i++) {
 		/*
@@ -211,28 +234,28 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 		 */
 		printk("%04lx ", (unsigned long)p & 0xffff);
 		for (j = 0; j < 8; j++) {
-			u32	data;
-			if (probe_kernel_address(p, data)) {
+			u64 data;
+			/*
+			 * vmalloc addresses may point to
+			 * memory-mapped peripherals
+			 */
+			if (!virt_addr_valid(p) ||
+				 probe_kernel_address(p, data)) {
 				printk(" ********");
 			} else {
-				printk(" %08x", data);
+				printk(KERN_CONT " %016llx", data);
 			}
 			++p;
 		}
-		printk("\n");
+		printk(KERN_CONT "\n");
 	}
 }
 
 static void show_extra_register_data(struct pt_regs *regs, int nbytes)
 {
-	mm_segment_t fs;
-
-	fs = get_fs();
-	set_fs(KERNEL_DS);
 	show_data(regs->pc - nbytes, nbytes * 2, "PC");
 	show_data(regs->regs[30] - nbytes, nbytes * 2, "LR");
 	show_data(regs->sp - nbytes, nbytes * 2, "SP");
-	set_fs(fs);
 }
 
 void __show_regs(struct pt_regs *regs)
@@ -261,7 +284,8 @@ void __show_regs(struct pt_regs *regs)
 		if (i % 2 == 0)
 			printk("\n");
 	}
-	if (!user_mode(regs))
+	/* Dump only kernel mode */
+	if (get_fs() == get_ds())
 		show_extra_register_data(regs, 256);
 	printk("\n");
 }
@@ -309,8 +333,7 @@ void release_thread(struct task_struct *dead_task)
 
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 {
-	if (current->mm)
-		fpsimd_preserve_current_state();
+	fpsimd_preserve_current_state();
 	*dst = *src;
 	return 0;
 }
@@ -452,4 +475,9 @@ static unsigned long randomize_base(unsigned long base)
 unsigned long arch_randomize_brk(struct mm_struct *mm)
 {
 	return randomize_base(mm->brk);
+}
+
+unsigned long randomize_et_dyn(unsigned long base)
+{
+	return randomize_base(base);
 }

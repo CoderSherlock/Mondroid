@@ -43,14 +43,9 @@
 #define PR_APTPL_MAX_IPORT_LEN			256
 #define PR_APTPL_MAX_TPORT_LEN			256
 
-/*
- *  Function defined in target_core_spc.c
- */
-void spc_parse_naa_6h_vendor_specific(struct se_device *, unsigned char *);
-
 extern struct kmem_cache *t10_pr_reg_cache;
 
-extern void core_pr_dump_initiator_port(struct t10_pr_registration *,
+extern int core_pr_dump_initiator_port(struct t10_pr_registration *,
 			char *, u32);
 extern sense_reason_t target_scsi2_reservation_release(struct se_cmd *);
 extern sense_reason_t target_scsi2_reservation_reserve(struct se_cmd *);

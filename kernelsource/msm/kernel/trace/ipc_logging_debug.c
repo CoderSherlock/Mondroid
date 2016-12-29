@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -133,8 +133,7 @@ static void debug_create(const char *name, mode_t mode,
 static void dfunc_string(struct encode_context *ectxt,
 			 struct decode_context *dctxt)
 {
-	tsv_timestamp_read(ectxt, dctxt, "");
-	tsv_qtimer_read(ectxt, dctxt, " ");
+	tsv_timestamp_read(ectxt, dctxt, " ");
 	tsv_byte_array_read(ectxt, dctxt, "");
 
 	/* add trailing \n if necessary */
@@ -155,7 +154,7 @@ void check_and_create_debugfs(void)
 
 		if (IS_ERR(root_dent)) {
 			pr_err("%s: unable to create debugfs %ld\n",
-				__func__, PTR_ERR(root_dent));
+				__func__, IS_ERR(root_dent));
 			root_dent = NULL;
 		}
 	}

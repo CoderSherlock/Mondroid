@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,7 +20,6 @@
 #include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/clk.h>
-#include <linux/cpu_pm.h>
 #include <linux/topology.h>
 #include <linux/of.h>
 #include <linux/of_coresight.h>
@@ -67,7 +66,6 @@ do {									\
 
 #define CTI_MAX_TRIGGERS	(8)
 #define CTI_MAX_CHANNELS	(4)
-#define AFFINITY_LEVEL_L2	1
 
 #define to_cti_drvdata(c) container_of(c, struct cti_drvdata, cti)
 
@@ -101,9 +99,6 @@ struct cti_drvdata {
 	struct cti_pctrl		*gpio_trigin;
 	struct cti_pctrl		*gpio_trigout;
 };
-
-static struct notifier_block cti_cpu_pm_notifier;
-static int registered;
 
 static LIST_HEAD(cti_list);
 static DEFINE_MUTEX(cti_lock);
@@ -1365,30 +1360,6 @@ static const struct attribute_group *cti_attr_grps[] = {
 	NULL,
 };
 
-static int cti_cpu_pm_callback(struct notifier_block *self,
-			       unsigned long cmd, void *v)
-{
-	unsigned long aff_level = (unsigned long) v;
-
-	switch (cmd) {
-	case CPU_CLUSTER_PM_ENTER:
-		if (aff_level == AFFINITY_LEVEL_L2)
-			coresight_cti_ctx_save();
-		break;
-	case CPU_CLUSTER_PM_ENTER_FAILED:
-	case CPU_CLUSTER_PM_EXIT:
-		if (aff_level == AFFINITY_LEVEL_L2)
-			coresight_cti_ctx_restore();
-		break;
-	}
-
-	return NOTIFY_OK;
-}
-
-static struct notifier_block cti_cpu_pm_notifier = {
-	.notifier_call = cti_cpu_pm_callback,
-};
-
 static int cti_probe(struct platform_device *pdev)
 {
 	int ret, cpu;
@@ -1404,10 +1375,12 @@ static int cti_probe(struct platform_device *pdev)
 	if (coresight_fuse_access_disabled())
 		return -EPERM;
 
-	pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
-	if (IS_ERR(pdata))
-		return PTR_ERR(pdata);
-	pdev->dev.platform_data = pdata;
+	if (pdev->dev.of_node) {
+		pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
+		if (IS_ERR(pdata))
+			return PTR_ERR(pdata);
+		pdev->dev.platform_data = pdata;
+	}
 
 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
 	if (!drvdata)
@@ -1442,12 +1415,14 @@ static int cti_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	drvdata->gpio_trigin->trig = -1;
-	ret = of_property_read_u32(pdev->dev.of_node,
-				   "qcom,cti-gpio-trigin", &trig);
-	if (!ret)
-		drvdata->gpio_trigin->trig = trig;
-	else if (ret != -EINVAL)
-		return ret;
+	if (pdev->dev.of_node) {
+		ret = of_property_read_u32(pdev->dev.of_node,
+					   "qcom,cti-gpio-trigin", &trig);
+		if (!ret)
+			drvdata->gpio_trigin->trig = trig;
+		else if (ret != -EINVAL)
+			return ret;
+	}
 
 	drvdata->gpio_trigout = devm_kzalloc(dev, sizeof(struct cti_pctrl),
 					     GFP_KERNEL);
@@ -1455,12 +1430,14 @@ static int cti_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	drvdata->gpio_trigout->trig = -1;
-	ret = of_property_read_u32(pdev->dev.of_node,
-				   "qcom,cti-gpio-trigout", &trig);
-	if (!ret)
-		drvdata->gpio_trigout->trig = trig;
-	else if (ret != -EINVAL)
-		return ret;
+	if (pdev->dev.of_node) {
+		ret = of_property_read_u32(pdev->dev.of_node,
+					   "qcom,cti-gpio-trigout", &trig);
+		if (!ret)
+			drvdata->gpio_trigout->trig = trig;
+		else if (ret != -EINVAL)
+			return ret;
+	}
 
 	drvdata->cpu = -1;
 	cpu_phandle = of_get_property(pdev->dev.of_node, "coresight-cti-cpu",
@@ -1484,7 +1461,7 @@ static int cti_probe(struct platform_device *pdev)
 		}
 	}
 
-	if (!cti_save_disable)
+	if (pdev->dev.of_node && !cti_save_disable)
 		drvdata->cti_save = of_property_read_bool(pdev->dev.of_node,
 							  "qcom,cti-save");
 	if (drvdata->cti_save) {
@@ -1524,13 +1501,7 @@ static int cti_probe(struct platform_device *pdev)
 		goto err;
 	}
 
-	if (drvdata->cti_save) {
-		if (!registered)
-			cpu_pm_register_notifier(&cti_cpu_pm_notifier);
-		registered++;
-	}
-
-	dev_dbg(dev, "CTI initialized\n");
+	dev_info(dev, "CTI initialized\n");
 	return 0;
 err:
 	if (drvdata->cti_save && !drvdata->cti_hwclk)
@@ -1542,11 +1513,6 @@ static int cti_remove(struct platform_device *pdev)
 {
 	struct cti_drvdata *drvdata = platform_get_drvdata(pdev);
 
-	if (drvdata->cti_save) {
-		registered--;
-		if (!registered)
-			cpu_pm_unregister_notifier(&cti_cpu_pm_notifier);
-	}
 	coresight_unregister(drvdata->csdev);
 	if (drvdata->cti_save && !drvdata->cti_hwclk)
 		clk_disable_unprepare(drvdata->clk);

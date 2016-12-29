@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -30,6 +30,7 @@
 #include "msm-pcm-q6-v2.h"
 #include "msm-pcm-routing-v2.h"
 #include "q6voice.h"
+#include "audio_ocmem.h"
 
 #define SHARED_MEM_BUF 2
 #define VOIP_MAX_Q_LEN 10
@@ -152,8 +153,8 @@ struct voip_drv_info {
 	uint8_t capture_start;
 	uint8_t playback_start;
 
-	uint8_t playback_prepare;
-	uint8_t capture_prepare;
+	uint8_t playback_instance;
+	uint8_t capture_instance;
 
 	unsigned int play_samp_rate;
 	unsigned int cap_samp_rate;
@@ -199,10 +200,9 @@ static struct snd_pcm_hardware msm_pcm_hardware = {
 				SNDRV_PCM_INFO_INTERLEAVED),
 	.formats =              SNDRV_PCM_FMTBIT_S16_LE |
 				SNDRV_PCM_FMTBIT_SPECIAL,
-	.rates =                SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |
-				SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000,
+	.rates =                SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000,
 	.rate_min =             8000,
-	.rate_max =             48000,
+	.rate_max =             16000,
 	.channels_min =         1,
 	.channels_max =         1,
 	.buffer_bytes_max =	sizeof(struct voip_buf_node) * VOIP_MAX_Q_LEN,
@@ -317,7 +317,7 @@ static int msm_pcm_voip_probe(struct snd_soc_platform *platform)
 }
 
 /* sample rate supported */
-static unsigned int supported_sample_rates[] = {8000, 16000, 32000, 48000};
+static unsigned int supported_sample_rates[] = {8000, 16000};
 
 static void voip_ssr_cb_fn(uint32_t opcode, void *private_data)
 {
@@ -325,7 +325,7 @@ static void voip_ssr_cb_fn(uint32_t opcode, void *private_data)
 	/* Notify ASoC to send next playback/Capture to unblock write/read */
 	struct voip_drv_info *prtd = private_data;
 
-	if ((opcode == 0xFFFFFFFF) || (opcode == RESET_EVENTS)) { //HTC_AUD
+	if (opcode == 0xFFFFFFFF) {
 
 		prtd->voip_reset = true;
 		pr_debug("%s: Notify ASoC to send next playback/Capture\n",
@@ -494,11 +494,7 @@ static void voip_process_ul_pkt(uint8_t *voc_pkt,
 		pr_debug("%s: pkt_len =%d, frame.pktlen=%d, timestamp=%d\n",
 			 __func__, pkt_len, buf_node->frame.pktlen, timestamp);
 
-		if (prtd->mode == MODE_PCM)
-			prtd->pcm_capture_irq_pos += buf_node->frame.pktlen;
-		else
-			prtd->pcm_capture_irq_pos += prtd->pcm_capture_count;
-
+		prtd->pcm_capture_irq_pos += prtd->pcm_capture_count;
 		spin_unlock_irqrestore(&prtd->dsp_ul_lock, dsp_flags);
 		snd_pcm_period_elapsed(prtd->capture_substream);
 	} else {
@@ -660,11 +656,7 @@ static void voip_process_dl_pkt(uint8_t *voc_pkt, void *private_data)
 		pr_debug("%s: frame.pktlen=%d\n", __func__,
 			 buf_node->frame.pktlen);
 
-		if (prtd->mode == MODE_PCM)
-			prtd->pcm_playback_irq_pos += buf_node->frame.pktlen;
-		else
-			prtd->pcm_playback_irq_pos += prtd->pcm_count;
-
+		prtd->pcm_playback_irq_pos += prtd->pcm_count;
 		spin_unlock_irqrestore(&prtd->dsp_lock, dsp_flags);
 		snd_pcm_period_elapsed(prtd->playback_substream);
 	} else {
@@ -691,7 +683,6 @@ static int msm_pcm_playback_prepare(struct snd_pcm_substream *substream)
 	prtd->pcm_count = snd_pcm_lib_period_bytes(substream);
 	prtd->pcm_playback_irq_pos = 0;
 	prtd->pcm_playback_buf_pos = 0;
-	prtd->playback_prepare = 1;
 
 	return 0;
 }
@@ -707,7 +698,6 @@ static int msm_pcm_capture_prepare(struct snd_pcm_substream *substream)
 	prtd->pcm_capture_count = snd_pcm_lib_period_bytes(substream);
 	prtd->pcm_capture_irq_pos = 0;
 	prtd->pcm_capture_buf_pos = 0;
-	prtd->capture_prepare = 1;
 	return ret;
 }
 
@@ -721,6 +711,8 @@ static int msm_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 		pr_debug("%s: Trigger start\n", __func__);
+		if ((!prtd->capture_start) && (!prtd->playback_start))
+			voice_ocmem_process_req(VOICE, true);
 		if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
 			prtd->capture_start = 1;
 		else
@@ -728,6 +720,8 @@ static int msm_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 		pr_debug("SNDRV_PCM_TRIGGER_STOP\n");
+		if (prtd->capture_start && prtd->playback_start)
+			voice_ocmem_process_req(VOICE, false);
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 			prtd->playback_start = 0;
 		else
@@ -767,8 +761,10 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		prtd->playback_substream = substream;
+		prtd->playback_instance++;
 	} else {
 		prtd->capture_substream = substream;
+		prtd->capture_instance++;
 	}
 	runtime->private_data = prtd;
 err:
@@ -955,11 +951,11 @@ static int msm_pcm_close(struct snd_pcm_substream *substream)
 	mutex_lock(&prtd->lock);
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		prtd->playback_prepare = 0;
+		prtd->playback_instance--;
 	else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
-		prtd->capture_prepare = 0;
+		prtd->capture_instance--;
 
-	if (!prtd->playback_prepare && !prtd->capture_prepare) {
+	if (!prtd->playback_instance && !prtd->capture_instance) {
 		if (prtd->state == VOIP_STARTED) {
 			prtd->voip_reset = false;
 			prtd->state = VOIP_STOPPED;
@@ -1143,16 +1139,21 @@ static int voip_config_vocoder(struct snd_pcm_substream *substream)
 	}
 	pr_debug("%s(): media_type=%d\n", __func__, media_type);
 
-	if ((prtd->play_samp_rate == 8000 && prtd->cap_samp_rate == 8000) ||
-	    (prtd->play_samp_rate == 16000 && prtd->cap_samp_rate == 16000) ||
-	    (prtd->play_samp_rate == 32000 && prtd->cap_samp_rate == 32000) ||
-	    (prtd->play_samp_rate == 48000 && prtd->cap_samp_rate == 48000)) {
+	if ((prtd->play_samp_rate == 8000) &&
+	    (prtd->cap_samp_rate == 8000))
 		voc_config_vocoder(media_type, rate_type,
-				   VSS_NETWORK_ID_VOIP,
+				   VSS_NETWORK_ID_VOIP_NB,
 				   voip_info.dtx_mode,
 				   evrc_min_rate_type,
 				   evrc_max_rate_type);
-	} else {
+	else if ((prtd->play_samp_rate == 16000) &&
+		 (prtd->cap_samp_rate == 16000))
+		voc_config_vocoder(media_type, rate_type,
+				   VSS_NETWORK_ID_VOIP_WB,
+				   voip_info.dtx_mode,
+				   evrc_min_rate_type,
+				   evrc_max_rate_type);
+	else {
 		pr_debug("%s: Invalid rate playback %d, capture %d\n",
 			 __func__, prtd->play_samp_rate,
 			 prtd->cap_samp_rate);
@@ -1177,7 +1178,7 @@ static int msm_pcm_prepare(struct snd_pcm_substream *substream)
 	else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
 		ret = msm_pcm_capture_prepare(substream);
 
-	if (prtd->playback_prepare && prtd->capture_prepare
+	if (prtd->playback_instance && prtd->capture_instance
 	    && (prtd->state != VOIP_STARTED)) {
 		ret = voip_config_vocoder(substream);
 		if (ret < 0) {
@@ -1546,13 +1547,9 @@ static int voip_get_media_type(uint32_t mode, uint32_t rate_type,
 		break;
 	case MODE_PCM:
 		if (samp_rate == 8000)
-			*media_type = VSS_MEDIA_ID_PCM_8_KHZ;
-		else if (samp_rate == 16000)
-			*media_type = VSS_MEDIA_ID_PCM_16_KHZ;
-		else if (samp_rate == 32000)
-			*media_type = VSS_MEDIA_ID_PCM_32_KHZ;
+			*media_type = VSS_MEDIA_ID_PCM_NB;
 		else
-			*media_type = VSS_MEDIA_ID_PCM_48_KHZ;
+			*media_type = VSS_MEDIA_ID_PCM_WB;
 		break;
 	case MODE_IS127: /* EVRC-A */
 		*media_type = VSS_MEDIA_ID_EVRC_MODEM;

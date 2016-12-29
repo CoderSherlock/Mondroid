@@ -10,7 +10,6 @@
  */
 
 #include "dm-verity-fec.h"
-#include <linux/math64.h>
 #include <linux/sysfs.h>
 
 #define DM_MSG_PREFIX	"verity-fec"
@@ -253,6 +252,7 @@ static int fec_read_bufs(struct dm_verity *v, struct dm_verity_io *io,
 		}
 
 		bbuf = dm_bufio_read(bufio, block, &buf);
+
 		if (unlikely(IS_ERR(bbuf))) {
 			DMWARN_LIMIT("%s: FEC %llu: read failed (%llu): %ld",
 				     v->data_dev->name,
@@ -429,11 +429,11 @@ static int fec_bv_copy(struct dm_verity *v, struct dm_verity_io *io, u8 *data,
 
 /*
  * Correct errors in a block. Copies corrected block to dest if non-NULL,
- * otherwise to a bio_vec starting from iter.
+ * otherwise to io->io_vec starting from provided vector and offset.
  */
 int verity_fec_decode(struct dm_verity *v, struct dm_verity_io *io,
 		      enum verity_block_type type, sector_t block, u8 *dest,
-		      struct bvec_iter *iter)
+		      unsigned bv_vector, unsigned bv_offset)
 {
 	int r;
 	struct dm_verity_fec_io *fio = fec_io(io);
@@ -463,7 +463,9 @@ int verity_fec_decode(struct dm_verity *v, struct dm_verity_io *io,
 	 */
 
 	offset = block << v->data_dev_block_bits;
-	res = div64_u64(offset, v->fec->rounds << v->data_dev_block_bits);
+
+	res = offset;
+	do_div(res, v->fec->rounds << v->data_dev_block_bits);
 
 	/*
 	 * The base RS block we can feed to the interleaver to find out all
@@ -485,9 +487,10 @@ int verity_fec_decode(struct dm_verity *v, struct dm_verity_io *io,
 
 	if (dest)
 		memcpy(dest, fio->output, 1 << v->data_dev_block_bits);
-	else if (iter) {
+	else {
 		fio->output_pos = 0;
-		r = verity_for_bv_block(v, io, iter, fec_bv_copy);
+		r = verity_for_bv_block(v, io, &bv_vector, &bv_offset,
+					fec_bv_copy);
 	}
 
 done:
@@ -498,24 +501,33 @@ done:
 /*
  * Clean up per-bio data.
  */
-void verity_fec_finish_io(struct dm_verity_io *io)
+void verity_fec_finish_io(struct dm_verity_io *io, int error)
 {
 	unsigned n;
 	struct dm_verity_fec *f = io->v->fec;
 	struct dm_verity_fec_io *fio = fec_io(io);
+	struct bio *bio = dm_bio_from_per_bio_data(io,
+					io->v->ti->per_bio_data_size);
 
 	if (!verity_fec_is_enabled(io->v))
 		return;
 
-	mempool_free(fio->rs, f->rs_pool);
+	if (fio->rs)
+		mempool_free(fio->rs, f->rs_pool);
 
 	fec_for_each_prealloc_buffer(n)
-		mempool_free(fio->bufs[n], f->prealloc_pool);
+		if (fio->bufs[n])
+			mempool_free(fio->bufs[n], f->prealloc_pool);
 
 	fec_for_each_extra_buffer(fio, n)
-		mempool_free(fio->bufs[n], f->extra_pool);
+		if (fio->bufs[n])
+			mempool_free(fio->bufs[n], f->extra_pool);
 
-	mempool_free(fio->output, f->output_pool);
+	if (fio->output)
+		mempool_free(fio->output, f->output_pool);
+
+	if (!error && !test_bit(BIO_UPTODATE, &bio->bi_flags))
+		set_bit(BIO_UPTODATE, &bio->bi_flags);
 }
 
 /*
@@ -564,10 +576,14 @@ void verity_fec_dtr(struct dm_verity *v)
 	if (!verity_fec_is_enabled(v))
 		goto out;
 
-	mempool_destroy(f->rs_pool);
-	mempool_destroy(f->prealloc_pool);
-	mempool_destroy(f->extra_pool);
-	kmem_cache_destroy(f->cache);
+	if (f->rs_pool)
+		mempool_destroy(f->rs_pool);
+	if (f->prealloc_pool)
+		mempool_destroy(f->prealloc_pool);
+	if (f->extra_pool)
+		mempool_destroy(f->extra_pool);
+	if (f->cache)
+		kmem_cache_destroy(f->cache);
 
 	if (f->data_bufio)
 		dm_bufio_client_destroy(f->data_bufio);

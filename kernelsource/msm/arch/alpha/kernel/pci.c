@@ -254,6 +254,12 @@ void pcibios_fixup_bus(struct pci_bus *bus)
 	}
 }
 
+int
+pcibios_enable_device(struct pci_dev *dev, int mask)
+{
+	return pci_enable_resources(dev, mask);
+}
+
 /*
  *  If we set up a device for bus mastering, we need to check the latency
  *  timer as certain firmware forgets to set it properly, as seen
@@ -334,8 +340,6 @@ common_init_pci(void)
 
 		bus = pci_scan_root_bus(NULL, next_busno, alpha_mv.pci_ops,
 					hose, &resources);
-		if (!bus)
-			continue;
 		hose->bus = bus;
 		hose->need_domain_info = need_domain_info;
 		next_busno = bus->busn_res.end + 1;
@@ -351,11 +355,6 @@ common_init_pci(void)
 
 	pci_assign_unassigned_resources();
 	pci_fixup_irqs(alpha_mv.pci_swizzle, alpha_mv.pci_map_irq);
-	for (hose = hose_head; hose; hose = hose->next) {
-		bus = hose->bus;
-		if (bus)
-			pci_bus_add_devices(bus);
-	}
 }
 
 

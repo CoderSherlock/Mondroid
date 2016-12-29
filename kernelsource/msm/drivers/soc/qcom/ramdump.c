@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,8 +25,7 @@
 #include <linux/elf.h>
 #include <linux/wait.h>
 #include <soc/qcom/ramdump.h>
-#include <linux/dma-mapping.h>
-#include <linux/of.h>
+
 
 #define RAMDUMP_WAIT_MSECS	120000
 
@@ -45,8 +44,6 @@ struct ramdump_device {
 	struct ramdump_segment *segments;
 	size_t elfcore_size;
 	char *elfcore_buf;
-	struct dma_attrs attrs;
-	bool complete_ramdump;
 };
 
 static int ramdump_open(struct inode *inode, struct file *filep)
@@ -151,11 +148,7 @@ static ssize_t ramdump_read(struct file *filep, char __user *buf, size_t count,
 
 	copy_size = min(count, (size_t)MAX_IOREMAP_SIZE);
 	copy_size = min((unsigned long)copy_size, data_left);
-
-	init_dma_attrs(&rd_dev->attrs);
-	dma_set_attr(DMA_ATTR_SKIP_ZEROING, &rd_dev->attrs);
-	device_mem = vaddr ?: dma_remap(rd_dev->device.parent, NULL, addr,
-						copy_size, &rd_dev->attrs);
+	device_mem = vaddr ?: ioremap_nocache(addr, copy_size);
 	origdevice_mem = device_mem;
 
 	if (device_mem == NULL) {
@@ -205,9 +198,8 @@ static ssize_t ramdump_read(struct file *filep, char __user *buf, size_t count,
 	}
 
 	kfree(finalbuf);
-	if (!vaddr && origdevice_mem)
-		dma_unremap(rd_dev->device.parent, origdevice_mem, copy_size);
-
+	if (!vaddr)
+		iounmap(origdevice_mem);
 	*pos += copy_size;
 
 	pr_debug("Ramdump(%s): Read %zd bytes from address %lx.",
@@ -216,9 +208,8 @@ static ssize_t ramdump_read(struct file *filep, char __user *buf, size_t count,
 	return *pos - orig_pos;
 
 ramdump_done:
-	if (!vaddr && origdevice_mem)
-		dma_unremap(rd_dev->device.parent, origdevice_mem, copy_size);
-
+	if (!vaddr)
+		iounmap(origdevice_mem);
 	kfree(finalbuf);
 	rd_dev->data_ready = 0;
 	*pos = 0;
@@ -274,13 +265,6 @@ void *create_ramdump_device(const char *dev_name, struct device *parent)
 	rd_dev->device.name = rd_dev->name;
 	rd_dev->device.fops = &ramdump_file_ops;
 	rd_dev->device.parent = parent;
-	if (parent) {
-		rd_dev->complete_ramdump = of_property_read_bool(
-				parent->of_node, "qcom,complete-ramdump");
-		if (!rd_dev->complete_ramdump)
-			dev_info(parent,
-			"for %s segments only will be dumped.", dev_name);
-	}
 
 	init_waitqueue_head(&rd_dev->dump_wait_q);
 
@@ -323,17 +307,8 @@ static int _do_ramdump(void *handle, struct ramdump_segment *segments,
 		return -EPIPE;
 	}
 
-	if (rd_dev->complete_ramdump) {
-		for (i = 0; i < nsegments-1; i++)
-			segments[i].size =
-			PAGE_ALIGN(segments[i+1].address - segments[i].address);
-
-		segments[nsegments-1].size =
-			PAGE_ALIGN(segments[nsegments-1].size);
-	} else {
-		for (i = 0; i < nsegments; i++)
-			segments[i].size = PAGE_ALIGN(segments[i].size);
-	}
+	for (i = 0; i < nsegments; i++)
+		segments[i].size = PAGE_ALIGN(segments[i].size);
 
 	rd_dev->segments = segments;
 	rd_dev->nsegments = nsegments;
@@ -373,7 +348,7 @@ static int _do_ramdump(void *handle, struct ramdump_segment *segments,
 	rd_dev->data_ready = 1;
 	rd_dev->ramdump_status = -1;
 
-	reinit_completion(&rd_dev->ramdump_complete);
+	INIT_COMPLETION(rd_dev->ramdump_complete);
 
 	/* Tell userspace that the data is ready */
 	wake_up(&rd_dev->dump_wait_q);

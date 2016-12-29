@@ -57,7 +57,6 @@ obj-$(CONFIG_CAIF)		+= caif/
 ifneq ($(CONFIG_DCB),)
 obj-y				+= dcb/
 endif
-obj-$(CONFIG_6LOWPAN)		+= 6lowpan/
 obj-$(CONFIG_IEEE802154)	+= ieee802154/
 obj-$(CONFIG_MAC802154)		+= mac802154/
 
@@ -71,8 +70,6 @@ obj-$(CONFIG_BATMAN_ADV)	+= batman-adv/
 obj-$(CONFIG_NFC)		+= nfc/
 obj-$(CONFIG_OPENVSWITCH)	+= openvswitch/
 obj-$(CONFIG_VSOCKETS)	+= vmw_vsock/
-obj-$(CONFIG_NET_MPLS_GSO)	+= mpls/
-obj-$(CONFIG_HSR)		+= hsr/
 obj-$(CONFIG_NET_ACTIVITY_STATS)		+= activity_stats.o
-obj-$(CONFIG_IPC_ROUTER)        += ipc_router/
 obj-$(CONFIG_RMNET_DATA) += rmnet_data/
+obj-$(CONFIG_IPC_ROUTER)	+= ipc_router/

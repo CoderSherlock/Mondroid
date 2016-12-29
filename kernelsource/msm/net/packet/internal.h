@@ -65,7 +65,7 @@ struct packet_ring_buffer {
 	unsigned int		pg_vec_pages;
 	unsigned int		pg_vec_len;
 
-	unsigned int __percpu	*pending_refcnt;
+	atomic_t		pending;
 
 	struct tpacket_kbdq_core	prb_bdqc;
 };
@@ -115,7 +115,6 @@ struct packet_sock {
 	unsigned int		tp_tx_has_off:1;
 	unsigned int		tp_tstamp;
 	struct net_device __rcu	*cached_dev;
-	int			(*xmit)(struct sk_buff *skb);
 	struct packet_type	prot_hook ____cacheline_aligned_in_smp;
 };
 

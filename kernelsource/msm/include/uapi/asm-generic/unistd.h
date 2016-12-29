@@ -362,7 +362,7 @@ __SYSCALL(__NR_syslog, sys_syslog)
 #define __NR_ptrace 117
 __SYSCALL(__NR_ptrace, sys_ptrace)
 
-/* kernel/sched/core.c */
+/* kernel/sched.c */
 #define __NR_sched_setparam 118
 __SYSCALL(__NR_sched_setparam, sys_sched_setparam)
 #define __NR_sched_setscheduler 119
@@ -697,19 +697,14 @@ __SYSCALL(__NR_finit_module, sys_finit_module)
 __SYSCALL(__NR_sched_setattr, sys_sched_setattr)
 #define __NR_sched_getattr 275
 __SYSCALL(__NR_sched_getattr, sys_sched_getattr)
+/* Backporting seccomp, stub out renameat2 */
 #define __NR_renameat2 276
-__SYSCALL(__NR_renameat2, sys_renameat2)
+__SYSCALL(__NR_renameat2, sys_ni_syscall)
 #define __NR_seccomp 277
 __SYSCALL(__NR_seccomp, sys_seccomp)
-#define __NR_getrandom 278
-__SYSCALL(__NR_getrandom, sys_getrandom)
-#define __NR_memfd_create 279
-__SYSCALL(__NR_memfd_create, sys_memfd_create)
-#define __NR_bpf 280
-__SYSCALL(__NR_bpf, sys_bpf)
 
 #undef __NR_syscalls
-#define __NR_syscalls 281
+#define __NR_syscalls 278
 
 /*
  * All syscalls below here should go away really,

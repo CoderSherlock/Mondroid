@@ -21,38 +21,10 @@
 #include <linux/clkdev.h>
 #include <linux/of.h>
 
-#include "clk.h"
-
 static LIST_HEAD(clocks);
 static DEFINE_MUTEX(clocks_mutex);
 
 #if defined(CONFIG_OF)
-
-/**
- * of_clk_get_by_clkspec() - Lookup a clock form a clock provider
- * @clkspec: pointer to a clock specifier data structure
- *
- * This function looks up a struct clk from the registered list of clock
- * providers, an input is a clock specifier data structure as returned
- * from the of_parse_phandle_with_args() function call.
- */
-struct clk *of_clk_get_by_clkspec(struct of_phandle_args *clkspec)
-{
-	struct clk *clk;
-
-	if (!clkspec)
-		return ERR_PTR(-EINVAL);
-
-	of_clk_lock();
-	clk = __of_clk_get_from_provider(clkspec);
-
-	if (!IS_ERR(clk) && !__clk_get(clk))
-		clk = ERR_PTR(-ENOENT);
-
-	of_clk_unlock();
-	return clk;
-}
-
 struct clk *of_clk_get(struct device_node *np, int index)
 {
 	struct of_phandle_args clkspec;
@@ -67,7 +39,7 @@ struct clk *of_clk_get(struct device_node *np, int index)
 	if (rc)
 		return ERR_PTR(rc);
 
-	clk = of_clk_get_by_clkspec(&clkspec);
+	clk = of_clk_get_from_provider(&clkspec);
 	of_node_put(clkspec.np);
 	return clk;
 }
@@ -171,7 +143,7 @@ struct clk *clk_get_sys(const char *dev_id, const char *con_id)
 		cl = NULL;
 	mutex_unlock(&clocks_mutex);
 
-	return cl ? cl->clk : ERR_PTR(-ENOENT);
+	return cl ? cl->clk : ERR_PTR(-EPROBE_DEFER);
 }
 EXPORT_SYMBOL(clk_get_sys);
 
@@ -182,9 +154,7 @@ struct clk *clk_get(struct device *dev, const char *con_id)
 
 	if (dev) {
 		clk = of_clk_get_by_name(dev->of_node, con_id);
-		if (!IS_ERR(clk))
-			return clk;
-		if (PTR_ERR(clk) == -EPROBE_DEFER)
+		if (!IS_ERR(clk) && __clk_get(clk))
 			return clk;
 	}
 

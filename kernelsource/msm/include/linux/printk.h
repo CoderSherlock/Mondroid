@@ -5,13 +5,9 @@
 #include <linux/init.h>
 #include <linux/kern_levels.h>
 #include <linux/linkage.h>
-#include <linux/cache.h>
 
 extern const char linux_banner[];
 extern const char linux_proc_banner[];
-
-extern char *log_buf_addr_get(void);
-extern u32 log_buf_len_get(void);
 
 static inline int printk_get_level(const char *buffer)
 {
@@ -27,22 +23,15 @@ static inline int printk_get_level(const char *buffer)
 
 static inline const char *printk_skip_level(const char *buffer)
 {
-	if (printk_get_level(buffer))
-		return buffer + 2;
-
+	if (printk_get_level(buffer)) {
+		switch (buffer[1]) {
+		case '0' ... '7':
+		case 'd':	/* KERN_DEFAULT */
+			return buffer + 2;
+		}
+	}
 	return buffer;
 }
-
-/* printk's without a loglevel use this.. */
-#define MESSAGE_LOGLEVEL_DEFAULT CONFIG_MESSAGE_LOGLEVEL_DEFAULT
-
-/* We show everything that is MORE important than this.. */
-#define CONSOLE_LOGLEVEL_SILENT  0 /* Mum's the word */
-#define CONSOLE_LOGLEVEL_MIN	 1 /* Minimum loglevel we let people use */
-#define CONSOLE_LOGLEVEL_QUIET	 4 /* Shhh ..., when booted with "quiet" */
-#define CONSOLE_LOGLEVEL_DEFAULT 7 /* anything MORE serious than KERN_DEBUG */
-#define CONSOLE_LOGLEVEL_DEBUG	10 /* issue debug messages */
-#define CONSOLE_LOGLEVEL_MOTORMOUTH 15	/* You can't shut this one up */
 
 extern int console_printk[];
 
@@ -53,13 +42,13 @@ extern int console_printk[];
 
 static inline void console_silent(void)
 {
-	console_loglevel = CONSOLE_LOGLEVEL_SILENT;
+	console_loglevel = 0;
 }
 
 static inline void console_verbose(void)
 {
 	if (console_loglevel)
-		console_loglevel = CONSOLE_LOGLEVEL_MOTORMOUTH;
+		console_loglevel = 15;
 }
 
 struct va_format {
@@ -99,13 +88,6 @@ struct va_format {
 #define HW_ERR		"[Hardware Error]: "
 
 /*
- * DEPRECATED
- * Add this to a message whenever you want to warn user space about the use
- * of a deprecated aspect of an API so they can stop using it
- */
-#define DEPRECATED	"[Deprecated]: "
-
-/*
  * Dummy printk for disabled debugging statements to use whilst maintaining
  * gcc's format and side-effect checking.
  */
@@ -134,9 +116,9 @@ asmlinkage __printf(1, 0)
 int vprintk(const char *fmt, va_list args);
 
 asmlinkage __printf(5, 6) __cold
-int printk_emit(int facility, int level,
-		const char *dict, size_t dictlen,
-		const char *fmt, ...);
+asmlinkage int printk_emit(int facility, int level,
+			   const char *dict, size_t dictlen,
+			   const char *fmt, ...);
 
 asmlinkage __printf(1, 2) __cold
 int printk(const char *fmt, ...);
@@ -218,18 +200,12 @@ static inline void show_regs_print_info(const char *log_lvl)
 }
 #endif
 
-extern asmlinkage void dump_stack(void) __cold;
+extern void dump_stack(void) __cold;
 
 #ifndef pr_fmt
 #define pr_fmt(fmt) fmt
 #endif
 
-/*
- * These can be used to print at the various log levels.
- * All of these will print unconditionally, although note that pr_debug()
- * and other debug macros are compiled out unless either DEBUG is defined
- * or CONFIG_DYNAMIC_DEBUG is set.
- */
 #define pr_emerg(fmt, ...) \
 	printk(KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_alert(fmt, ...) \
@@ -257,32 +233,6 @@ extern asmlinkage void dump_stack(void) __cold;
 	no_printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
 #endif
 
-//HTC_AUD_START
-#define pr_aud_fmt(fmt) "[AUD] " KBUILD_MODNAME ": " fmt
-#define pr_aud_fmt1(fmt) "[AUD]" fmt
-#define pr_aud_err(fmt, ...) \
-			printk(KERN_ERR pr_aud_fmt(fmt), ##__VA_ARGS__)
-#define pr_aud_err1(fmt, ...) \
-			printk(KERN_ERR pr_aud_fmt1(fmt), ##__VA_ARGS__)
-#define pr_aud_info(fmt, ...) \
-			printk(KERN_INFO pr_aud_fmt(fmt), ##__VA_ARGS__)
-#define pr_aud_info1(fmt, ...) \
-			printk(KERN_INFO pr_aud_fmt1(fmt), ##__VA_ARGS__)
-
-#if defined(CONFIG_DYNAMIC_DEBUG)
-#define pr_aud_debug(fmt, ...) \
-	dynamic_pr_debug(pr_aud_fmt(fmt), ##__VA_ARGS__)
-#elif defined(DEBUG)
-#define pr_aud_debug(fmt, ...) \
-	printk(KERN_DEBUG pr_aud_fmt(fmt), ##__VA_ARGS__)
-#else
-#define pr_aud_debug(fmt, ...) \
-	no_printk(KERN_DEBUG pr_aud_fmt(fmt), ##__VA_ARGS__)
-#endif
-//HTC_AUD_END
-
-#include <linux/dynamic_debug.h>
-
 /* If you are writing a driver, please use dev_dbg instead */
 #if defined(CONFIG_DYNAMIC_DEBUG)
 /* dynamic_pr_debug() uses pr_fmt() internally so we don't need it here */
@@ -301,28 +251,17 @@ extern asmlinkage void dump_stack(void) __cold;
  */
 
 #ifdef CONFIG_PRINTK
-#define printk_once(fmt, ...)					\
-({								\
-	static bool __print_once __read_mostly;			\
-								\
-	if (!__print_once) {					\
-		__print_once = true;				\
-		printk(fmt, ##__VA_ARGS__);			\
-	}							\
-})
-#define printk_deferred_once(fmt, ...)				\
-({								\
-	static bool __print_once __read_mostly;			\
-								\
-	if (!__print_once) {					\
-		__print_once = true;				\
-		printk_deferred(fmt, ##__VA_ARGS__);		\
-	}							\
+#define printk_once(fmt, ...)			\
+({						\
+	static bool __print_once;		\
+						\
+	if (!__print_once) {			\
+		__print_once = true;		\
+		printk(fmt, ##__VA_ARGS__);	\
+	}					\
 })
 #else
-#define printk_once(fmt, ...)					\
-	no_printk(fmt, ##__VA_ARGS__)
-#define printk_deferred_once(fmt, ...)				\
+#define printk_once(fmt, ...)			\
 	no_printk(fmt, ##__VA_ARGS__)
 #endif
 
@@ -404,19 +343,7 @@ extern asmlinkage void dump_stack(void) __cold;
 #endif
 
 /* If you are writing a driver, please use dev_dbg instead */
-#if defined(CONFIG_DYNAMIC_DEBUG)
-/* descriptor check is first to prevent flooding with "callbacks suppressed" */
-#define pr_debug_ratelimited(fmt, ...)					\
-do {									\
-	static DEFINE_RATELIMIT_STATE(_rs,				\
-				      DEFAULT_RATELIMIT_INTERVAL,	\
-				      DEFAULT_RATELIMIT_BURST);		\
-	DEFINE_DYNAMIC_DEBUG_METADATA(descriptor, fmt);			\
-	if (unlikely(descriptor.flags & _DPRINTK_FLAGS_PRINT) &&	\
-	    __ratelimit(&_rs))						\
-		__dynamic_pr_debug(&descriptor, fmt, ##__VA_ARGS__);	\
-} while (0)
-#elif defined(DEBUG)
+#if defined(DEBUG)
 #define pr_debug_ratelimited(fmt, ...)					\
 	printk_ratelimited(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
 #else
@@ -469,5 +396,13 @@ static inline void print_hex_dump_bytes(const char *prefix_str, int prefix_type,
 	print_hex_dump(KERN_DEBUG, prefix_str, prefix_type, rowsize,	\
 		       groupsize, buf, len, ascii)
 #endif /* defined(CONFIG_DYNAMIC_DEBUG) */
+
+#if defined(CONFIG_OOPS_LOG_BUFFER)
+extern void oops_printk_start(void);
+#else
+static inline void oops_printk_start(void)
+{
+}
+#endif
 
 #endif

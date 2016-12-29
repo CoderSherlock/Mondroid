@@ -8,6 +8,7 @@
  */
 #undef DEBUG
 
+#include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -162,8 +163,7 @@ static struct resource pic_edgectrl_iores = {
 	.flags = IORESOURCE_BUSY,
 };
 
-static int i8259_host_match(struct irq_domain *h, struct device_node *node,
-			    enum irq_domain_bus_token bus_token)
+static int i8259_host_match(struct irq_domain *h, struct device_node *node)
 {
 	return h->of_node == NULL || h->of_node == node;
 }

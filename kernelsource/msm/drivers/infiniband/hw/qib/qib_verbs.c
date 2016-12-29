@@ -40,7 +40,6 @@
 #include <linux/rculist.h>
 #include <linux/mm.h>
 #include <linux/random.h>
-#include <linux/vmalloc.h>
 
 #include "qib.h"
 #include "qib_common.h"
@@ -646,11 +645,9 @@ void qib_ib_rcv(struct qib_ctxtdata *rcd, void *rhdr, void *data, u32 tlen)
 	} else
 		goto drop;
 
-	opcode = (be32_to_cpu(ohdr->bth[0]) >> 24) & 0x7f;
-#ifdef CONFIG_DEBUG_FS
-	rcd->opstats->stats[opcode].n_bytes += tlen;
-	rcd->opstats->stats[opcode].n_packets++;
-#endif
+	opcode = be32_to_cpu(ohdr->bth[0]) >> 24;
+	ibp->opstats[opcode & 0x7f].n_bytes += tlen;
+	ibp->opstats[opcode & 0x7f].n_packets++;
 
 	/* Get the destination QP number. */
 	qp_num = be32_to_cpu(ohdr->bth[1]) & QIB_QPN_MASK;
@@ -663,7 +660,7 @@ void qib_ib_rcv(struct qib_ctxtdata *rcd, void *rhdr, void *data, u32 tlen)
 		mcast = qib_mcast_find(ibp, &hdr->u.l.grh.dgid);
 		if (mcast == NULL)
 			goto drop;
-		this_cpu_inc(ibp->pmastats->n_multicast_rcv);
+		ibp->n_multicast_rcv++;
 		list_for_each_entry_rcu(p, &mcast->qp_list, list)
 			qib_qp_rcv(rcd, hdr, 1, data, tlen, p->qp);
 		/*
@@ -679,8 +676,8 @@ void qib_ib_rcv(struct qib_ctxtdata *rcd, void *rhdr, void *data, u32 tlen)
 					&rcd->lookaside_qp->refcount))
 					wake_up(
 					 &rcd->lookaside_qp->wait);
-				rcd->lookaside_qp = NULL;
-			}
+					rcd->lookaside_qp = NULL;
+				}
 		}
 		if (!rcd->lookaside_qp) {
 			qp = qib_lookup_qpn(ibp, qp_num);
@@ -690,7 +687,7 @@ void qib_ib_rcv(struct qib_ctxtdata *rcd, void *rhdr, void *data, u32 tlen)
 			rcd->lookaside_qpn = qp_num;
 		} else
 			qp = rcd->lookaside_qp;
-		this_cpu_inc(ibp->pmastats->n_unicast_rcv);
+		ibp->n_unicast_rcv++;
 		qib_qp_rcv(rcd, hdr, lnh == QIB_LRH_GRH, data, tlen, qp);
 	}
 	return;
@@ -2087,16 +2084,10 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	 * the LKEY).  The remaining bits act as a generation number or tag.
 	 */
 	spin_lock_init(&dev->lk_table.lock);
-	/* insure generation is at least 4 bits see keys.c */
-	if (ib_qib_lkey_table_size > MAX_LKEY_TABLE_BITS) {
-		qib_dev_warn(dd, "lkey bits %u too large, reduced to %u\n",
-			ib_qib_lkey_table_size, MAX_LKEY_TABLE_BITS);
-		ib_qib_lkey_table_size = MAX_LKEY_TABLE_BITS;
-	}
 	dev->lk_table.max = 1 << ib_qib_lkey_table_size;
 	lk_tab_size = dev->lk_table.max * sizeof(*dev->lk_table.table);
 	dev->lk_table.table = (struct qib_mregion __rcu **)
-		vmalloc(lk_tab_size);
+		__get_free_pages(GFP_KERNEL, get_order(lk_tab_size));
 	if (dev->lk_table.table == NULL) {
 		ret = -ENOMEM;
 		goto err_lk;
@@ -2269,7 +2260,7 @@ err_tx:
 					sizeof(struct qib_pio_header),
 				  dev->pio_hdrs, dev->pio_hdrs_phys);
 err_hdrs:
-	vfree(dev->lk_table.table);
+	free_pages((unsigned long) dev->lk_table.table, get_order(lk_tab_size));
 err_lk:
 	kfree(dev->qp_table);
 err_qpt:
@@ -2323,7 +2314,8 @@ void qib_unregister_ib_device(struct qib_devdata *dd)
 					sizeof(struct qib_pio_header),
 				  dev->pio_hdrs, dev->pio_hdrs_phys);
 	lk_tab_size = dev->lk_table.max * sizeof(*dev->lk_table.table);
-	vfree(dev->lk_table.table);
+	free_pages((unsigned long) dev->lk_table.table,
+		   get_order(lk_tab_size));
 	kfree(dev->qp_table);
 }
 

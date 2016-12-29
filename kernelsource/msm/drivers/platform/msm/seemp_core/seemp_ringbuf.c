@@ -15,7 +15,6 @@
 
 #include "seemp_logk.h"
 #include "seemp_ringbuf.h"
-#include "seemp_event_encoder.h"
 
 /*initial function no need to hold ring_lock*/
 int ringbuf_init(struct seemp_logk_dev *sdev)
@@ -71,7 +70,6 @@ int ringbuf_init(struct seemp_logk_dev *sdev)
 	/*no. of blocks ready for read*/
 	sdev->num_read_in_prog_blks = 0;
 	/*no. of blocks held by the reader to perform read*/
-
 	return 0;
 }
 
@@ -126,12 +124,8 @@ struct seemp_logk_blk *ringbuf_fetch_wr_block
 	return blk;
 }
 
-void ringbuf_finish_writer(struct seemp_logk_dev *sdev,
-				struct seemp_logk_blk *blk)
+void ringbuf_finish_writer(struct seemp_logk_dev *sdev)
 {
-	/* Encode seemp parameters in multi-threaded mode (before mutex lock) */
-	encode_seemp_params(blk);
-
 	/*
 	 * finish writing...
 	 * the calling process will no longer access this block.

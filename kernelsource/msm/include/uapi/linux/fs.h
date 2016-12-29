@@ -35,10 +35,6 @@
 #define SEEK_HOLE	4	/* seek to the next hole */
 #define SEEK_MAX	SEEK_HOLE
 
-#define RENAME_NOREPLACE	(1 << 0)	/* Don't overwrite target */
-#define RENAME_EXCHANGE		(1 << 1)	/* Exchange source and dest */
-#define RENAME_WHITEOUT		(1 << 2)	/* Whiteout source */
-
 struct fstrim_range {
 	__u64 start;
 	__u64 len;
@@ -53,9 +49,9 @@ struct files_stat_struct {
 };
 
 struct inodes_stat_t {
-	long nr_inodes;
-	long nr_unused;
-	long dummy[5];		/* padding for sysctl ABI compatibility */
+	int nr_inodes;
+	int nr_unused;
+	int dummy[5];		/* padding for sysctl ABI compatibility */
 };
 
 
@@ -157,8 +153,6 @@ struct inodes_stat_t {
 #define FIFREEZE	_IOWR('X', 119, int)	/* Freeze */
 #define FITHAW		_IOWR('X', 120, int)	/* Thaw */
 #define FITRIM		_IOWR('X', 121, struct fstrim_range)	/* Trim */
-
-#define FIDTRIM	_IOWR('f', 128, struct fstrim_range)	/* Deep discard trim */
 
 #define	FS_IOC_GETFLAGS			_IOR('f', 1, long)
 #define	FS_IOC_SETFLAGS			_IOW('f', 2, long)

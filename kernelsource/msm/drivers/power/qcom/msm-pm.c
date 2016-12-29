@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,10 +24,10 @@
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/of_platform.h>
-#include <linux/of_address.h>
 #include <linux/msm-bus.h>
 #include <linux/uaccess.h>
 #include <linux/dma-mapping.h>
+#include <soc/qcom/avs.h>
 #include <soc/qcom/spm.h>
 #include <soc/qcom/pm.h>
 #include <soc/qcom/scm.h>
@@ -42,6 +42,7 @@
 #include <soc/qcom/jtag.h>
 #include "idle.h"
 #include "pm-boot.h"
+#include "../../../arch/arm/mach-msm/clock.h"
 
 #define SCM_CMD_TERMINATE_PC	(0x2)
 #define SCM_CMD_CORE_HOTPLUGGED (0x10)
@@ -51,7 +52,7 @@
 
 #define MAX_BUF_SIZE  1024
 
-static int msm_pm_debug_mask = 1;
+static int msm_pm_debug_mask = 0;
 module_param_named(
 	debug_mask, msm_pm_debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP
 );
@@ -62,9 +63,10 @@ enum {
 	MSM_PM_DEBUG_SUSPEND_LIMITS = BIT(2),
 	MSM_PM_DEBUG_CLOCK = BIT(3),
 	MSM_PM_DEBUG_RESET_VECTOR = BIT(4),
-	MSM_PM_DEBUG_IDLE = BIT(5),
-	MSM_PM_DEBUG_IDLE_LIMITS = BIT(6),
-	MSM_PM_DEBUG_HOTPLUG = BIT(7),
+	MSM_PM_DEBUG_IDLE_CLK = BIT(5),
+	MSM_PM_DEBUG_IDLE = BIT(6),
+	MSM_PM_DEBUG_IDLE_LIMITS = BIT(7),
+	MSM_PM_DEBUG_HOTPLUG = BIT(8),
 };
 
 enum msm_pc_count_offsets {
@@ -209,25 +211,6 @@ static bool msm_pm_pc_hotplug(void)
 	return 0;
 }
 
-static bool msm_pm_fastpc(bool from_idle)
-{
-	int ret = 0;
-	unsigned int cpu = smp_processor_id();
-
-	ret = msm_spm_set_low_power_mode(MSM_SPM_MODE_FASTPC, false);
-	WARN_ON(ret);
-
-	if (from_idle || cpu_online(cpu))
-		msm_arch_idle();
-	else
-		msm_pm_pc_hotplug();
-
-	ret = msm_spm_set_low_power_mode(MSM_SPM_MODE_CLOCK_GATING, false);
-	WARN_ON(ret);
-
-	return true;
-}
-
 int msm_pm_collapse(unsigned long unused)
 {
 	uint32_t cpu = smp_processor_id();
@@ -260,7 +243,7 @@ int msm_pm_collapse(unsigned long unused)
 EXPORT_SYMBOL(msm_pm_collapse);
 
 static bool __ref msm_pm_spm_power_collapse(
-	unsigned int cpu, int mode, bool from_idle, bool notify_rpm)
+	unsigned int cpu, bool from_idle, bool notify_rpm)
 {
 	void *entry;
 	bool collapsed = 0;
@@ -271,7 +254,8 @@ static bool __ref msm_pm_spm_power_collapse(
 		pr_info("CPU%u: %s: notify_rpm %d\n",
 			cpu, __func__, (int) notify_rpm);
 
-	ret = msm_spm_set_low_power_mode(mode, notify_rpm);
+	ret = msm_spm_set_low_power_mode(
+			MSM_SPM_MODE_POWER_COLLAPSE, notify_rpm);
 	WARN_ON(ret);
 
 	entry = save_cpu_regs ?  cpu_resume : msm_secondary_startup;
@@ -284,8 +268,13 @@ static bool __ref msm_pm_spm_power_collapse(
 
 	msm_jtag_save_state();
 
+#ifdef CONFIG_CPU_V7
 	collapsed = save_cpu_regs ?
-		!__cpu_suspend(0, msm_pm_collapse) : msm_pm_pc_hotplug();
+		!cpu_suspend(0, msm_pm_collapse) : msm_pm_pc_hotplug();
+#else
+	collapsed = save_cpu_regs ?
+		!cpu_suspend(0) : msm_pm_pc_hotplug();
+#endif
 
 	msm_jtag_restore_state();
 
@@ -307,12 +296,18 @@ static bool msm_pm_power_collapse_standalone(
 		bool from_idle)
 {
 	unsigned int cpu = smp_processor_id();
+	unsigned int avsdscr;
+	unsigned int avscsr;
 	bool collapsed;
 
-	collapsed = msm_pm_spm_power_collapse(cpu,
-			MSM_SPM_MODE_STANDALONE_POWER_COLLAPSE,
-			from_idle, false);
+	avsdscr = avs_get_avsdscr();
+	avscsr = avs_get_avscsr();
+	avs_set_avscsr(0); /* Disable AVS */
 
+	collapsed = msm_pm_spm_power_collapse(cpu, from_idle, false);
+
+	avs_set_avsdscr(avsdscr);
+	avs_set_avscsr(avscsr);
 	return collapsed;
 }
 
@@ -355,6 +350,8 @@ static bool msm_pm_power_collapse(bool from_idle)
 {
 	unsigned int cpu = smp_processor_id();
 	unsigned long saved_acpuclk_rate = 0;
+	unsigned int avsdscr;
+	unsigned int avscsr;
 	bool collapsed;
 
 	if (MSM_PM_DEBUG_POWER_COLLAPSE & msm_pm_debug_mask)
@@ -364,14 +361,28 @@ static bool msm_pm_power_collapse(bool from_idle)
 	if (MSM_PM_DEBUG_POWER_COLLAPSE & msm_pm_debug_mask)
 		pr_info("CPU%u: %s: pre power down\n", cpu, __func__);
 
+	/* This spews a lot of messages when a core is hotplugged. This
+	 * information is most useful from last core going down during
+	 * power collapse
+	 */
+	if ((!from_idle && cpu_online(cpu))
+			|| (MSM_PM_DEBUG_IDLE_CLK & msm_pm_debug_mask))
+		clock_debug_print_enabled();
+
+	avsdscr = avs_get_avsdscr();
+	avscsr = avs_get_avscsr();
+	avs_set_avscsr(0); /* Disable AVS */
+
 	if (cpu_online(cpu) && !msm_no_ramp_down_pc)
 		saved_acpuclk_rate = ramp_down_last_cpu(cpu);
 
-	collapsed = msm_pm_spm_power_collapse(cpu, MSM_SPM_MODE_POWER_COLLAPSE,
-			from_idle, true);
+	collapsed = msm_pm_spm_power_collapse(cpu, from_idle, true);
 
 	if (cpu_online(cpu) && !msm_no_ramp_down_pc)
 		ramp_up_first_cpu(cpu, saved_acpuclk_rate);
+
+	avs_set_avsdscr(avsdscr);
+	avs_set_avscsr(avscsr);
 
 	if (MSM_PM_DEBUG_POWER_COLLAPSE & msm_pm_debug_mask)
 		pr_info("CPU%u: %s: post power up\n", cpu, __func__);
@@ -394,7 +405,6 @@ static bool (*execute[MSM_PM_SLEEP_MODE_NR])(bool idle) = {
 	[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_STANDALONE] =
 		msm_pm_power_collapse_standalone,
 	[MSM_PM_SLEEP_MODE_RETENTION] = msm_pm_retention,
-	[MSM_PM_SLEEP_MODE_FASTPC] = msm_pm_fastpc,
 	[MSM_PM_SLEEP_MODE_POWER_COLLAPSE] = msm_pm_power_collapse,
 };
 
@@ -546,10 +556,11 @@ snoc_cl_probe_done:
 
 static int msm_cpu_status_probe(struct platform_device *pdev)
 {
+	struct msm_pm_sleep_status_data *pdata;
+	char *key;
 	u32 cpu;
-	int rc;
 
-	if (!pdev | !pdev->dev.of_node)
+	if (!pdev)
 		return -EFAULT;
 
 	msm_pm_slp_sts = devm_kzalloc(&pdev->dev,
@@ -559,34 +570,59 @@ static int msm_cpu_status_probe(struct platform_device *pdev)
 	if (!msm_pm_slp_sts)
 		return -ENOMEM;
 
+	if (pdev->dev.of_node) {
+		struct resource *res;
+		u32 offset;
+		int rc;
+		u32 mask;
+		bool offset_available = true;
 
-	for_each_possible_cpu(cpu) {
-		struct device_node *cpun, *node;
-		char *key;
-
-		cpun = of_get_cpu_node(cpu, NULL);
-
-		if (!cpun) {
-			__WARN();
-			continue;
-		}
-
-		node = of_parse_phandle(cpun, "qcom,sleep-status", 0);
-		if (!node)
+		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+		if (!res)
 			return -ENODEV;
 
-		msm_pm_slp_sts[cpu].base_addr = of_iomap(node, 0);
-		if (!msm_pm_slp_sts[cpu].base_addr) {
-			pr_err("%s: Can't find base addr\n", __func__);
-			return -ENODEV;
-		}
+		key = "qcom,cpu-alias-addr";
+		rc = of_property_read_u32(pdev->dev.of_node, key, &offset);
+
+		if (rc)
+			offset_available = false;
 
 		key = "qcom,sleep-status-mask";
-		rc = of_property_read_u32(node, key, &msm_pm_slp_sts[cpu].mask);
-		if (rc) {
-			pr_err("%s: Can't find %s property\n", __func__, key);
-			iounmap(msm_pm_slp_sts[cpu].base_addr);
-			return rc;
+		rc = of_property_read_u32(pdev->dev.of_node, key, &mask);
+
+		if (rc)
+			return -ENODEV;
+
+		for_each_possible_cpu(cpu) {
+			phys_addr_t base_c;
+
+			if (offset_available)
+				base_c = res->start + cpu * offset;
+			else {
+				res = platform_get_resource(pdev,
+							IORESOURCE_MEM, cpu);
+				if (!res)
+					return -ENODEV;
+				base_c = res->start;
+			}
+
+			msm_pm_slp_sts[cpu].base_addr =
+				devm_ioremap(&pdev->dev, base_c,
+						resource_size(res));
+			msm_pm_slp_sts[cpu].mask = mask;
+
+			if (!msm_pm_slp_sts[cpu].base_addr)
+				return -ENOMEM;
+		}
+	} else {
+		pdata = pdev->dev.platform_data;
+		if (!pdev->dev.platform_data)
+			return -EINVAL;
+
+		for_each_possible_cpu(cpu) {
+			msm_pm_slp_sts[cpu].base_addr =
+				pdata->base_addr + cpu * pdata->cpu_offset;
+			msm_pm_slp_sts[cpu].mask = pdata->mask;
 		}
 	}
 
@@ -753,7 +789,7 @@ static int msm_pm_clk_init(struct platform_device *pdev)
 	for_each_possible_cpu(cpu) {
 		struct clk *clk;
 		snprintf(clk_name, sizeof(clk_name), "cpu%d_clk", cpu);
-		clk = clk_get(&pdev->dev, clk_name);
+		clk = devm_clk_get(&pdev->dev, clk_name);
 		if (IS_ERR(clk)) {
 			if (cpu && synced_clocks)
 				return 0;
@@ -766,7 +802,7 @@ static int msm_pm_clk_init(struct platform_device *pdev)
 	if (synced_clocks)
 		return 0;
 
-	l2_clk = clk_get(&pdev->dev, "l2_clk");
+	l2_clk = devm_clk_get(&pdev->dev, "l2_clk");
 	if (IS_ERR(l2_clk))
 		pr_warn("%s: Could not get l2_clk (-%ld)\n", __func__,
 			PTR_ERR(l2_clk));

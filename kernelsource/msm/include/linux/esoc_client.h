@@ -12,7 +12,6 @@
 #ifndef __ESOC_CLIENT_H_
 #define __ESOC_CLIENT_H_
 
-#include <linux/device.h>
 #include <linux/esoc_ctrl.h>
 #include <linux/notifier.h>
 

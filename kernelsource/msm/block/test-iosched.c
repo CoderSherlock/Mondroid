@@ -167,7 +167,6 @@ int test_iosched_add_unique_test_req(struct test_iosched *tios,
 	struct request *rq;
 	int rw_flags;
 	struct test_request *test_rq;
-	unsigned long flags;
 
 	if (!tios)
 		return -ENODEV;
@@ -186,8 +185,8 @@ int test_iosched_add_unique_test_req(struct test_iosched *tios,
 		break;
 	case REQ_UNIQUE_DISCARD:
 		bio->bi_rw = REQ_WRITE | REQ_DISCARD;
-		bio->bi_iter.bi_size = nr_sects << 9;
-		bio->bi_iter.bi_sector = start_sec;
+		bio->bi_size = nr_sects << 9;
+		bio->bi_sector = start_sec;
 		break;
 	default:
 		pr_err("%s: Invalid request type %d", __func__,
@@ -231,10 +230,10 @@ int test_iosched_add_unique_test_req(struct test_iosched *tios,
 		"%s: added request %d to the test requests list, type = %d",
 		__func__, test_rq->req_id, req_unique);
 
-	spin_lock_irqsave(tios->req_q->queue_lock, flags);
+	spin_lock_irq(tios->req_q->queue_lock);
 	list_add_tail(&test_rq->queuelist, &tios->test_queue);
 	tios->test_count++;
-	spin_unlock_irqrestore(tios->req_q->queue_lock, flags);
+	spin_unlock_irq(tios->req_q->queue_lock);
 
 	return 0;
 }
@@ -348,7 +347,7 @@ struct test_request *test_iosched_create_test_req(
 	rq->cmd_flags &= ~REQ_IO_STAT;
 
 	if (rq->bio) {
-		rq->bio->bi_iter.bi_sector = start_sec;
+		rq->bio->bi_sector = start_sec;
 		rq->bio->bi_end_io = end_test_bio;
 		bio = rq->bio;
 		while ((bio = bio->bi_next) != NULL)
@@ -409,15 +408,14 @@ int test_iosched_add_wr_rd_test_req(struct test_iosched *tios,
 	int pattern, rq_end_io_fn *end_req_io)
 {
 	struct test_request *test_rq = NULL;
-	unsigned long flags;
 
 	test_rq = test_iosched_create_test_req(tios, is_err_expcted, direction,
 		start_sec, num_bios, pattern, end_req_io);
 	if (test_rq) {
-		spin_lock_irqsave(tios->req_q->queue_lock, flags);
+		spin_lock_irq(tios->req_q->queue_lock);
 		list_add_tail(&test_rq->queuelist, &tios->test_queue);
 		tios->test_count++;
-		spin_unlock_irqrestore(tios->req_q->queue_lock, flags);
+		spin_unlock_irq(tios->req_q->queue_lock);
 		return 0;
 	}
 	return -ENODEV;
@@ -950,12 +948,12 @@ static void print_req(struct request *req)
 		       __func__, req->nr_phys_segments, blk_rq_sectors(req));
 		bio = req->bio;
 		pr_debug("%s: bio: bi_size=%d, bi_sector=0x%lx",
-			      __func__, bio->bi_iter.bi_size,
-			      (unsigned long)bio->bi_iter.bi_sector);
+			      __func__, bio->bi_size,
+			      (unsigned long)bio->bi_sector);
 		while ((bio = bio->bi_next) != NULL) {
 			pr_debug("%s: bio: bi_size=%d, bi_sector=0x%lx",
-				      __func__, bio->bi_iter.bi_size,
-				      (unsigned long)bio->bi_iter.bi_sector);
+				      __func__, bio->bi_size,
+				      (unsigned long)bio->bi_sector);
 		}
 	}
 }
@@ -1108,7 +1106,6 @@ static int test_init_queue(struct request_queue *q, struct elevator_type *e)
 	const char *blk_dev_name;
 	int ret;
 	bool found = false;
-	unsigned long flags;
 
 	eq = elevator_alloc(q, e);
 	if (!eq)
@@ -1171,9 +1168,9 @@ static int test_init_queue(struct request_queue *q, struct elevator_type *e)
 		}
 	}
 
-	spin_lock_irqsave(q->queue_lock, flags);
+	spin_lock_irq(q->queue_lock);
 	q->elevator = eq;
-	spin_unlock_irqrestore(q->queue_lock, flags);
+	spin_unlock_irq(q->queue_lock);
 
 	return 0;
 
@@ -1201,6 +1198,12 @@ static void test_exit_queue(struct elevator_queue *e)
 	kfree(tios);
 }
 
+static bool test_urgent_pending(struct request_queue *q)
+{
+	struct test_iosched *tios = q->elevator->elevator_data;
+	return !list_empty(&tios->urgent_queue);
+}
+
 /**
  * test_iosched_add_urgent_req() - Add an urgent test_request.
  * First mark the request as urgent, then add it to the
@@ -1212,18 +1215,54 @@ static void test_exit_queue(struct elevator_queue *e)
 void test_iosched_add_urgent_req(struct test_iosched *tios,
 	struct test_request *test_rq)
 {
-	unsigned long flags;
-
 	if (!tios)
 		return;
 
-	spin_lock_irqsave(&tios->lock, flags);
+	spin_lock_irq(&tios->lock);
 	test_rq->rq->cmd_flags |= REQ_URGENT;
 	list_add_tail(&test_rq->queuelist, &tios->urgent_queue);
 	tios->urgent_count++;
-	spin_unlock_irqrestore(&tios->lock, flags);
+	spin_unlock_irq(&tios->lock);
 }
 EXPORT_SYMBOL(test_iosched_add_urgent_req);
+
+/**
+ * test_reinsert_req() - Moves the @rq request from
+ *			@dispatched_queue into @reinsert_queue.
+ *			The @rq must be in @dispatched_queue
+ * @q:		request queue
+ * @rq:		request to be inserted
+ *
+ *
+ */
+static int test_reinsert_req(struct request_queue *q,
+			     struct request *rq)
+{
+	struct test_iosched *tios = q->elevator->elevator_data;
+	struct test_request *trq;
+	int ret = -EINVAL;
+
+	if (!tios)
+		goto exit;
+
+	if (list_empty(&tios->dispatched_queue)) {
+			pr_err("%s: dispatched_queue is empty", __func__);
+			goto exit;
+	}
+
+	list_for_each_entry(trq, &tios->dispatched_queue, queuelist) {
+		if (trq->rq == rq) {
+			list_move(&trq->queuelist, &tios->reinsert_queue);
+			tios->dispatched_count--;
+			tios->reinsert_count++;
+			ret = 0;
+			break;
+		}
+	}
+
+exit:
+	return ret;
+}
 
 static struct elevator_type elevator_test_iosched = {
 
@@ -1235,6 +1274,8 @@ static struct elevator_type elevator_test_iosched = {
 		.elevator_latter_req_fn = test_latter_request,
 		.elevator_init_fn = test_init_queue,
 		.elevator_exit_fn = test_exit_queue,
+		.elevator_is_urgent_fn = test_urgent_pending,
+		.elevator_reinsert_req_fn = test_reinsert_req,
 	},
 	.elevator_name = "test-iosched",
 	.elevator_owner = THIS_MODULE,

@@ -8,7 +8,6 @@
  * published by the Free Software Foundation.
  */
 
-#include <asm/assembler.h>
 #include <asm/unistd.h>
 #include <asm/ftrace.h>
 #include <asm/unwind.h>
@@ -33,9 +32,7 @@ ret_fast_syscall:
  UNWIND(.fnstart	)
  UNWIND(.cantunwind	)
 	disable_irq				@ disable interrupts
-	ldr	r1, [tsk, #TI_FLAGS]		@ re-check for syscall tracing
-	tst	r1, #_TIF_SYSCALL_WORK
-	bne	__sys_trace_return
+	ldr	r1, [tsk, #TI_FLAGS]
 	tst	r1, #_TIF_WORK_MASK
 	bne	fast_work_pending
 	asm_trace_hardirqs_on
@@ -91,7 +88,7 @@ ENTRY(ret_from_fork)
 	cmp	r5, #0
 	movne	r0, r4
 	adrne	lr, BSYM(1f)
-	retne	r5
+	movne	pc, r5
 1:	get_thread_info tsk
 	b	ret_slow_syscall
 ENDPROC(ret_from_fork)
@@ -293,7 +290,7 @@ ENDPROC(ftrace_graph_caller_old)
 
 .macro mcount_exit
 	ldmia	sp!, {r0-r3, ip, lr}
-	ret	ip
+	mov	pc, ip
 .endm
 
 ENTRY(__gnu_mcount_nc)
@@ -301,7 +298,7 @@ UNWIND(.fnstart)
 #ifdef CONFIG_DYNAMIC_FTRACE
 	mov	ip, lr
 	ldmia	sp!, {lr}
-	ret	ip
+	mov	pc, ip
 #else
 	__mcount
 #endif
@@ -336,12 +333,12 @@ return_to_handler:
 	bl	ftrace_return_to_handler
 	mov	lr, r0			@ r0 has real ret addr
 	ldmia	sp!, {r0-r3}
-	ret	lr
+	mov	pc, lr
 #endif
 
 ENTRY(ftrace_stub)
 .Lftrace_stub:
-	ret	lr
+	mov	pc, lr
 ENDPROC(ftrace_stub)
 
 #endif /* CONFIG_FUNCTION_TRACER */
@@ -353,9 +350,6 @@ ENDPROC(ftrace_stub)
 
 	.align	5
 ENTRY(vector_swi)
-#ifdef CONFIG_CPU_V7M
-	v7m_exception_entry
-#else
 	sub	sp, sp, #S_FRAME_SIZE
 	stmia	sp, {r0 - r12}			@ Calling r0 - r12
  ARM(	add	r8, sp, #S_PC		)
@@ -366,9 +360,14 @@ ENTRY(vector_swi)
 	str	lr, [sp, #S_PC]			@ Save calling PC
 	str	r8, [sp, #S_PSR]		@ Save CPSR
 	str	r0, [sp, #S_OLD_R0]		@ Save OLD_R0
-#endif
 	zero_fp
-	alignment_trap r10, ip, __cr_alignment
+
+#ifdef CONFIG_ALIGNMENT_TRAP
+	ldr	ip, __cr_alignment
+	ldr	ip, [ip]
+	mcr	p15, 0, ip, c1, c0		@ update control register
+#endif
+
 	enable_irq
 	ct_user_exit
 	get_thread_info tsk
@@ -390,7 +389,9 @@ ENTRY(vector_swi)
 #else
  USER(	ldr	r10, [lr, #-4]		)	@ get SWI instruction
 #endif
- ARM_BE8(rev	r10, r10)			@ little endian instruction
+#ifdef CONFIG_CPU_ENDIAN_BE8
+	rev	r10, r10			@ little endian instruction
+#endif
 
 #elif defined(CONFIG_AEABI)
 
@@ -437,10 +438,10 @@ local_restart:
 	ldrcc	pc, [tbl, scno, lsl #2]		@ call sys_* routine
 
 	add	r1, sp, #S_OFF
-2:	cmp	scno, #(__ARM_NR_BASE - __NR_SYSCALL_BASE)
+2:	mov	why, #0				@ no longer a real syscall
+	cmp	scno, #(__ARM_NR_BASE - __NR_SYSCALL_BASE)
 	eor	r0, scno, #__NR_SYSCALL_BASE	@ put OS number back
-	bcs	arm_syscall
-	mov	why, #0				@ no longer a real syscall
+	bcs	arm_syscall	
 	b	sys_ni_syscall			@ not private func
 
 #if defined(CONFIG_OABI_COMPAT) || !defined(CONFIG_AEABI)
@@ -564,7 +565,7 @@ sys_mmap2:
 		streq	r5, [sp, #4]
 		beq	sys_mmap_pgoff
 		mov	r0, #-EINVAL
-		ret	lr
+		mov	pc, lr
 #else
 		str	r5, [sp, #4]
 		b	sys_mmap_pgoff

@@ -1,6 +1,6 @@
-#! /usr/bin/env python2
+#! /usr/bin/env python
 
-# Copyright (c) 2009-2015, The Linux Foundation. All rights reserved.
+# Copyright (c) 2009-2014, The Linux Foundation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -74,6 +74,12 @@ def check_build():
             else:
                 raise
 
+def build_threads():
+    """Determine the number of build threads requested by the user"""
+    if all_options.load_average:
+        return all_options.load_average
+    return all_options.jobs or 1
+
 failed_targets = []
 
 BuildResult = namedtuple('BuildResult', ['status', 'messages'])
@@ -110,10 +116,9 @@ class BuildTracker:
     sequences can be processed independently, while the steps within a
     sequence must be done in order."""
 
-    def __init__(self, parallel_builds):
+    def __init__(self):
         self.sequence = []
         self.lock = threading.Lock()
-        self.parallel_builds = parallel_builds
 
     def add_sequence(self, log_name, short_name, steps):
         self.sequence.append(BuildSequence(log_name, short_name, steps))
@@ -143,7 +148,7 @@ class BuildTracker:
         children = []
         errors = []
         self.build_tokens = Queue.Queue()
-        nthreads = self.parallel_builds
+        nthreads = build_threads()
         print "Building with", nthreads, "threads"
         for i in range(nthreads):
             self.build_tokens.put(True)
@@ -322,15 +327,14 @@ def scan_configs():
 def build_many(targets):
     print "Building %d target(s)" % len(targets)
 
-    # To try and make up for the link phase being serial, try to do
-    # two full builds in parallel.  Don't do too many because lots of
-    # parallel builds tends to use up available memory rather quickly.
-    parallel = 2
+    # If we are requesting multiple builds, divide down the job number
+    # to construct the make_command, giving it a floor of 2, so there
+    # is still some parallelism.
     if all_options.jobs and all_options.jobs > 1:
-        j = max(all_options.jobs / parallel, 2)
+        j = max(all_options.jobs / len(targets), 2)
         make_command.append("-j" + str(j))
 
-    tracker = BuildTracker(parallel)
+    tracker = BuildTracker()
     for target in targets:
         if all_options.updateconfigs:
             update_config(target.defconfig, all_options.updateconfigs)

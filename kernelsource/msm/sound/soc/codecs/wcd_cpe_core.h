@@ -34,23 +34,10 @@
 #define WCD_CPE_LOAD_ALL \
 	(WCD_CPE_LOAD_IMEM | WCD_CPE_LOAD_DATA)
 
-#define WCD_CPE_IMAGE_FNAME_MAX 64
-
-#define WCD_CPE_AFE_OUT_PORT_2 2
-#define WCD_CPE_AFE_OUT_PORT_4 4
-
 enum {
 	WCD_CPE_LSM_CAL_AFE = 0,
 	WCD_CPE_LSM_CAL_LSM,
-	WCD_CPE_LSM_CAL_TOPOLOGY_ID,
 	WCD_CPE_LSM_CAL_MAX,
-};
-
-enum cpe_err_irq_cntl_type {
-	CPE_ERR_IRQ_MASK = 0,
-	CPE_ERR_IRQ_UNMASK,
-	CPE_ERR_IRQ_CLEAR,
-	CPE_ERR_IRQ_STATUS,
 };
 
 struct wcd_cpe_cdc_cb {
@@ -61,14 +48,8 @@ struct wcd_cpe_cdc_cb {
 	int (*cpe_clk_en) (struct snd_soc_codec *, bool);
 	int (*cdc_ext_clk)(struct snd_soc_codec *codec, int enable, bool dapm);
 	int (*lab_cdc_ch_ctl)(struct snd_soc_codec *codec, u8 event);
-	int (*get_afe_out_port_id)(struct snd_soc_codec *codec, u16 *port_id);
 	int (*bus_vote_bw)(struct snd_soc_codec *codec,
 			   bool vote);
-
-	/* Callback to control the cpe error interrupt mask/status/clear */
-	int (*cpe_err_irq_control)(struct snd_soc_codec *codec,
-				    enum cpe_err_irq_cntl_type cntl_type,
-				    u8 *status);
 };
 
 enum wcd_cpe_ssr_state_event {
@@ -95,19 +76,6 @@ struct wcd_cpe_ssr_entry {
 	struct snd_info_entry *entry;
 };
 
-struct wcd_cpe_irq_info {
-	int cpe_engine_irq;
-	int cpe_err_irq;
-	u8 cpe_fatal_irqs;
-};
-
-struct wcd_cpe_hw_info {
-	u32 dram_offset;
-	size_t dram_size;
-	u32 iram_offset;
-	size_t iram_size;
-};
-
 struct wcd_cpe_core {
 	/* handle to cpe services */
 	void *cpe_handle;
@@ -125,10 +93,7 @@ struct wcd_cpe_core {
 	struct device *dev;
 
 	/* firmware image file name */
-	char fname[WCD_CPE_IMAGE_FNAME_MAX];
-
-	/* firmware image file name from sysfs */
-	char dyn_fname[WCD_CPE_IMAGE_FNAME_MAX];
+	char fname[64];
 
 	/* codec information needed by cpe services */
 	struct cpe_svc_codec_info_v1 cdc_info;
@@ -187,18 +152,6 @@ struct wcd_cpe_core {
 	/* SFR support */
 	u32 sfr_buf_addr;
 	size_t sfr_buf_size;
-
-	/* IRQ information for CPE interrupts */
-	struct wcd_cpe_irq_info irq_info;
-
-	/* Kobject for sysfs entry */
-	struct kobject cpe_kobj;
-
-	/* Reference count for cpe clk*/
-	int cpe_clk_ref;
-
-	/* codec based hardware info */
-	struct wcd_cpe_hw_info hw_info;
 };
 
 struct wcd_cpe_params {
@@ -210,10 +163,6 @@ struct wcd_cpe_params {
 	u16 cdc_major_ver;
 	u16 cdc_minor_ver;
 	u32 cdc_id;
-
-	struct wcd_cpe_irq_info cdc_irq_info;
-
-	struct cpe_svc_init_param *cpe_svc_params;
 };
 
 int wcd_cpe_ssr_event(void *core_handle,

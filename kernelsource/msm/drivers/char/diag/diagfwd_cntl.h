@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -42,10 +42,7 @@
 #define DIAG_CTRL_MSG_LOG_RANGE_REPORT		23
 #define DIAG_CTRL_MSG_SSID_RANGE_REPORT		24
 #define DIAG_CTRL_MSG_BUILD_MASK_REPORT		25
-#define DIAG_CTRL_MSG_DEREG		27
 #define DIAG_CTRL_MSG_DCI_HANDSHAKE_PKT		29
-#define DIAG_CTRL_MSG_PD_STATUS			30
-#define DIAG_CTRL_MSG_TIME_SYNC_PKT		31
 
 /*
  * Feature Mask Definitions: Feature mask is used to sepcify Diag features
@@ -65,7 +62,6 @@
 #define F_DIAG_STM				9
 #define F_DIAG_PERIPHERAL_BUFFERING		10
 #define F_DIAG_MASK_CENTRALIZATION		11
-#define F_DIAG_SOCKETS_ENABLED			13
 
 #define ENABLE_SEPARATE_CMDRSP	1
 #define DISABLE_SEPARATE_CMDRSP	0
@@ -102,15 +98,6 @@ struct diag_ctrl_cmd_reg {
 	uint16_t count_entries;
 	uint16_t port;
 };
-
-struct diag_ctrl_cmd_dereg {
-	uint32_t pkt_id;
-	uint32_t len;
-	uint32_t version;
-	uint16_t cmd_code;
-	uint16_t subsysid;
-	uint16_t count_entries;
-} __packed;
 
 struct diag_ctrl_event_mask {
 	uint32_t cmd_type;
@@ -173,13 +160,6 @@ struct diag_ctrl_msg_stm {
 	uint8_t  control_data;
 } __packed;
 
-struct diag_ctrl_msg_time_sync {
-	uint32_t ctrl_pkt_id;
-	uint32_t ctrl_pkt_data_len;
-	uint32_t version;
-	uint8_t  time_api;
-} __packed;
-
 struct diag_ctrl_dci_status {
 	uint32_t ctrl_pkt_id;
 	uint32_t ctrl_pkt_data_len;
@@ -192,14 +172,6 @@ struct diag_ctrl_dci_handshake_pkt {
 	uint32_t ctrl_pkt_data_len;
 	uint32_t version;
 	uint32_t magic;
-} __packed;
-
-struct diag_ctrl_msg_pd_status {
-	uint32_t ctrl_pkt_id;
-	uint32_t ctrl_pkt_data_len;
-	uint32_t version;
-	uint32_t pd_id;
-	uint8_t status;
 } __packed;
 
 struct diag_ctrl_last_event_report {
@@ -261,21 +233,26 @@ struct diag_ctrl_set_wq_val {
 } __packed;
 
 int diagfwd_cntl_init(void);
-void diagfwd_cntl_channel_init(void);
 void diagfwd_cntl_exit(void);
-void diag_cntl_channel_open(struct diagfwd_info *p_info);
-void diag_cntl_channel_close(struct diagfwd_info *p_info);
-void diag_cntl_process_read_data(struct diagfwd_info *p_info, void *buf,
-				 int len);
-int diag_send_real_time_update(uint8_t peripheral, int real_time);
+void diag_read_smd_cntl_work_fn(struct work_struct *);
+void diag_notify_ctrl_update_fn(struct work_struct *work);
+void diag_clean_reg_fn(struct work_struct *work);
+void diag_cntl_smd_work_fn(struct work_struct *work);
+int diag_process_smd_cntl_read_data(struct diag_smd_info *smd_info, void *buf,
+								int total_recd);
+int diag_send_diag_mode_update_by_smd(struct diag_smd_info *smd_info,
+							int real_time);
 int diag_send_peripheral_buffering_mode(struct diag_buffering_mode_t *params);
 void diag_update_proc_vote(uint16_t proc, uint8_t vote, int index);
 void diag_update_real_time_vote(uint16_t proc, uint8_t real_time, int index);
 void diag_real_time_work_fn(struct work_struct *work);
-int diag_send_stm_state(uint8_t peripheral, uint8_t stm_control_data);
-int diag_send_peripheral_drain_immediate(uint8_t peripheral);
-int diag_send_buffering_tx_mode_pkt(uint8_t peripheral,
+int diag_send_stm_state(struct diag_smd_info *smd_info,
+				uint8_t stm_control_data);
+int diag_send_peripheral_drain_immediate(struct diag_smd_info *smd_info);
+int diag_send_buffering_tx_mode_pkt(struct diag_smd_info *smd_info,
 				    struct diag_buffering_mode_t *params);
-int diag_send_buffering_wm_values(uint8_t peripheral,
+int diag_send_buffering_wm_values(struct diag_smd_info *smd_info,
 				  struct diag_buffering_mode_t *params);
+void diag_cntl_stm_notify(struct diag_smd_info *smd_info, int action);
+
 #endif

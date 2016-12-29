@@ -111,6 +111,7 @@
 #include "wlan_hdd_ocb.h"
 #include "wlan_hdd_tsf.h"
 #include "vos_nvitem.h"
+#include "wlan_hdd_nan_datapath.h"
 #include "wlan_hdd_oemdata.h"
 
 #define HDD_FINISH_ULA_TIME_OUT         800
@@ -811,9 +812,6 @@ void hdd_wlan_dump_stats(hdd_adapter_t *pAdapter, int value)
     {
         case WLAN_TXRX_HIST_STATS:
             wlan_hdd_display_tx_rx_histogram(hdd_ctx);
-            break;
-        case WLAN_HDD_NETIF_OPER_HISTORY:
-            wlan_hdd_display_netif_queue_history(hdd_ctx);
             break;
         default:
             WLANTL_display_datapath_stats(hdd_ctx->pvosContext, value);
@@ -1527,18 +1525,15 @@ void ccmCfgSetCallback(tHalHandle halHandle, tANI_S32 result)
 
 }
 
-/* hdd_clearRoamProfileIe() - Clear roam profile IEs
- * @pAdapter: Adapter handle
- *
- * Clears roam profile information elements
- * Returns: none
- */
 void hdd_clearRoamProfileIe( hdd_adapter_t *pAdapter)
 {
    int i = 0;
-   hdd_wext_state_t *pWextState = WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter);
+   hdd_wext_state_t *pWextState;
 
-   ENTER();
+   if (WLAN_HDD_NDI == pAdapter->device_mode)
+       pWextState = WLAN_HDD_GET_NDP_WEXT_STATE_PTR(pAdapter);
+   else
+       pWextState= WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter);
 
    if (!pWextState) {
         hddLog(LOGE, FL("ERROR: pWextState not found"));
@@ -1594,7 +1589,7 @@ void hdd_clearRoamProfileIe( hdd_adapter_t *pAdapter)
 #endif
 
    vos_mem_zero((void *)(pWextState->req_bssId), VOS_MAC_ADDR_SIZE);
-   EXIT();
+
 }
 
 void wlan_hdd_ula_done_cb(v_VOID_t *callbackContext)
@@ -3811,7 +3806,6 @@ static void hdd_get_station_statisticsCB(void *pStats, void *pContext)
    struct statsContext *pStatsContext;
    tCsrSummaryStatsInfo      *pSummaryStats;
    tCsrGlobalClassAStatsInfo *pClassAStats;
-   struct csr_per_chain_rssi_stats_info *per_chain_rssi_stats;
    hdd_adapter_t *pAdapter;
 
    if (ioctl_debug)
@@ -3836,8 +3830,6 @@ static void hdd_get_station_statisticsCB(void *pStats, void *pContext)
 
    pSummaryStats = (tCsrSummaryStatsInfo *)pStats;
    pClassAStats  = (tCsrGlobalClassAStatsInfo *)( pSummaryStats + 1 );
-   per_chain_rssi_stats = (struct csr_per_chain_rssi_stats_info *)
-                                  (pClassAStats + 1);
    pStatsContext = pContext;
    pAdapter      = pStatsContext->pAdapter;
    if ((NULL == pAdapter) || (STATS_CONTEXT_MAGIC != pStatsContext->magic))
@@ -3863,7 +3855,6 @@ static void hdd_get_station_statisticsCB(void *pStats, void *pContext)
    /* copy over the stats. do so as a struct copy */
    pAdapter->hdd_stats.summary_stat = *pSummaryStats;
    pAdapter->hdd_stats.ClassA_stat = *pClassAStats;
-   pAdapter->hdd_stats.per_chain_rssi_stats = *per_chain_rssi_stats;
 
    /* notify the caller */
    complete(&pStatsContext->completion);
@@ -3895,8 +3886,7 @@ VOS_STATUS  wlan_hdd_get_station_stats(hdd_adapter_t *pAdapter)
    hstatus = sme_GetStatistics(WLAN_HDD_GET_HAL_CTX(pAdapter),
                                eCSR_HDD,
                                SME_SUMMARY_STATS |
-                               SME_GLOBAL_CLASSA_STATS |
-                               SME_PER_CHAIN_RSSI_STATS,
+                               SME_GLOBAL_CLASSA_STATS,
                                hdd_get_station_statisticsCB,
                                0, // not periodic
                                FALSE, //non-cached results
@@ -4353,12 +4343,48 @@ static int iw_get_nick(struct net_device *dev,
  * __get_wireless_stats() - get wireless stats
  * @dev: pointer to net_device
  *
- * Return: %NULL
+ * Return: pointer to iw_statistics on success, NULL otherwise
  */
 static struct iw_statistics *__get_wireless_stats(struct net_device *dev)
 {
+	hdd_adapter_t *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
+	hdd_context_t *hdd_ctx = WLAN_HDD_GET_CTX(adapter);
+	hdd_wext_state_t  *wext_state =  WLAN_HDD_GET_WEXT_STATE_PTR(adapter);
+	hdd_station_ctx_t *hdd_sta_ctx;
+	v_S7_t snr = 0, rssi = 0;
+	int status;
+
 	ENTER();
-	return NULL;
+
+	status = wlan_hdd_validate_context(hdd_ctx);
+	if (0 != status)
+		return NULL;
+
+	hdd_sta_ctx = WLAN_HDD_GET_STATION_CTX_PTR(adapter);
+	if (eConnectionState_Associated != hdd_sta_ctx->conn_info.connState) {
+		hddLog(VOS_TRACE_LEVEL_INFO,
+			FL("not in associated state: %d"),
+				hdd_sta_ctx->conn_info.connState);
+		return NULL;
+	}
+
+	wlan_hdd_get_station_stats(adapter);
+	wlan_hdd_get_snr(adapter, &snr);
+	wlan_hdd_get_rssi(adapter, &rssi);
+
+	vos_mem_zero(&wext_state->iw_stats, sizeof(wext_state->iw_stats));
+	wext_state->iw_stats.status = 0;
+	wext_state->iw_stats.qual.qual = snr;
+	wext_state->iw_stats.qual.level = rssi;
+	wext_state->iw_stats.qual.noise = rssi - snr;
+	wext_state->iw_stats.discard.code = 0;
+	wext_state->iw_stats.discard.retries = 0;
+	wext_state->iw_stats.miss.beacon = 0;
+	wext_state->iw_stats.qual.updated =
+					IW_QUAL_ALL_UPDATED | IW_QUAL_DBM;
+
+	EXIT();
+	return &(wext_state->iw_stats);
 }
 
 /**
@@ -4378,7 +4404,6 @@ static struct iw_statistics *get_wireless_stats(struct net_device *dev)
 
 	return iw_stats;
 }
-
 
 /**
  * __iw_set_encode() - SIOCSIWENCODE ioctl handler
@@ -5137,9 +5162,10 @@ static int __iw_set_mlme(struct net_device *dev, struct iw_request_info *info,
                 (WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter))->authKeyMgmt = 0;
 
                 hddLog(LOG1, FL("Disabling queues"));
-                wlan_hdd_netif_queue_control(pAdapter,
-                    WLAN_NETIF_TX_DISABLE_N_CARRIER,
-                    WLAN_CONTROL_PATH);
+                netif_tx_disable(dev);
+                netif_carrier_off(dev);
+                pAdapter->hdd_stats.hddTxRxStats.netq_disable_cnt++;
+                pAdapter->hdd_stats.hddTxRxStats.netq_state_off = TRUE;
 
             }
             else
@@ -6584,9 +6610,6 @@ static int __iw_setint_getnone(struct net_device *dev,
                  break;
              case WLAN_TXRX_HIST_STATS:
                  wlan_hdd_clear_tx_rx_histogram(pHddCtx);
-                 break;
-             case WLAN_HDD_NETIF_OPER_HISTORY:
-                 wlan_hdd_clear_netif_queue_history(hdd_ctx);
                  break;
              default:
                  WLANTL_clear_datapath_stats(hdd_ctx->pvosContext, set_value);
@@ -8631,6 +8654,7 @@ static int __iw_set_var_ints_getnone(struct net_device *dev,
                     hddLog(LOGE, FL("Invalid MODULE ID %d"), apps_args[0]);
                     return -EINVAL;
                 }
+
                 if ((apps_args[1] > (WMA_MAX_NUM_ARGS)) ||
                     (apps_args[1] < 0)) {
                     hddLog(LOGE, FL("Too Many/Few args %d"), apps_args[1]);
@@ -9858,11 +9882,6 @@ void wlan_hdd_set_mc_addr_list(hdd_adapter_t *pAdapter, v_U8_t set)
                 /* Set multicast filter */
                 sme_8023MulticastList(hHal, pAdapter->sessionId,
                                       pMulticastAddrs);
-            }
-            else {
-                hddLog(VOS_TRACE_LEVEL_INFO,
-                       FL("MC address list not sent to FW, cnt: %d"),
-                        pAdapter->mc_addr_list.mc_cnt);
             }
         }
         else
@@ -12320,34 +12339,36 @@ int hdd_validate_mcc_config(hdd_adapter_t *pAdapter, v_UINT_t staId, v_UINT_t ar
     return 0;
 }
 
-/* hdd_set_wext() - configures bss parameters
- * @pAdapter: handle to adapter context
- *
- * Returns: none
- */
 int hdd_set_wext(hdd_adapter_t *pAdapter)
 {
-    hdd_wext_state_t *pwextBuf = WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter);
-    hdd_station_ctx_t *pHddStaCtx = WLAN_HDD_GET_STATION_CTX_PTR(pAdapter);
+    hdd_wext_state_t *pwextBuf;
+    hdd_station_ctx_t *pHddStaCtx;
+    //struct nan_datapath_ctx *nan_ctx;
+    tCsrSSIDInfo *ssid_list;
+    tCsrBssid *bssid;
 
-    ENTER();
+    if (WLAN_HDD_NDI == pAdapter->device_mode) {
+       pwextBuf = WLAN_HDD_GET_NDP_WEXT_STATE_PTR(pAdapter);
+       //nan_ctx = WLAN_HDD_GET_NDP_CTX_PTR(pAdapter);
+       ssid_list = WLAN_HDD_NDP_GET_SSID(pAdapter);
+       bssid = WLAN_HDD_NDP_GET_BSSID(pAdapter);
+    } else {
+       pwextBuf = WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter);
+       pHddStaCtx = WLAN_HDD_GET_STATION_CTX_PTR(pAdapter);
+       ssid_list = &pHddStaCtx->conn_info.SSID;
+       bssid = &pHddStaCtx->conn_info.bssId;
+    }
 
     if (!pwextBuf) {
-        hddLog(LOGE, FL("ERROR: pwextBuf is NULL"));
+        hddLog(LOGE, FL("ERROR: pwextBuf not found"));
         return VOS_STATUS_E_FAILURE;
     }
-
-    if (!pHddStaCtx) {
-        hddLog(LOGE, FL("ERROR: pHddStaCtx is NULL"));
-        return VOS_STATUS_E_FAILURE;
-    }
-
     /* Now configure the roaming profile links. To SSID and bssid */
     pwextBuf->roamProfile.SSIDs.numOfSSIDs = 0;
-    pwextBuf->roamProfile.SSIDs.SSIDList = &pHddStaCtx->conn_info.SSID;
+    pwextBuf->roamProfile.SSIDs.SSIDList = ssid_list;
 
     pwextBuf->roamProfile.BSSIDs.numOfBSSIDs = 0;
-    pwextBuf->roamProfile.BSSIDs.bssid = &pHddStaCtx->conn_info.bssId;
+    pwextBuf->roamProfile.BSSIDs.bssid = bssid;
 
     /*Set the numOfChannels to zero to scan all the channels*/
     pwextBuf->roamProfile.ChannelInfo.numOfChannels = 0;
@@ -12374,9 +12395,9 @@ int hdd_set_wext(hdd_adapter_t *pAdapter)
 
     hdd_clearRoamProfileIe(pAdapter);
 
-    EXIT();
     return VOS_STATUS_SUCCESS;
-}
+
+    }
 
 /**
  * hdd_register_wext() - register wext context
@@ -12389,16 +12410,20 @@ int hdd_set_wext(hdd_adapter_t *pAdapter)
 int hdd_register_wext(struct net_device *dev)
 {
     hdd_adapter_t *pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
-    hdd_wext_state_t *pwextBuf = WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter);
+    hdd_wext_state_t *pwextBuf;
     VOS_STATUS status;
 
     ENTER();
 
+    if (WLAN_HDD_NDI == pAdapter->device_mode)
+        pwextBuf = WLAN_HDD_GET_NDP_WEXT_STATE_PTR(pAdapter);
+    else
+        pwextBuf = WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter);
+
     if (!pwextBuf) {
-        hddLog(LOGE, FL("ERROR: pwextBuf is NULL"));
+        hddLog(LOGE, FL("ERROR: pwextBuf not found"));
         return eHAL_STATUS_FAILURE;
     }
-
     /* Zero the memory. This zeros the profile structure */
     memset(pwextBuf, 0, sizeof(hdd_wext_state_t));
 

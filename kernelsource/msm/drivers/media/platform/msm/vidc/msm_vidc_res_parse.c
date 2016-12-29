@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -11,27 +11,21 @@
  *
  */
 
-#include <asm/dma-iommu.h>
-#include <linux/iommu.h>
-#include <linux/qcom_iommu.h>
 #include <linux/of.h>
 #include <linux/slab.h>
-#include <linux/sort.h>
-#include "msm_vidc_debug.h"
 #include "msm_vidc_resources.h"
+#include "msm_vidc_debug.h"
 #include "msm_vidc_res_parse.h"
-#include "venus_boot.h"
-#include "soc/qcom/secure_buffer.h"
 
 enum clock_properties {
 	CLOCK_PROP_HAS_SCALING = 1 << 0,
+	CLOCK_PROP_HAS_GATING = 1 << 1,
 };
-static int msm_vidc_populate_legacy_context_bank(
-			struct msm_vidc_platform_resources *res);
 
-static size_t get_u32_array_num_elements(struct device_node *np,
+static size_t get_u32_array_num_elements(struct platform_device *pdev,
 					char *name)
 {
+	struct device_node *np = pdev->dev.of_node;
 	int len;
 	size_t num_elements = 0;
 	if (!of_get_property(np, name, &len)) {
@@ -52,59 +46,36 @@ fail_read:
 	return 0;
 }
 
-static inline enum imem_type read_imem_type(struct platform_device *pdev)
+int read_hfi_type(struct platform_device *pdev)
 {
-	bool is_compatible(char *compat)
-	{
-		return !!of_find_compatible_node(NULL, NULL, compat);
-	}
+	struct device_node *np = pdev->dev.of_node;
+	int rc = 0;
+	const char *hfi_name = NULL;
 
-	return is_compatible("qcom,msm-ocmem") ? IMEM_OCMEM :
-		is_compatible("qcom,msm-vmem") ? IMEM_VMEM :
-						IMEM_NONE;
+	if (np) {
+		rc = of_property_read_string(np, "qcom,hfi", &hfi_name);
+		if (rc) {
+			dprintk(VIDC_ERR,
+				"Failed to read hfi from device tree\n");
+			goto err_hfi_read;
+		}
+		if (!strcmp(hfi_name, "venus"))
+			rc = VIDC_HFI_VENUS;
+		else if (!strcmp(hfi_name, "q6"))
+			rc = VIDC_HFI_Q6;
+		else
+			rc = -EINVAL;
+	} else
+		rc = VIDC_HFI_Q6;
 
-}
-
-static inline void msm_vidc_free_allowed_clocks_table(
-		struct msm_vidc_platform_resources *res)
-{
-	res->allowed_clks_tbl = NULL;
-}
-
-static inline void msm_vidc_free_cycles_per_mb_table(
-		struct msm_vidc_platform_resources *res)
-{
-	res->clock_freq_tbl.clk_prof_entries = NULL;
-}
-
-static inline void msm_vidc_free_platform_version_table(
-		struct msm_vidc_platform_resources *res)
-{
-	res->pf_ver_tbl = NULL;
+err_hfi_read:
+	return rc;
 }
 
 static inline void msm_vidc_free_freq_table(
 		struct msm_vidc_platform_resources *res)
 {
 	res->load_freq_tbl = NULL;
-}
-
-static inline void msm_vidc_free_dcvs_table(
-		struct msm_vidc_platform_resources *res)
-{
-	res->dcvs_tbl = NULL;
-}
-
-static inline void msm_vidc_free_dcvs_limit(
-		struct msm_vidc_platform_resources *res)
-{
-	res->dcvs_limit = NULL;
-}
-
-static inline void msm_vidc_free_imem_ab_table(
-		struct msm_vidc_platform_resources *res)
-{
-	res->imem_ab_tbl = NULL;
 }
 
 static inline void msm_vidc_free_reg_table(
@@ -122,15 +93,17 @@ static inline void msm_vidc_free_qdss_addr_table(
 static inline void msm_vidc_free_bus_vectors(
 			struct msm_vidc_platform_resources *res)
 {
-	kfree(res->bus_set.bus_tbl);
-	res->bus_set.bus_tbl = NULL;
-	res->bus_set.count = 0;
+	int i = 0;
+	for (i = 0; i < res->bus_set.count; i++) {
+		if (res->bus_set.bus_tbl[i].pdata)
+			msm_bus_cl_clear_pdata(res->bus_set.bus_tbl[i].pdata);
+	}
 }
 
-static inline void msm_vidc_free_buffer_usage_table(
+static inline void msm_vidc_free_iommu_groups(
 			struct msm_vidc_platform_resources *res)
 {
-	res->buffer_usage_set.buffer_usage_tbl = NULL;
+	res->iommu_group_set.iommu_maps = NULL;
 }
 
 static inline void msm_vidc_free_regulator_table(
@@ -161,15 +134,10 @@ void msm_vidc_free_platform_resources(
 	msm_vidc_free_clock_table(res);
 	msm_vidc_free_regulator_table(res);
 	msm_vidc_free_freq_table(res);
-	msm_vidc_free_platform_version_table(res);
-	msm_vidc_free_dcvs_table(res);
-	msm_vidc_free_dcvs_limit(res);
-	msm_vidc_free_cycles_per_mb_table(res);
-	msm_vidc_free_allowed_clocks_table(res);
 	msm_vidc_free_reg_table(res);
 	msm_vidc_free_qdss_addr_table(res);
 	msm_vidc_free_bus_vectors(res);
-	msm_vidc_free_buffer_usage_table(res);
+	msm_vidc_free_iommu_groups(res);
 }
 
 static int msm_vidc_load_reg_table(struct msm_vidc_platform_resources *res)
@@ -187,11 +155,10 @@ static int msm_vidc_load_reg_table(struct msm_vidc_platform_resources *res)
 	}
 
 	reg_set = &res->reg_set;
-	reg_set->count = get_u32_array_num_elements(pdev->dev.of_node,
-			"qcom,reg-presets");
+	reg_set->count = get_u32_array_num_elements(pdev, "qcom,reg-presets");
 	reg_set->count /=  sizeof(*reg_set->reg_tbl) / sizeof(u32);
 
-	if (!reg_set->count) {
+	if (reg_set->count == 0) {
 		dprintk(VIDC_DBG, "no elements in reg set\n");
 		return rc;
 	}
@@ -234,11 +201,11 @@ static int msm_vidc_load_qdss_table(struct msm_vidc_platform_resources *res)
 	}
 
 	qdss_addr_set = &res->qdss_addr_set;
-	qdss_addr_set->count = get_u32_array_num_elements(pdev->dev.of_node,
+	qdss_addr_set->count = get_u32_array_num_elements(pdev,
 					"qcom,qdss-presets");
 	qdss_addr_set->count /= sizeof(*qdss_addr_set->addr_tbl) / sizeof(u32);
 
-	if (!qdss_addr_set->count) {
+	if (qdss_addr_set->count == 0) {
 		dprintk(VIDC_DBG, "no elements in qdss reg set\n");
 		return rc;
 	}
@@ -271,261 +238,11 @@ err_qdss_addr_tbl:
 	return rc;
 }
 
-static int msm_vidc_load_imem_ab_table(struct msm_vidc_platform_resources *res)
-{
-	int num_elements = 0;
-	struct platform_device *pdev = res->pdev;
-
-	if (!of_find_property(pdev->dev.of_node, "qcom,imem-ab-tbl", NULL)) {
-		/* optional property */
-		dprintk(VIDC_DBG, "qcom,imem-freq-tbl not found\n");
-		return 0;
-	}
-
-	num_elements = get_u32_array_num_elements(pdev->dev.of_node,
-			"qcom,imem-ab-tbl");
-	num_elements /= (sizeof(*res->imem_ab_tbl) / sizeof(u32));
-	if (!num_elements) {
-		dprintk(VIDC_ERR, "no elements in imem ab table\n");
-		return -EINVAL;
-	}
-
-	res->imem_ab_tbl = devm_kzalloc(&pdev->dev, num_elements *
-			sizeof(*res->imem_ab_tbl), GFP_KERNEL);
-	if (!res->imem_ab_tbl) {
-		dprintk(VIDC_ERR, "Failed to alloc imem_ab_tbl\n");
-		return -ENOMEM;
-	}
-
-	if (of_property_read_u32_array(pdev->dev.of_node,
-		"qcom,imem-ab-tbl", (u32 *)res->imem_ab_tbl,
-		num_elements * sizeof(*res->imem_ab_tbl) / sizeof(u32))) {
-		dprintk(VIDC_ERR, "Failed to read imem_ab_tbl\n");
-		msm_vidc_free_imem_ab_table(res);
-		return -EINVAL;
-	}
-
-	res->imem_ab_tbl_size = num_elements;
-
-	return 0;
-}
-
-/**
- * msm_vidc_load_u32_table() - load dtsi table entries
- * @pdev: A pointer to the platform device.
- * @of_node:      A pointer to the device node.
- * @table_name:   A pointer to the dtsi table entry name.
- * @struct_size:  The size of the structure which is nothing but
- *                a single entry in the dtsi table.
- * @table:        A pointer to the table pointer which needs to be
- *                filled by the dtsi table entries.
- * @num_elements: Number of elements pointer which needs to be filled
- *                with the number of elements in the table.
- *
- * This is a generic implementation to load single or multiple array
- * table from dtsi. The array elements should be of size equal to u32.
- *
- * Return:        Return '0' for success else appropriate error value.
- */
-int msm_vidc_load_u32_table(struct platform_device *pdev,
-		struct device_node *of_node, char *table_name, int struct_size,
-		u32 **table, u32 *num_elements)
-{
-	int rc = 0, num_elemts = 0;
-	u32 *ptbl = NULL;
-
-	if (!of_find_property(of_node, table_name, NULL)) {
-		dprintk(VIDC_DBG, "%s not found\n", table_name);
-		return 0;
-	}
-
-	num_elemts = get_u32_array_num_elements(of_node, table_name);
-	if (!num_elemts) {
-		dprintk(VIDC_ERR, "no elements in %s\n", table_name);
-		return 0;
-	}
-	num_elemts /= struct_size / sizeof(u32);
-
-	ptbl = devm_kzalloc(&pdev->dev, num_elemts * struct_size, GFP_KERNEL);
-	if (!ptbl) {
-		dprintk(VIDC_ERR, "Failed to alloc table %s\n", table_name);
-		return -ENOMEM;
-	}
-
-	if (of_property_read_u32_array(of_node, table_name, ptbl,
-			num_elemts * struct_size / sizeof(u32))) {
-		dprintk(VIDC_ERR, "Failed to read %s\n", table_name);
-		return -EINVAL;
-	}
-
-	*table = ptbl;
-	if (num_elements)
-		*num_elements = num_elemts;
-
-	return rc;
-}
-
-static int msm_vidc_load_platform_version_table(
-		struct msm_vidc_platform_resources *res)
-{
-	int rc = 0;
-	struct platform_device *pdev = res->pdev;
-
-	if (!of_find_property(pdev->dev.of_node,
-			"qcom,platform-version", NULL)) {
-		dprintk(VIDC_DBG, "qcom,platform-version not found\n");
-		return 0;
-	}
-
-	rc = msm_vidc_load_u32_table(pdev, pdev->dev.of_node,
-			"qcom,platform-version",
-			sizeof(*res->pf_ver_tbl),
-			(u32 **)&res->pf_ver_tbl,
-			NULL);
-	if (rc) {
-		dprintk(VIDC_ERR,
-			"%s: failed to read platform version table\n",
-			__func__);
-		return rc;
-	}
-
-	return 0;
-}
-
-static int msm_vidc_load_allowed_clocks_table(
-		struct msm_vidc_platform_resources *res)
-{
-	int rc = 0;
-	struct platform_device *pdev = res->pdev;
-
-	if (!of_find_property(pdev->dev.of_node,
-			"qcom,allowed-clock-rates", NULL)) {
-		dprintk(VIDC_DBG, "qcom,allowed-clock-rates not found\n");
-		return 0;
-	}
-
-	rc = msm_vidc_load_u32_table(pdev, pdev->dev.of_node,
-				"qcom,allowed-clock-rates",
-				sizeof(*res->allowed_clks_tbl),
-				(u32 **)&res->allowed_clks_tbl,
-				&res->allowed_clks_tbl_size);
-	if (rc) {
-		dprintk(VIDC_ERR,
-			"%s: failed to read allowed clocks table\n", __func__);
-		return rc;
-	}
-
-	return 0;
-}
-
-static int msm_vidc_load_cycles_per_mb_table(
-		struct msm_vidc_platform_resources *res)
-{
-	int rc = 0, i = 0;
-	struct clock_freq_table *clock_freq_tbl = &res->clock_freq_tbl;
-	struct clock_profile_entry *entry = NULL;
-	struct device_node *parent_node = NULL;
-	struct device_node *child_node = NULL;
-	struct platform_device *pdev = res->pdev;
-
-	parent_node = of_find_node_by_name(pdev->dev.of_node,
-			"qcom,clock-freq-tbl");
-	if (!parent_node) {
-		dprintk(VIDC_DBG, "Node qcom,clock-freq-tbl not found.\n");
-		return 0;
-	}
-
-	clock_freq_tbl->count = 0;
-	for_each_child_of_node(parent_node, child_node)
-		clock_freq_tbl->count++;
-
-	if (!clock_freq_tbl->count) {
-		dprintk(VIDC_DBG, "No child nodes in qcom,clock-freq-tbl\n");
-		return 0;
-	}
-
-	clock_freq_tbl->clk_prof_entries = devm_kzalloc(&pdev->dev,
-		sizeof(*clock_freq_tbl->clk_prof_entries) *
-		clock_freq_tbl->count, GFP_KERNEL);
-	if (!clock_freq_tbl->clk_prof_entries) {
-		dprintk(VIDC_DBG, "no memory to allocate clk_prof_entries\n");
-		return -ENOMEM;
-	}
-
-	for_each_child_of_node(parent_node, child_node) {
-
-		if (i >= clock_freq_tbl->count) {
-			dprintk(VIDC_ERR,
-				"qcom,clock-freq-tbl: invalid child node %d, max is %d\n",
-				i, clock_freq_tbl->count);
-			break;
-		}
-
-		entry = &clock_freq_tbl->clk_prof_entries[i];
-		dprintk(VIDC_DBG, "qcom,clock-freq-tbl: profile[%d]\n", i);
-
-		if (of_find_property(child_node, "qcom,codec-mask", NULL)) {
-			rc = of_property_read_u32(child_node,
-					"qcom,codec-mask", &entry->codec_mask);
-			if (rc) {
-				dprintk(VIDC_ERR,
-					"qcom,codec-mask not found\n");
-				goto error;
-			}
-		} else {
-			entry->codec_mask = 0;
-		}
-		dprintk(VIDC_DBG, "codec_mask %#x\n", entry->codec_mask);
-
-		if (of_find_property(child_node, "qcom,cycles-per-mb", NULL)) {
-			rc = of_property_read_u32(child_node,
-					"qcom,cycles-per-mb", &entry->cycles);
-			if (rc) {
-				dprintk(VIDC_ERR,
-					"qcom,cycles-per-mb not found\n");
-				goto error;
-			}
-		} else {
-			entry->cycles = 0;
-		}
-		dprintk(VIDC_DBG, "cycles_per_mb %d\n", entry->cycles);
-
-		if (of_find_property(child_node,
-				"qcom,low-power-mode-factor", NULL)) {
-			rc = of_property_read_u32(child_node,
-					"qcom,low-power-mode-factor",
-					&entry->low_power_factor);
-			if (rc) {
-				dprintk(VIDC_ERR,
-					"qcom,low-power-mode-factor not found\n");
-				goto error;
-			}
-		} else {
-			entry->low_power_factor = 0;
-		}
-		dprintk(VIDC_DBG, "low_power_factor %d\n",
-				entry->low_power_factor);
-
-		i++;
-	}
-
-error:
-	return rc;
-}
-
 static int msm_vidc_load_freq_table(struct msm_vidc_platform_resources *res)
 {
 	int rc = 0;
 	int num_elements = 0;
 	struct platform_device *pdev = res->pdev;
-
-	/* A comparator to compare loads (needed later on) */
-	int cmp(const void *a, const void *b)
-	{
-		/* want to sort in reverse so flip the comparison */
-		return ((struct load_freq_table *)b)->load -
-			((struct load_freq_table *)a)->load;
-	}
 
 	if (!of_find_property(pdev->dev.of_node, "qcom,load-freq-tbl", NULL)) {
 		/* qcom,load-freq-tbl is an optional property.  It likely won't
@@ -534,10 +251,9 @@ static int msm_vidc_load_freq_table(struct msm_vidc_platform_resources *res)
 		return 0;
 	}
 
-	num_elements = get_u32_array_num_elements(pdev->dev.of_node,
-			"qcom,load-freq-tbl");
+	num_elements = get_u32_array_num_elements(pdev, "qcom,load-freq-tbl");
 	num_elements /= sizeof(*res->load_freq_tbl) / sizeof(u32);
-	if (!num_elements) {
+	if (num_elements == 0) {
 		dprintk(VIDC_ERR, "no elements in frequency table\n");
 		return rc;
 	}
@@ -560,230 +276,207 @@ static int msm_vidc_load_freq_table(struct msm_vidc_platform_resources *res)
 	}
 
 	res->load_freq_tbl_size = num_elements;
-
-	/* The entries in the DT might not be sorted (for aesthetic purposes).
-	 * Given that we expect the loads in descending order for our scaling
-	 * logic to work, just sort it ourselves
-	 */
-	sort(res->load_freq_tbl, res->load_freq_tbl_size,
-			sizeof(*res->load_freq_tbl), cmp, NULL);
 	return rc;
 }
 
-static int msm_vidc_load_dcvs_table(struct msm_vidc_platform_resources *res)
+static int msm_vidc_load_bus_vectors(struct msm_vidc_platform_resources *res)
 {
-	int rc = 0;
-	int num_elements = 0;
 	struct platform_device *pdev = res->pdev;
-
-	if (!of_find_property(pdev->dev.of_node, "qcom,dcvs-tbl", NULL)) {
-		/*
-		 * qcom,dcvs-tbl is an optional property. Incase qcom,dcvs-limit
-		 * property is present, it becomes mandatory. It likely won't
-		 * be present on targets that does not support the feature
-		 */
-		dprintk(VIDC_DBG, "qcom,dcvs-tbl not found\n");
-		return 0;
-	}
-
-	num_elements = get_u32_array_num_elements(pdev->dev.of_node,
-			"qcom,dcvs-tbl");
-	num_elements /= sizeof(*res->dcvs_tbl) / sizeof(u32);
-	if (!num_elements) {
-		dprintk(VIDC_ERR, "no elements in dcvs table\n");
-		return rc;
-	}
-
-	res->dcvs_tbl = devm_kzalloc(&pdev->dev, num_elements *
-			sizeof(*res->dcvs_tbl), GFP_KERNEL);
-	if (!res->dcvs_tbl) {
-		dprintk(VIDC_ERR,
-				"%s Failed to alloc dcvs_tbl\n",
-				__func__);
-		return -ENOMEM;
-	}
-
-	if (of_property_read_u32_array(pdev->dev.of_node,
-		"qcom,dcvs-tbl", (u32 *)res->dcvs_tbl,
-		num_elements * sizeof(*res->dcvs_tbl) / sizeof(u32))) {
-		dprintk(VIDC_ERR, "Failed to read dcvs table\n");
-		msm_vidc_free_dcvs_table(res);
-		return -EINVAL;
-	}
-	res->dcvs_tbl_size = num_elements;
-
-	return rc;
-}
-
-static int msm_vidc_load_dcvs_limit(struct msm_vidc_platform_resources *res)
-{
-	int rc = 0;
-	int num_elements = 0;
-	struct platform_device *pdev = res->pdev;
-
-	if (!of_find_property(pdev->dev.of_node, "qcom,dcvs-limit", NULL)) {
-		/*
-		 * qcom,dcvs-limit is an optional property. Incase qcom,dcvs-tbl
-		 * property is present, it becomes mandatory. It likely won't
-		 * be present on targets that does not support the feature
-		 */
-		dprintk(VIDC_DBG, "qcom,dcvs-limit not found\n");
-		return 0;
-	}
-
-	num_elements = get_u32_array_num_elements(pdev->dev.of_node,
-			"qcom,dcvs-limit");
-	num_elements /= sizeof(*res->dcvs_limit) / sizeof(u32);
-	if (!num_elements) {
-		dprintk(VIDC_ERR, "no elements in dcvs limit\n");
-		res->dcvs_limit = NULL;
-		return rc;
-	}
-
-	res->dcvs_limit = devm_kzalloc(&pdev->dev, num_elements *
-			sizeof(*res->dcvs_limit), GFP_KERNEL);
-	if (!res->dcvs_limit) {
-		dprintk(VIDC_ERR,
-				"%s Failed to alloc dcvs_limit\n",
-				__func__);
-		return -ENOMEM;
-	}
-	if (of_property_read_u32_array(pdev->dev.of_node,
-		"qcom,dcvs-limit", (u32 *)res->dcvs_limit,
-		num_elements * sizeof(*res->dcvs_limit) / sizeof(u32))) {
-		dprintk(VIDC_ERR, "Failed to read dcvs limit\n");
-		msm_vidc_free_dcvs_limit(res);
-		return -EINVAL;
-	}
-
-	return rc;
-}
-
-
-static int msm_vidc_populate_bus(struct device *dev,
-		struct msm_vidc_platform_resources *res)
-{
+	struct device_node *child_node, *bus_node;
 	struct bus_set *buses = &res->bus_set;
-	const char *temp_name = NULL;
-	struct bus_info *bus = NULL, *temp_table;
-	u32 range[2];
-	int rc = 0;
+	int rc = 0, c = 0;
+	u32 num_buses = 0;
 
-	temp_table = krealloc(buses->bus_tbl, sizeof(*temp_table) *
-			(buses->count + 1), GFP_KERNEL);
-	if (!temp_table) {
-		dprintk(VIDC_ERR, "%s: Failed to allocate memory", __func__);
-		rc = -ENOMEM;
-		goto err_bus;
-	}
-
-	buses->bus_tbl = temp_table;
-	bus = &buses->bus_tbl[buses->count];
-
-	rc = of_property_read_string(dev->of_node, "label", &temp_name);
-	if (rc) {
-		dprintk(VIDC_ERR, "'label' not found in node\n");
-		goto err_bus;
-	}
-	/* need a non-const version of name, hence copying it over */
-	bus->name = devm_kstrdup(dev, temp_name, GFP_KERNEL);
-	if (!bus->name) {
-		rc = -ENOMEM;
-		goto err_bus;
-	}
-
-	rc = of_property_read_u32(dev->of_node, "qcom,bus-master",
-			&bus->master);
-	if (rc) {
-		dprintk(VIDC_ERR, "'qcom,bus-master' not found in node\n");
-		goto err_bus;
-	}
-
-	rc = of_property_read_u32(dev->of_node, "qcom,bus-slave", &bus->slave);
-	if (rc) {
-		dprintk(VIDC_ERR, "'qcom,bus-slave' not found in node\n");
-		goto err_bus;
-	}
-
-	rc = of_property_read_string(dev->of_node, "qcom,bus-governor",
-			&bus->governor);
-	if (rc) {
+	bus_node = of_find_node_by_name(pdev->dev.of_node,
+			"qcom,msm-bus-clients");
+	if (!bus_node) {
+		/* Not a required property */
+		dprintk(VIDC_DBG, "qcom,msm-bus-clients not found\n");
 		rc = 0;
-		dprintk(VIDC_DBG,
-				"'qcom,bus-governor' not found, default to performance governor\n");
-		bus->governor = "performance";
+		goto err_bad_node;
 	}
 
-	rc = of_property_read_u32_array(dev->of_node, "qcom,bus-range-kbps",
-			range, ARRAY_SIZE(range));
-	if (rc) {
-		rc = 0;
-		dprintk(VIDC_DBG,
-				"'qcom,range' not found defaulting to <0 INT_MAX>\n");
-		range[0] = 0;
-		range[1] = INT_MAX;
+	for_each_child_of_node(bus_node, child_node)
+		++num_buses;
+
+	buses->bus_tbl = devm_kzalloc(&pdev->dev, sizeof(*buses->bus_tbl) *
+			num_buses, GFP_KERNEL);
+	if (!buses->bus_tbl) {
+		dprintk(VIDC_ERR, "%s: Failed to allocate memory\n", __func__);
+		rc = -ENOMEM;
+		goto err_bad_node;
 	}
 
-	bus->range[0] = range[0]; /* min */
-	bus->range[1] = range[1]; /* max */
+	buses->count = num_buses;
+	c = 0;
 
-	buses->count++;
-	bus->dev = dev;
-	dprintk(VIDC_DBG, "Found bus %s [%d->%d] with governor %s\n",
-			bus->name, bus->master, bus->slave, bus->governor);
-err_bus:
+	for_each_child_of_node(bus_node, child_node) {
+		bool passive = false;
+		bool low_power = false;
+		u32 configs = 0;
+		struct bus_info *bus = &buses->bus_tbl[c];
+
+		passive = of_property_read_bool(child_node, "qcom,bus-passive");
+		low_power = of_property_read_bool(child_node,
+			"qcom,bus-low-power");
+		rc = of_property_read_u32(child_node, "qcom,bus-configs",
+				&configs);
+		if (rc) {
+			dprintk(VIDC_ERR,
+					"Failed to read qcom,bus-configs in %s: %d\n",
+					child_node->name, rc);
+			break;
+		}
+
+		bus->passive = passive;
+		bus->low_power = low_power;
+		bus->sessions_supported = configs;
+		bus->pdata = msm_bus_pdata_from_node(pdev, child_node);
+		if (IS_ERR_OR_NULL(bus->pdata)) {
+			rc = PTR_ERR(bus->pdata) ?: -EBADHANDLE;
+			dprintk(VIDC_ERR, "Failed to get bus pdata: %d\n", rc);
+			break;
+		}
+
+		dprintk(VIDC_DBG, "Bus %s supports: %x, passive: %d\n",
+				bus->pdata->name, bus->sessions_supported,
+				passive);
+		++c;
+	}
+
+	if (c < num_buses) {
+		for (c--; c >= 0; c--)
+			msm_bus_cl_clear_pdata(buses->bus_tbl[c].pdata);
+
+		goto err_bad_node;
+	}
+
+err_bad_node:
 	return rc;
 }
 
-static int msm_vidc_load_buffer_usage_table(
-		struct msm_vidc_platform_resources *res)
+static int msm_vidc_load_iommu_groups(struct msm_vidc_platform_resources *res)
 {
 	int rc = 0;
 	struct platform_device *pdev = res->pdev;
-	struct buffer_usage_set *buffer_usage_set = &res->buffer_usage_set;
+	struct device_node *domains_parent_node = NULL;
+	struct device_node *domains_child_node = NULL;
+	struct iommu_set *iommu_group_set = &res->iommu_group_set;
+	int domain_idx = 0;
+	struct iommu_info *iommu_map;
+	int array_size = 0;
 
-	if (!of_find_property(pdev->dev.of_node,
-				"qcom,buffer-type-tz-usage-table", NULL)) {
-		/* qcom,buffer-type-tz-usage-table is an optional property.  It
-		 * likely won't be present if the core doesn't support content
-		 * protection */
-		dprintk(VIDC_DBG, "buffer-type-tz-usage-table not found\n");
+	domains_parent_node = of_find_node_by_name(pdev->dev.of_node,
+				"qcom,vidc-iommu-domains");
+	if (!domains_parent_node) {
+		dprintk(VIDC_DBG, "Node qcom,vidc-iommu-domains not found.\n");
 		return 0;
 	}
 
-	buffer_usage_set->count = get_u32_array_num_elements(
-		pdev->dev.of_node, "qcom,buffer-type-tz-usage-table");
-	buffer_usage_set->count /=
-		sizeof(*buffer_usage_set->buffer_usage_tbl) / sizeof(u32);
-	if (!buffer_usage_set->count) {
-		dprintk(VIDC_DBG, "no elements in buffer usage set\n");
-		return 0;
+	iommu_group_set->count = 0;
+	for_each_child_of_node(domains_parent_node, domains_child_node) {
+		iommu_group_set->count++;
 	}
 
-	buffer_usage_set->buffer_usage_tbl = devm_kzalloc(&pdev->dev,
-			buffer_usage_set->count *
-			sizeof(*buffer_usage_set->buffer_usage_tbl),
-			GFP_KERNEL);
-	if (!buffer_usage_set->buffer_usage_tbl) {
-		dprintk(VIDC_ERR, "%s Failed to alloc buffer usage table\n",
-			__func__);
+	if (iommu_group_set->count == 0) {
+		dprintk(VIDC_ERR, "No group present in iommu_domains\n");
+		rc = -ENOENT;
+		goto err_no_of_node;
+	}
+	iommu_group_set->iommu_maps = devm_kzalloc(&pdev->dev,
+			iommu_group_set->count *
+			sizeof(*iommu_group_set->iommu_maps), GFP_KERNEL);
+
+	if (!iommu_group_set->iommu_maps) {
+		dprintk(VIDC_ERR, "Cannot allocate iommu_maps\n");
 		rc = -ENOMEM;
-		goto err_load_buf_usage;
+		goto err_no_of_node;
 	}
 
-	rc = of_property_read_u32_array(pdev->dev.of_node,
-		    "qcom,buffer-type-tz-usage-table",
-		(u32 *)buffer_usage_set->buffer_usage_tbl,
-		buffer_usage_set->count *
-		sizeof(*buffer_usage_set->buffer_usage_tbl) / sizeof(u32));
-	if (rc) {
-		dprintk(VIDC_ERR, "Failed to read buffer usage table\n");
-		goto err_load_buf_usage;
-	}
+	/* set up each context bank */
+	for_each_child_of_node(domains_parent_node, domains_child_node) {
+		struct device_node *ctx_node = of_parse_phandle(
+						domains_child_node,
+						"qcom,vidc-domain-phandle",
+						0);
+		if (domain_idx >= iommu_group_set->count)
+			break;
 
-	return 0;
-err_load_buf_usage:
-	msm_vidc_free_buffer_usage_table(res);
+		iommu_map = &iommu_group_set->iommu_maps[domain_idx];
+		if (!ctx_node) {
+			dprintk(VIDC_ERR, "Unable to parse pHandle\n");
+			rc = -EBADHANDLE;
+			goto err_load_groups;
+		}
+
+		/* domain info from domains.dtsi */
+		rc = of_property_read_string(ctx_node, "label",
+				&(iommu_map->name));
+		if (rc) {
+			dprintk(VIDC_ERR, "Could not find label property\n");
+			goto err_load_groups;
+		}
+
+		dprintk(VIDC_DBG,
+				"domain %d has name %s\n",
+				domain_idx,
+				iommu_map->name);
+
+		if (!of_get_property(ctx_node, "qcom,virtual-addr-pool",
+				&array_size)) {
+			dprintk(VIDC_ERR,
+				"Could not find any addr pool for group : %s\n",
+				iommu_map->name);
+			rc = -EBADHANDLE;
+			goto err_load_groups;
+		}
+
+		iommu_map->npartitions = array_size / sizeof(u32) / 2;
+
+		dprintk(VIDC_DBG,
+				"%d partitions in domain %d",
+				iommu_map->npartitions,
+				domain_idx);
+
+		rc = of_property_read_u32_array(ctx_node,
+				"qcom,virtual-addr-pool",
+				(u32 *)iommu_map->addr_range,
+				iommu_map->npartitions * 2);
+		if (rc) {
+			dprintk(VIDC_ERR,
+				"Could not read addr pool for group : %s (%d)\n",
+				iommu_map->name,
+				rc);
+			goto err_load_groups;
+		}
+
+		iommu_map->is_secure =
+			of_property_read_bool(ctx_node,	"qcom,secure-domain");
+
+		dprintk(VIDC_DBG,
+				"domain %s : secure = %d\n",
+				iommu_map->name,
+				iommu_map->is_secure);
+
+		/* setup partitions and buffer type per partition */
+		rc = of_property_read_u32_array(domains_child_node,
+				"qcom,vidc-partition-buffer-types",
+				iommu_map->buffer_type,
+				iommu_map->npartitions);
+
+		if (rc) {
+			dprintk(VIDC_ERR,
+					"cannot load partition buffertype information (%d)\n",
+					rc);
+			rc = -ENOENT;
+			goto err_load_groups;
+		}
+		domain_idx++;
+	}
+	return rc;
+err_load_groups:
+	msm_vidc_free_iommu_groups(res);
+err_no_of_node:
 	return rc;
 }
 
@@ -894,6 +587,8 @@ static int msm_vidc_load_clock_table(
 	num_clocks = of_property_count_strings(pdev->dev.of_node,
 				"clock-names");
 	if (num_clocks <= 0) {
+		/* Devices such as Q6 might not have any control over clocks
+		 * hence have none specified, which is ok. */
 		dprintk(VIDC_DBG, "No clocks found\n");
 		clocks->count = 0;
 		rc = 0;
@@ -934,19 +629,30 @@ static int msm_vidc_load_clock_table(
 				"clock-names", c, &vc->name);
 
 		if (clock_props[c] & CLOCK_PROP_HAS_SCALING) {
-			vc->has_scaling = true;
 			vc->count = res->load_freq_tbl_size;
 			vc->load_freq_tbl = res->load_freq_tbl;
 		} else {
 			vc->count = 0;
 			vc->load_freq_tbl = NULL;
-			vc->has_scaling = false;
 		}
 
-		dprintk(VIDC_DBG, "Found clock %s: scale-able = %s\n", vc->name,
-			vc->count ? "yes" : "no");
+		vc->has_gating = !!(clock_props[c] & CLOCK_PROP_HAS_GATING);
+
+		dprintk(VIDC_DBG,
+			"Found clock %s: scale-able = %s, gate-able = %s\n",
+			vc->name, vc->count ? "yes" : "no",
+			vc->has_gating ? "yes" : "no");
 	}
 
+	res->sw_power_collapsible = of_property_read_bool(pdev->dev.of_node,
+					"qcom,sw-power-collapse");
+	dprintk(VIDC_DBG, "Power collapse supported = %s\n",
+		res->sw_power_collapsible ? "yes" : "no");
+
+	res->early_fw_load = of_property_read_bool(pdev->dev.of_node,
+				"qcom,early-fw-load");
+	dprintk(VIDC_DBG, "Early fw load = %s\n",
+				res->early_fw_load ? "yes" : "no");
 
 	return 0;
 
@@ -968,8 +674,6 @@ int read_platform_resources_from_dt(
 		return -ENOENT;
 	}
 
-	INIT_LIST_HEAD(&res->context_banks);
-
 	res->firmware_base = (phys_addr_t)firmware_base;
 
 	kres = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -980,9 +684,10 @@ int read_platform_resources_from_dt(
 	res->irq = kres ? kres->start : -1;
 
 	of_property_read_u32(pdev->dev.of_node,
-			"qcom,imem-size", &res->imem_size);
-	res->imem_type = read_imem_type(pdev);
+			"qcom,ocmem-size", &res->ocmem_size);
 
+	res->dynamic_bw_update = of_property_read_bool(pdev->dev.of_node,
+			"qcom,use-dynamic-bw-update");
 	res->sys_idle_indicator = of_property_read_bool(pdev->dev.of_node,
 			"qcom,enable-idle-indicator");
 
@@ -990,40 +695,11 @@ int read_platform_resources_from_dt(
 			of_property_read_bool(pdev->dev.of_node,
 			"qcom,enable-thermal-mitigation");
 
-	rc = of_property_read_string(pdev->dev.of_node, "qcom,firmware-name",
-			&res->fw_name);
-	if (rc) {
-		dprintk(VIDC_ERR, "Failed to read firmware name: %d\n", rc);
-		goto err_load_freq_table;
-	}
-	dprintk(VIDC_DBG, "Firmware filename: %s\n", res->fw_name);
-
-	rc = of_property_read_string(pdev->dev.of_node, "qcom,hfi-version",
-			&res->hfi_version);
-	if (rc)
-		dprintk(VIDC_DBG, "HFI packetization will default to legacy\n");
-
-	rc = msm_vidc_load_platform_version_table(res);
-	if (rc)
-		dprintk(VIDC_ERR, "Failed to load pf version table: %d\n", rc);
-
 	rc = msm_vidc_load_freq_table(res);
 	if (rc) {
 		dprintk(VIDC_ERR, "Failed to load freq table: %d\n", rc);
 		goto err_load_freq_table;
 	}
-
-	rc = msm_vidc_load_dcvs_table(res);
-	if (rc)
-		dprintk(VIDC_WARN, "Failed to load dcvs table: %d\n", rc);
-
-	rc = msm_vidc_load_dcvs_limit(res);
-	if (rc)
-		dprintk(VIDC_WARN, "Failed to load dcvs limit: %d\n", rc);
-
-	rc = msm_vidc_load_imem_ab_table(res);
-	if (rc)
-		dprintk(VIDC_WARN, "Failed to load freq table: %d\n", rc);
 
 	rc = msm_vidc_load_qdss_table(res);
 	if (rc)
@@ -1035,11 +711,15 @@ int read_platform_resources_from_dt(
 		goto err_load_reg_table;
 	}
 
-	rc = msm_vidc_load_buffer_usage_table(res);
+	rc = msm_vidc_load_bus_vectors(res);
 	if (rc) {
-		dprintk(VIDC_ERR,
-			"Failed to load buffer usage table: %d\n", rc);
-		goto err_load_buffer_usage_table;
+		dprintk(VIDC_ERR, "Failed to load bus vectors: %d\n", rc);
+		goto err_load_bus_vectors;
+	}
+	rc = msm_vidc_load_iommu_groups(res);
+	if (rc) {
+		dprintk(VIDC_ERR, "Failed to load iommu groups: %d\n", rc);
+		goto err_load_iommu_groups;
 	}
 
 	rc = msm_vidc_load_regulator_table(res);
@@ -1055,33 +735,12 @@ int read_platform_resources_from_dt(
 		goto err_load_clock_table;
 	}
 
-	rc = msm_vidc_load_cycles_per_mb_table(res);
-	if (rc) {
-		dprintk(VIDC_ERR,
-			"Failed to load cycles per mb table: %d\n", rc);
-		goto err_load_cycles_per_mb_table;
-	}
-
-	rc = msm_vidc_load_allowed_clocks_table(res);
-	if (rc) {
-		dprintk(VIDC_ERR,
-			"Failed to load allowed clocks table: %d\n", rc);
-		goto err_load_allowed_clocks_table;
-	}
-
 	rc = of_property_read_u32(pdev->dev.of_node, "qcom,max-hw-load",
 			&res->max_load);
 	if (rc) {
 		dprintk(VIDC_ERR,
 			"Failed to determine max load supported: %d\n", rc);
 		goto err_load_max_hw_load;
-	}
-
-	rc = msm_vidc_populate_legacy_context_bank(res);
-	if (rc) {
-		dprintk(VIDC_ERR,
-			"Failed to setup context banks %d\n", rc);
-		goto err_setup_legacy_cb;
 	}
 
 	res->use_non_secure_pil = of_property_read_bool(pdev->dev.of_node,
@@ -1094,451 +753,19 @@ int read_platform_resources_from_dt(
 		dprintk(VIDC_DBG,
 				"Using fw-bias : %pa", &res->firmware_base);
 	}
-
-	res->sw_power_collapsible = of_property_read_bool(pdev->dev.of_node,
-					"qcom,sw-power-collapse");
-	dprintk(VIDC_DBG, "Power collapse supported = %s\n",
-		res->sw_power_collapsible ? "yes" : "no");
-
-	res->never_unload_fw = of_property_read_bool(pdev->dev.of_node,
-			"qcom,never-unload-fw");
-
-	of_property_read_u32(pdev->dev.of_node,
-			"qcom,pm-qos-latency-us", &res->pm_qos_latency_us);
-
-	res->slave_side_cp = of_property_read_bool(pdev->dev.of_node,
-					"qcom,slave-side-cp");
-	dprintk(VIDC_DBG, "Slave side cp = %s\n",
-				res->slave_side_cp ? "yes" : "no");
-
-	of_property_read_u32(pdev->dev.of_node,
-			"qcom,max-secure-instances",
-			&res->max_secure_inst_count);
 	return rc;
-
-err_setup_legacy_cb:
 err_load_max_hw_load:
-	msm_vidc_free_allowed_clocks_table(res);
-err_load_allowed_clocks_table:
-	msm_vidc_free_cycles_per_mb_table(res);
-err_load_cycles_per_mb_table:
 	msm_vidc_free_clock_table(res);
 err_load_clock_table:
 	msm_vidc_free_regulator_table(res);
 err_load_regulator_table:
-	msm_vidc_free_buffer_usage_table(res);
-err_load_buffer_usage_table:
+	msm_vidc_free_iommu_groups(res);
+err_load_iommu_groups:
+	msm_vidc_free_bus_vectors(res);
+err_load_bus_vectors:
 	msm_vidc_free_reg_table(res);
 err_load_reg_table:
 	msm_vidc_free_freq_table(res);
 err_load_freq_table:
 	return rc;
-}
-
-static int get_secure_vmid(struct context_bank_info *cb)
-{
-	if (!strcasecmp(cb->name, "venus_sec_bitstream"))
-		return VMID_CP_BITSTREAM;
-	else if (!strcasecmp(cb->name, "venus_sec_pixel"))
-		return VMID_CP_PIXEL;
-	else if (!strcasecmp(cb->name, "venus_sec_non_pixel"))
-		return VMID_CP_NON_PIXEL;
-	else {
-		WARN(1, "No matching secure vmid for cb name: %s\n",
-			cb->name);
-		return VMID_INVAL;
-	}
-}
-
-static int msm_vidc_setup_context_bank(struct context_bank_info *cb,
-		struct device *dev)
-{
-	int rc = 0;
-	int disable_htw = 1;
-	int secure_vmid = VMID_INVAL;
-	struct bus_type *bus;
-
-	if (!dev || !cb) {
-		dprintk(VIDC_ERR,
-			"%s: Invalid Input params\n", __func__);
-		return -EINVAL;
-	}
-	cb->dev = dev;
-
-	bus = msm_iommu_get_bus(cb->dev);
-	if (IS_ERR_OR_NULL(bus)) {
-		dprintk(VIDC_ERR, "%s - failed to get bus type\n", __func__);
-		rc = PTR_ERR(bus) ?: -ENODEV;
-		goto remove_cb;
-	}
-
-	cb->mapping = arm_iommu_create_mapping(bus, cb->addr_range.start,
-					cb->addr_range.size);
-	if (IS_ERR_OR_NULL(cb->mapping)) {
-		dprintk(VIDC_ERR, "%s - failed to create mapping\n", __func__);
-		rc = PTR_ERR(cb->mapping) ?: -ENODEV;
-		goto remove_cb;
-	}
-
-	rc = iommu_domain_set_attr(cb->mapping->domain,
-			DOMAIN_ATTR_COHERENT_HTW_DISABLE, &disable_htw);
-	if (rc) {
-		dprintk(VIDC_ERR, "%s - disable coherent HTW failed: %s %d\n",
-				__func__, dev_name(dev), rc);
-		goto release_mapping;
-	}
-
-	if (cb->is_secure) {
-		secure_vmid = get_secure_vmid(cb);
-		rc = iommu_domain_set_attr(cb->mapping->domain,
-				DOMAIN_ATTR_SECURE_VMID, &secure_vmid);
-		if (rc) {
-			dprintk(VIDC_ERR,
-					"%s - programming secure vmid failed: %s %d\n",
-					__func__, dev_name(dev), rc);
-			goto release_mapping;
-		}
-	}
-
-	rc = arm_iommu_attach_device(cb->dev, cb->mapping);
-	if (rc) {
-		dprintk(VIDC_ERR, "%s - Couldn't arm_iommu_attach_device\n",
-			__func__);
-		goto release_mapping;
-	}
-
-	dprintk(VIDC_DBG, "Attached %s and created mapping\n", dev_name(dev));
-	dprintk(VIDC_DBG,
-		"Context bank name:%s, buffer_type: %#x, is_secure: %d, address range start: %#x, size: %#x, dev: %pK, mapping: %pK",
-		cb->name, cb->buffer_type, cb->is_secure, cb->addr_range.start,
-		cb->addr_range.size, cb->dev, cb->mapping);
-
-	return rc;
-
-release_mapping:
-	arm_iommu_release_mapping(cb->mapping);
-remove_cb:
-	return rc;
-}
-
-int msm_vidc_smmu_fault_handler(struct iommu_domain *domain,
-		struct device *dev, unsigned long iova, int flags, void *token)
-{
-	struct msm_vidc_core *core = token;
-	struct msm_vidc_inst *inst;
-	struct buffer_info *temp;
-	struct internal_buf *buf;
-	int i = 0;
-	bool is_decode = false;
-	enum vidc_ports port;
-
-	if (!domain || !core) {
-		dprintk(VIDC_ERR, "%s - invalid param %pK %pK\n",
-			__func__, domain, core);
-		return -EINVAL;
-	}
-
-	if (core->smmu_fault_handled)
-		return -ENOSYS;
-
-	dprintk(VIDC_ERR, "%s - faulting address: %lx\n", __func__, iova);
-
-	mutex_lock(&core->lock);
-	list_for_each_entry(inst, &core->instances, list) {
-		is_decode = inst->session_type == MSM_VIDC_DECODER;
-		port = is_decode ? OUTPUT_PORT : CAPTURE_PORT;
-		dprintk(VIDC_ERR,
-			"%s session, Codec type: %s HxW: %d x %d fps: %d bitrate: %d bit-depth: %s\n",
-			is_decode ? "Decode" : "Encode", inst->fmts[port]->name,
-			inst->prop.height[port], inst->prop.width[port],
-			inst->prop.fps, inst->prop.bitrate,
-			!inst->bit_depth ? "8" : "10");
-
-		dprintk(VIDC_ERR,
-			"---Buffer details for inst: %pK of type: %d---\n",
-			inst, inst->session_type);
-		mutex_lock(&inst->registeredbufs.lock);
-		dprintk(VIDC_ERR, "registered buffer list:\n");
-		list_for_each_entry(temp, &inst->registeredbufs.list, list)
-			for (i = 0; i < temp->num_planes; i++)
-				dprintk(VIDC_ERR,
-					"type: %d plane: %d addr: %pa size: %d\n",
-					temp->type, i, &temp->device_addr[i],
-					temp->size[i]);
-
-		mutex_unlock(&inst->registeredbufs.lock);
-
-		mutex_lock(&inst->scratchbufs.lock);
-		dprintk(VIDC_ERR, "scratch buffer list:\n");
-		list_for_each_entry(buf, &inst->scratchbufs.list, list)
-			dprintk(VIDC_ERR, "type: %d addr: %pa size: %zu\n",
-				buf->buffer_type, &buf->handle->device_addr,
-				buf->handle->size);
-		mutex_unlock(&inst->scratchbufs.lock);
-
-		mutex_lock(&inst->persistbufs.lock);
-		dprintk(VIDC_ERR, "persist buffer list:\n");
-		list_for_each_entry(buf, &inst->persistbufs.list, list)
-			dprintk(VIDC_ERR, "type: %d addr: %pa size: %zu\n",
-				buf->buffer_type, &buf->handle->device_addr,
-				buf->handle->size);
-		mutex_unlock(&inst->persistbufs.lock);
-
-		mutex_lock(&inst->outputbufs.lock);
-		dprintk(VIDC_ERR, "dpb buffer list:\n");
-		list_for_each_entry(buf, &inst->outputbufs.list, list)
-			dprintk(VIDC_ERR, "type: %d addr: %pa size: %zu\n",
-				buf->buffer_type, &buf->handle->device_addr,
-				buf->handle->size);
-		mutex_unlock(&inst->outputbufs.lock);
-	}
-	core->smmu_fault_handled = true;
-	mutex_unlock(&core->lock);
-	/*
-	 * Return -ENOSYS to elicit the default behaviour of smmu driver.
-	 * If we return -ENOSYS, then smmu driver assumes page fault handler
-	 * is not installed and prints a list of useful debug information like
-	 * FAR, SID etc. This information is not printed if we return 0.
-	 */
-	return -ENOSYS;
-}
-
-static int msm_vidc_populate_context_bank(struct device *dev,
-		struct msm_vidc_core *core)
-{
-	int rc = 0;
-	struct context_bank_info *cb = NULL;
-	struct device_node *np = NULL;
-
-	if (!dev || !core) {
-		dprintk(VIDC_ERR, "%s - invalid inputs\n", __func__);
-		return -EINVAL;
-	}
-
-	np = dev->of_node;
-	cb = devm_kzalloc(dev, sizeof(*cb), GFP_KERNEL);
-	if (!cb) {
-		dprintk(VIDC_ERR, "%s - Failed to allocate cb\n", __func__);
-		return -ENOMEM;
-	}
-
-	INIT_LIST_HEAD(&cb->list);
-	list_add_tail(&cb->list, &core->resources.context_banks);
-
-	rc = of_property_read_string(np, "label", &cb->name);
-	if (rc) {
-		dprintk(VIDC_DBG,
-			"Failed to read cb label from device tree\n");
-		rc = 0;
-	}
-
-	dprintk(VIDC_DBG, "%s: context bank has name %s\n", __func__, cb->name);
-	rc = of_property_read_u32_array(np, "virtual-addr-pool",
-			(u32 *)&cb->addr_range, 2);
-	if (rc) {
-		dprintk(VIDC_ERR,
-			"Could not read addr pool for context bank : %s %d\n",
-			cb->name, rc);
-		goto err_setup_cb;
-	}
-
-	cb->is_secure = of_property_read_bool(np, "qcom,secure-context-bank");
-	dprintk(VIDC_DBG, "context bank %s : secure = %d\n",
-			cb->name, cb->is_secure);
-
-	/* setup buffer type for each sub device*/
-	rc = of_property_read_u32(np, "buffer-types", &cb->buffer_type);
-	if (rc) {
-		dprintk(VIDC_ERR, "failed to load buffer_type info %d\n", rc);
-		rc = -ENOENT;
-		goto err_setup_cb;
-	}
-	dprintk(VIDC_DBG,
-		"context bank %s address start = %x address size = %x buffer_type = %x\n",
-		cb->name, cb->addr_range.start,
-		cb->addr_range.size, cb->buffer_type);
-
-	rc = msm_vidc_setup_context_bank(cb, dev);
-	if (rc) {
-		dprintk(VIDC_ERR, "Cannot setup context bank %d\n", rc);
-		goto err_setup_cb;
-	}
-
-	iommu_set_fault_handler(cb->mapping->domain,
-		msm_vidc_smmu_fault_handler, (void *)core);
-
-	return 0;
-
-err_setup_cb:
-	list_del(&cb->list);
-	return rc;
-}
-
-static int msm_vidc_populate_legacy_context_bank(
-			struct msm_vidc_platform_resources *res)
-{
-	int rc = 0;
-	struct platform_device *pdev = NULL;
-	struct device_node *domains_parent_node = NULL;
-	struct device_node *domains_child_node = NULL;
-	struct device_node *ctx_node = NULL;
-	struct context_bank_info *cb;
-
-	if (!res || !res->pdev) {
-		dprintk(VIDC_ERR, "%s - invalid inputs\n", __func__);
-		return -EINVAL;
-	}
-	pdev = res->pdev;
-
-	domains_parent_node = of_find_node_by_name(pdev->dev.of_node,
-			"qcom,vidc-iommu-domains");
-	if (!domains_parent_node) {
-		dprintk(VIDC_DBG,
-			"%s legacy iommu domains not present\n", __func__);
-		return 0;
-	}
-
-	/* set up each context bank for legacy DT bindings*/
-	for_each_child_of_node(domains_parent_node,
-		domains_child_node) {
-		cb = devm_kzalloc(&pdev->dev, sizeof(*cb), GFP_KERNEL);
-		if (!cb) {
-			dprintk(VIDC_ERR,
-				"%s - Failed to allocate cb\n", __func__);
-			return -ENOMEM;
-		}
-		INIT_LIST_HEAD(&cb->list);
-		list_add_tail(&cb->list, &res->context_banks);
-
-		ctx_node = of_parse_phandle(domains_child_node,
-				"qcom,vidc-domain-phandle", 0);
-		if (!ctx_node) {
-			dprintk(VIDC_ERR,
-				"%s Unable to parse pHandle\n", __func__);
-			rc = -EBADHANDLE;
-			goto err_setup_cb;
-		}
-
-		rc = of_property_read_string(ctx_node, "label", &(cb->name));
-		if (rc) {
-			dprintk(VIDC_ERR,
-				"%s Could not find label\n", __func__);
-			goto err_setup_cb;
-		}
-
-		rc = of_property_read_u32_array(ctx_node,
-			"qcom,virtual-addr-pool", (u32 *)&cb->addr_range, 2);
-		if (rc) {
-			dprintk(VIDC_ERR,
-				"%s Could not read addr pool for group : %s (%d)\n",
-				__func__, cb->name, rc);
-			goto err_setup_cb;
-		}
-
-		cb->is_secure =
-			of_property_read_bool(ctx_node, "qcom,secure-domain");
-
-		rc = of_property_read_u32(domains_child_node,
-				"qcom,vidc-buffer-types", &cb->buffer_type);
-		if (rc) {
-			dprintk(VIDC_ERR,
-				"%s Could not read buffer type (%d)\n",
-				__func__, rc);
-			goto err_setup_cb;
-		}
-
-		cb->dev = msm_iommu_get_ctx(cb->name);
-		if (IS_ERR_OR_NULL(cb->dev)) {
-			dprintk(VIDC_ERR, "%s could not get device for cb %s\n",
-					__func__, cb->name);
-			rc = -ENOENT;
-			goto err_setup_cb;
-		}
-
-		rc = msm_vidc_setup_context_bank(cb, cb->dev);
-		if (rc) {
-			dprintk(VIDC_ERR, "Cannot setup context bank %d\n", rc);
-			goto err_setup_cb;
-		}
-		dprintk(VIDC_DBG,
-			"%s: context bank %s secure %d addr start = %#x addr size = %#x buffer_type = %#x\n",
-			__func__, cb->name, cb->is_secure, cb->addr_range.start,
-			cb->addr_range.size, cb->buffer_type);
-	}
-	return rc;
-
-err_setup_cb:
-	list_del(&cb->list);
-	return rc;
-}
-
-int read_context_bank_resources_from_dt(struct platform_device *pdev)
-{
-	struct msm_vidc_core *core;
-	int rc = 0;
-
-	if (!pdev) {
-		dprintk(VIDC_ERR, "Invalid platform device\n");
-		return -EINVAL;
-	} else if (!pdev->dev.parent) {
-		dprintk(VIDC_ERR, "Failed to find a parent for %s\n",
-				dev_name(&pdev->dev));
-		return -ENODEV;
-	}
-
-	core = dev_get_drvdata(pdev->dev.parent);
-	if (!core) {
-		dprintk(VIDC_ERR, "Failed to find cookie in parent device %s",
-				dev_name(pdev->dev.parent));
-		return -EINVAL;
-	}
-
-	if (of_property_read_bool(pdev->dev.of_node, "qcom,fw-context-bank")) {
-		if (core->resources.use_non_secure_pil) {
-			struct context_bank_info *cb;
-
-			cb = devm_kzalloc(&pdev->dev, sizeof(*cb), GFP_KERNEL);
-			if (!cb) {
-				dprintk(VIDC_ERR, "alloc venus cb failed\n");
-				return -ENOMEM;
-			}
-
-			cb->dev = &pdev->dev;
-			rc = venus_boot_init(&core->resources, cb);
-			if (rc) {
-				dprintk(VIDC_ERR,
-				"Failed to init non-secure PIL %d\n", rc);
-			}
-		}
-	} else {
-		rc = msm_vidc_populate_context_bank(&pdev->dev, core);
-		if (rc)
-			dprintk(VIDC_ERR, "Failed to probe context bank\n");
-		else
-			dprintk(VIDC_DBG, "Successfully probed context bank\n");
-	}
-	return rc;
-}
-
-int read_bus_resources_from_dt(struct platform_device *pdev)
-{
-	struct msm_vidc_core *core;
-
-	if (!pdev) {
-		dprintk(VIDC_ERR, "Invalid platform device\n");
-		return -EINVAL;
-	} else if (!pdev->dev.parent) {
-		dprintk(VIDC_ERR, "Failed to find a parent for %s\n",
-				dev_name(&pdev->dev));
-		return -ENODEV;
-	}
-
-	core = dev_get_drvdata(pdev->dev.parent);
-	if (!core) {
-		dprintk(VIDC_ERR, "Failed to find cookie in parent device %s",
-				dev_name(pdev->dev.parent));
-		return -EINVAL;
-	}
-
-	return msm_vidc_populate_bus(&pdev->dev, &core->resources);
 }

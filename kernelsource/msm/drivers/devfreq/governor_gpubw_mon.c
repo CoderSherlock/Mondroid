@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,7 +14,6 @@
 #include <linux/devfreq.h>
 #include <linux/module.h>
 #include <linux/msm_adreno_devfreq.h>
-#include <linux/slab.h>
 
 #include "devfreq_trace.h"
 #include "governor.h"
@@ -24,8 +23,6 @@
 #define HIST                    5
 #define TARGET                  80
 #define CAP                     75
-/* AB vote is in multiple of BW_STEP Mega bytes */
-#define BW_STEP                 160
 
 static void _update_cutoff(struct devfreq_msm_adreno_tz_data *priv,
 					unsigned int norm_max)
@@ -62,10 +59,6 @@ static int devfreq_gpubw_get_target(struct devfreq *df,
 	 */
 	static int norm_ab_max = 300;
 	int norm_ab;
-	unsigned long ab_mbytes = 0;
-
-	if (priv == NULL)
-		return 0;
 
 	stats.private_data = &b;
 
@@ -110,15 +103,8 @@ static int devfreq_gpubw_get_target(struct devfreq *df,
 			bus_profile->flag = DEVFREQ_FLAG_SLOW_HINT;
 	}
 
-	/* Calculate the AB vote based on bus width if defined */
-	if (priv->bus.width) {
-		norm_ab =  (unsigned int)priv->bus.ram_time /
-			(unsigned int) priv->bus.total_time;
-		/* Calculate AB in Mega Bytes and roundup in BW_STEP */
-		ab_mbytes = (norm_ab * priv->bus.width * 1000000ULL) >> 20;
-		bus_profile->ab_mbytes = roundup(ab_mbytes, BW_STEP);
-	} else if (bus_profile->flag) {
-		/* Re-calculate the AB percentage for a new IB vote */
+	/* Re-calculate the AB percentage for a new IB vote */
+	if (bus_profile->flag) {
 		norm_ab =  (unsigned int)priv->bus.ram_time /
 			(unsigned int) priv->bus.total_time;
 		if (norm_ab > norm_ab_max)
@@ -143,20 +129,11 @@ static int gpubw_start(struct devfreq *devfreq)
 					struct msm_busmon_extended_profile,
 					profile);
 	unsigned int t1, t2 = 2 * HIST;
-	int i, bus_size;
+	int i;
 
 
 	devfreq->data = bus_profile->private_data;
 	priv = devfreq->data;
-
-	bus_size = sizeof(u32) * priv->bus.num;
-	priv->bus.up = kzalloc(bus_size, GFP_KERNEL);
-	priv->bus.down = kzalloc(bus_size, GFP_KERNEL);
-	priv->bus.p_up = kzalloc(bus_size, GFP_KERNEL);
-	priv->bus.p_down = kzalloc(bus_size, GFP_KERNEL);
-	if (priv->bus.up == NULL || priv->bus.down == NULL ||
-		priv->bus.p_up == NULL || priv->bus.p_down == NULL)
-		return -ENOMEM;
 
 	/* Set up the cut-over percentages for the bus calculation. */
 	for (i = 0; i < priv->bus.num; i++) {
@@ -179,13 +156,6 @@ static int gpubw_start(struct devfreq *devfreq)
 
 static int gpubw_stop(struct devfreq *devfreq)
 {
-	struct devfreq_msm_adreno_tz_data *priv = devfreq->data;
-	if (priv) {
-		kfree(priv->bus.up);
-		kfree(priv->bus.down);
-		kfree(priv->bus.p_up);
-		kfree(priv->bus.p_down);
-	}
 	devfreq->data = NULL;
 	return 0;
 }

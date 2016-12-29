@@ -14,14 +14,11 @@ The devicetree representation of the SPM block should be:
 
 Required properties
 
-- compatible: "qcom,rpm-smd" or "qcom,rpm-glink"
+- compatible: "qcom,rpm-smd"
 - rpm-channel-name: The string corresponding to the channel name of the
-			peripheral subsystem. Required for both smd and
-			glink transports.
+			peripheral subsystem
 - rpm-channel-type: The interal SMD edge for this subsystem found in
 			<soc/qcom/smd.h>
-- qcom,glink-edge: Logical name of the remote subsystem. This is a required
-			property when rpm-smd driver using glink as trasport.
 
 Optional properties
 - rpm-standalone: Allow RPM driver to run in standalone mode irrespective of RPM
@@ -30,9 +27,8 @@ Optional properties
 Example:
 
 	qcom,rpm-smd {
-		compatible = "qcom,rpm-smd", "qcom,rpm-glink";
+		compatible = "qcom,rpm-smd"
 		qcom,rpm-channel-name = "rpm_requests";
 		qcom,rpm-channel-type = 15; /* SMD_APPS_RPM */
-		qcom,glink-edge = "rpm";
 	}
 }

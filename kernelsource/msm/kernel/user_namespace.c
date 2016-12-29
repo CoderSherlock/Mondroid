@@ -107,9 +107,8 @@ int create_user_ns(struct cred *new)
 
 	set_cred_user_ns(new, ns);
 
-#ifdef CONFIG_PERSISTENT_KEYRINGS
-	init_rwsem(&ns->persistent_keyring_register_sem);
-#endif
+	update_mnt_policy(ns);
+
 	return 0;
 }
 
@@ -139,9 +138,6 @@ void free_user_ns(struct user_namespace *ns)
 
 	do {
 		parent = ns->parent;
-#ifdef CONFIG_PERSISTENT_KEYRINGS
-		key_put(ns->persistent_keyring_register);
-#endif
 		proc_free_inum(ns->proc_inum);
 		kmem_cache_free(user_ns_cachep, ns);
 		ns = parent;
@@ -231,7 +227,7 @@ static u32 map_id_up(struct uid_gid_map *map, u32 id)
  *
  *	When there is no mapping defined for the user-namespace uid
  *	pair INVALID_UID is returned.  Callers are expected to test
- *	for and handle INVALID_UID being returned.  INVALID_UID
+ *	for and handle handle INVALID_UID being returned.  INVALID_UID
  *	may be tested for using uid_valid().
  */
 kuid_t make_kuid(struct user_namespace *ns, uid_t uid)
@@ -292,7 +288,7 @@ EXPORT_SYMBOL(from_kuid_munged);
 /**
  *	make_kgid - Map a user-namespace gid pair into a kgid.
  *	@ns:  User namespace that the gid is in
- *	@gid: group identifier
+ *	@uid: group identifier
  *
  *	Maps a user-namespace gid pair into a kernel internal kgid,
  *	and returns that kgid.
@@ -488,8 +484,7 @@ static int projid_m_show(struct seq_file *seq, void *v)
 	return 0;
 }
 
-static void *m_start(struct seq_file *seq, loff_t *ppos,
-		     struct uid_gid_map *map)
+static void *m_start(struct seq_file *seq, loff_t *ppos, struct uid_gid_map *map)
 {
 	struct uid_gid_extent *extent = NULL;
 	loff_t pos = *ppos;
@@ -532,29 +527,28 @@ static void m_stop(struct seq_file *seq, void *v)
 	return;
 }
 
-const struct seq_operations proc_uid_seq_operations = {
+struct seq_operations proc_uid_seq_operations = {
 	.start = uid_m_start,
 	.stop = m_stop,
 	.next = m_next,
 	.show = uid_m_show,
 };
 
-const struct seq_operations proc_gid_seq_operations = {
+struct seq_operations proc_gid_seq_operations = {
 	.start = gid_m_start,
 	.stop = m_stop,
 	.next = m_next,
 	.show = gid_m_show,
 };
 
-const struct seq_operations proc_projid_seq_operations = {
+struct seq_operations proc_projid_seq_operations = {
 	.start = projid_m_start,
 	.stop = m_stop,
 	.next = m_next,
 	.show = projid_m_show,
 };
 
-static bool mappings_overlap(struct uid_gid_map *new_map,
-			     struct uid_gid_extent *extent)
+static bool mappings_overlap(struct uid_gid_map *new_map, struct uid_gid_extent *extent)
 {
 	u32 upper_first, lower_first, upper_last, lower_last;
 	unsigned idx;
@@ -658,7 +652,7 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 	ret = -EINVAL;
 	pos = kbuf;
 	new_map.nr_extents = 0;
-	for (; pos; pos = next_line) {
+	for (;pos; pos = next_line) {
 		extent = &new_map.extent[new_map.nr_extents];
 
 		/* Find the end of line and ensure I don't look past it */
@@ -692,16 +686,13 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 
 		/* Verify we have been given valid starting values */
 		if ((extent->first == (u32) -1) ||
-		    (extent->lower_first == (u32) -1))
+		    (extent->lower_first == (u32) -1 ))
 			goto out;
 
-		/* Verify count is not zero and does not cause the
-		 * extent to wrap
-		 */
+		/* Verify count is not zero and does not cause the extent to wrap */
 		if ((extent->first + extent->count) <= extent->first)
 			goto out;
-		if ((extent->lower_first + extent->count) <=
-		     extent->lower_first)
+		if ((extent->lower_first + extent->count) <= extent->lower_first)
 			goto out;
 
 		/* Do the ranges in extent overlap any previous extents? */
@@ -759,8 +750,7 @@ out:
 	return ret;
 }
 
-ssize_t proc_uid_map_write(struct file *file, const char __user *buf,
-			   size_t size, loff_t *ppos)
+ssize_t proc_uid_map_write(struct file *file, const char __user *buf, size_t size, loff_t *ppos)
 {
 	struct seq_file *seq = file->private_data;
 	struct user_namespace *ns = seq->private;
@@ -776,8 +766,7 @@ ssize_t proc_uid_map_write(struct file *file, const char __user *buf,
 			 &ns->uid_map, &ns->parent->uid_map);
 }
 
-ssize_t proc_gid_map_write(struct file *file, const char __user *buf,
-			   size_t size, loff_t *ppos)
+ssize_t proc_gid_map_write(struct file *file, const char __user *buf, size_t size, loff_t *ppos)
 {
 	struct seq_file *seq = file->private_data;
 	struct user_namespace *ns = seq->private;
@@ -793,8 +782,7 @@ ssize_t proc_gid_map_write(struct file *file, const char __user *buf,
 			 &ns->gid_map, &ns->parent->gid_map);
 }
 
-ssize_t proc_projid_map_write(struct file *file, const char __user *buf,
-			      size_t size, loff_t *ppos)
+ssize_t proc_projid_map_write(struct file *file, const char __user *buf, size_t size, loff_t *ppos)
 {
 	struct seq_file *seq = file->private_data;
 	struct user_namespace *ns = seq->private;
@@ -811,7 +799,7 @@ ssize_t proc_projid_map_write(struct file *file, const char __user *buf,
 			 &ns->projid_map, &ns->parent->projid_map);
 }
 
-static bool new_idmap_permitted(const struct file *file,
+static bool new_idmap_permitted(const struct file *file, 
 				struct user_namespace *ns, int cap_setid,
 				struct uid_gid_map *new_map)
 {
@@ -1010,4 +998,4 @@ static __init int user_namespaces_init(void)
 	user_ns_cachep = KMEM_CACHE(user_namespace, SLAB_PANIC);
 	return 0;
 }
-subsys_initcall(user_namespaces_init);
+module_init(user_namespaces_init);

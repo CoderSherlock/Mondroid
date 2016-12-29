@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,8 +29,6 @@
 #include <linux/if_arp.h>
 #include <linux/msm_rmnet.h>
 #include <linux/platform_device.h>
-#include <linux/workqueue.h>
-
 #include <net/pkt_sched.h>
 
 #include <soc/qcom/bam_dmux.h>
@@ -44,11 +42,6 @@ static unsigned long int msm_rmnet_bam_headroom_check_failure;
 module_param(msm_rmnet_bam_headroom_check_failure, ulong, S_IRUGO);
 MODULE_PARM_DESC(msm_rmnet_bam_headroom_check_failure,
 		 "Number of packets with insufficient headroom");
-
-/* Packet threshold. */
-static unsigned int pkt_threshold = 1;
-module_param(pkt_threshold,
-	     uint, S_IRUGO | S_IWUSR | S_IWGRP);
 
 #define DEBUG_MASK_LVL0 (1U << 0)
 #define DEBUG_MASK_LVL1 (1U << 1)
@@ -93,11 +86,6 @@ struct rmnet_private {
 	u32 operation_mode; /* IOCTL specified mode (protocol, QoS header) */
 	uint8_t device_up;
 	uint8_t in_reset;
-};
-
-struct rmnet_free_bam_work {
-	struct work_struct work;
-	uint32_t ch_id;
 };
 
 #ifdef CONFIG_MSM_RMNET_DEBUG
@@ -165,8 +153,6 @@ DEVICE_ATTR(timeout, 0664, timeout_show, timeout_store);
 static int rmnet_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static struct platform_driver bam_rmnet_drivers[BAM_DMUX_NUM_CHANNELS];
 
-static struct net_device *netdevs[BAM_DMUX_NUM_CHANNELS];
-
 static __be16 rmnet_ip_type_trans(struct sk_buff *skb, struct net_device *dev)
 {
 	__be16 protocol = 0;
@@ -231,15 +217,7 @@ static void bam_recv_notify(void *dev, struct sk_buff *skb)
 			p->stats.rx_packets, skb->len);
 
 		/* Deliver to network stack */
-		if (pkt_threshold == 1) {
-			netif_rx_ni(skb);
-		} else {
-			/* For every nth packet, use netif_rx_ni(). */
-			if (p->stats.rx_packets % pkt_threshold == 0)
-				netif_rx_ni(skb);
-			else
-				netif_rx(skb);
-		}
+		netif_rx(skb);
 	} else
 		pr_err("[%s] %s: No skb received",
 			((struct net_device *)dev)->name, __func__);
@@ -544,30 +522,12 @@ static const struct net_device_ops rmnet_ops_ip = {
 	.ndo_validate_addr = 0,
 };
 
-static void _rmnet_free_bam_later(struct work_struct *work)
-{
-	struct rmnet_free_bam_work *fwork;
-
-	fwork = container_of(work, struct rmnet_free_bam_work, work);
-
-	DBG0("%s: unregister_netdev, done", __func__);
-
-	if (bam_rmnet_drivers[fwork->ch_id].remove) {
-		platform_driver_unregister(&bam_rmnet_drivers[fwork->ch_id]);
-		bam_rmnet_drivers[fwork->ch_id].remove = NULL;
-	}
-
-	DBG0("%s: free_netdev, done", __func__);
-
-	kfree(work);
-}
-
 static int rmnet_ioctl_extended(struct net_device *dev, struct ifreq *ifr)
 {
 	struct rmnet_ioctl_extended_s ext_cmd;
 	int rc = 0;
 	struct rmnet_private *p = netdev_priv(dev);
-	struct rmnet_free_bam_work *work;
+
 
 	rc = copy_from_user(&ext_cmd, ifr->ifr_ifru.ifru_data,
 			    sizeof(ext_cmd));
@@ -590,15 +550,6 @@ static int rmnet_ioctl_extended(struct net_device *dev, struct ifreq *ifr)
 	case RMNET_IOCTL_GET_DRIVER_NAME:
 		strlcpy(ext_cmd.u.if_name, RMNET_BAM_DRIVER_NAME,
 			sizeof(ext_cmd.u.if_name));
-		break;
-	case RMNET_IOCTL_DEREGISTER_DEV:
-		work = kmalloc(sizeof(*work), GFP_KERNEL);
-		if (!work)
-			break;
-		INIT_WORK(&work->work, _rmnet_free_bam_later);
-
-		work->ch_id = p->ch_id;
-		schedule_work(&work->work);
 		break;
 	default:
 		rc = -EINVAL;
@@ -770,6 +721,7 @@ static void rmnet_setup(struct net_device *dev)
 	dev->watchdog_timeo = 1000; /* 10 seconds? */
 }
 
+static struct net_device *netdevs[BAM_DMUX_NUM_CHANNELS];
 
 #ifdef CONFIG_MSM_RMNET_DEBUG
 static int rmnet_debug_init(struct net_device *dev)
@@ -824,7 +776,7 @@ static int bam_rmnet_probe(struct platform_device *pdev)
 	else
 		dev_name = "rev_rmnet%d";
 
-	dev = alloc_netdev(sizeof(*p), dev_name, NET_NAME_ENUM, rmnet_setup);
+	dev = alloc_netdev(sizeof(*p), dev_name, rmnet_setup);
 	if (!dev) {
 		pr_err("%s: no memory for netdev %d\n", __func__, i);
 		return -ENOMEM;

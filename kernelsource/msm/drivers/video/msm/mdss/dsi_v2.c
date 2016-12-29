@@ -185,8 +185,7 @@ static int dsi_event_handler(struct mdss_panel_data *pdata,
 		rc = dsi_splash_on(pdata);
 		break;
 	case MDSS_EVENT_PANEL_CLK_CTRL:
-		rc = dsi_clk_ctrl(pdata,
-			(int)(((struct dsi_panel_clk_ctrl *)arg)->state));
+		rc = dsi_clk_ctrl(pdata, (int)arg);
 		break;
 	case MDSS_EVENT_DSI_UPDATE_PANEL_DATA:
 		rc = dsi_update_pconfig(pdata, (int)(unsigned long) arg);

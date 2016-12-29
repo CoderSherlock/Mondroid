@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -237,7 +237,7 @@ static int msm_fd_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct fd_ctx *ctx = vb2_get_drv_priv(q);
 	int ret;
 
-	if (ctx->work_buf.fd == -1) {
+	if (!ctx->work_buf.handle) {
 		dev_err(ctx->fd_device->dev, "Missing working buffer\n");
 		return -EINVAL;
 	}
@@ -260,14 +260,14 @@ out:
  * msm_fd_stop_streaming - vb2_ops stop_streaming callback.
  * @q: Pointer to vb2 queue struct.
  */
-static void msm_fd_stop_streaming(struct vb2_queue *q)
+static int msm_fd_stop_streaming(struct vb2_queue *q)
 {
 	struct fd_ctx *ctx = vb2_get_drv_priv(q);
 
-	mutex_lock(&ctx->fd_device->recovery_lock);
 	msm_fd_hw_remove_buffers_from_queue(ctx->fd_device, q);
 	msm_fd_hw_put(ctx->fd_device);
-	mutex_unlock(&ctx->fd_device->recovery_lock);
+
+	return 0;
 }
 
 /* Videobuf2 queue callbacks. */
@@ -328,69 +328,6 @@ static struct vb2_mem_ops msm_fd_vb2_mem_ops = {
 };
 
 /*
- * msm_fd_vbif_error_handler - FD VBIF Error handler
- * @handle: FD Device handle
- * @error: CPP-VBIF Error code
- */
-static int msm_fd_vbif_error_handler(void *handle, uint32_t error)
-{
-	struct fd_ctx *ctx;
-	struct msm_fd_device *fd;
-	struct msm_fd_buffer *active_buf;
-	int ret;
-
-	if (NULL == handle) {
-		dev_err(fd->dev, "FD Ctx is null, Cannot recover\n");
-		return 0;
-	}
-	ctx = (struct fd_ctx *)handle;
-	fd = (struct msm_fd_device *)ctx->fd_device;
-
-	if (error == CPP_VBIF_ERROR_HANG) {
-		mutex_lock(&fd->recovery_lock);
-		dev_err(fd->dev, "Handling FD VBIF Hang\n");
-		if (fd->state != MSM_FD_DEVICE_RUNNING) {
-			dev_err(fd->dev, "FD is not FD_DEVICE_RUNNING, %d\n",
-				fd->state);
-			mutex_unlock(&fd->recovery_lock);
-			return 0;
-		}
-		fd->recovery_mode = 1;
-
-		/* Halt and reset */
-		msm_fd_hw_put(fd);
-		msm_fd_hw_get(fd, ctx->settings.speed);
-
-		/* Get active buffer */
-		active_buf = msm_fd_hw_get_active_buffer(fd);
-
-		if (active_buf == NULL) {
-			dev_dbg(fd->dev, "no active buffer, return\n");
-			fd->recovery_mode = 0;
-			mutex_unlock(&fd->recovery_lock);
-			return 0;
-		}
-
-		dev_dbg(fd->dev, "Active Buffer present.. Start re-schedule\n");
-
-		/* Queue the buffer again */
-		msm_fd_hw_add_buffer(fd, active_buf);
-
-		/* Schedule and restart */
-		ret = msm_fd_hw_schedule_next_buffer(fd);
-		if (ret) {
-			dev_err(fd->dev, "Cannot reschedule buffer, recovery failed\n");
-			fd->recovery_mode = 0;
-			mutex_unlock(&fd->recovery_lock);
-			return ret;
-		}
-		dev_dbg(fd->dev, "Restarted FD after VBIF HAng\n");
-		mutex_unlock(&fd->recovery_lock);
-	}
-	return 0;
-}
-
-/*
  * msm_fd_open - Fd device open method.
  * @file: Pointer to file struct.
  */
@@ -412,7 +349,7 @@ static int msm_fd_open(struct file *file)
 	ctx->work_buf.fd = -1;
 
 	/* Set ctx defaults */
-	ctx->settings.speed = ctx->fd_device->clk_rates_num - 1;
+	ctx->settings.speed = ctx->fd_device->clk_rates_num;
 	ctx->settings.angle_index = MSM_FD_DEF_ANGLE_IDX;
 	ctx->settings.direction_index = MSM_FD_DEF_DIR_IDX;
 	ctx->settings.min_size_index = MSM_FD_DEF_MIN_SIZE_IDX;
@@ -431,14 +368,21 @@ static int msm_fd_open(struct file *file)
 	ctx->vb2_q.buf_struct_size = sizeof(struct msm_fd_buffer);
 	ctx->vb2_q.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
 	ctx->vb2_q.io_modes = VB2_USERPTR;
-	ctx->vb2_q.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+	ctx->vb2_q.timestamp_type = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	ret = vb2_queue_init(&ctx->vb2_q);
 	if (ret < 0) {
 		dev_err(device->dev, "Error queue init\n");
 		goto error_vb2_queue_init;
 	}
 
+	ctx->mem_pool.client = msm_ion_client_create(MSM_FD_DRV_NAME);
+	if (IS_ERR_OR_NULL(ctx->mem_pool.client)) {
+		dev_err(device->dev, "Error ion client create\n");
+		goto error_ion_client_create;
+	}
 	ctx->mem_pool.fd_device = ctx->fd_device;
+	ctx->mem_pool.domain_num = ctx->fd_device->iommu_domain_num;
+
 	ctx->stats = vmalloc(sizeof(*ctx->stats) * MSM_FD_MAX_RESULT_BUFS);
 	if (!ctx->stats) {
 		dev_err(device->dev, "No memory for face statistics\n");
@@ -446,22 +390,11 @@ static int msm_fd_open(struct file *file)
 		goto error_stats_vmalloc;
 	}
 
-	ret = cam_config_ahb_clk(NULL, 0, CAM_AHB_CLIENT_FD,
-			CAM_AHB_SVS_VOTE);
-	if (ret < 0) {
-		pr_err("%s: failed to vote for AHB\n", __func__);
-		goto error_ahb_config;
-	}
-
-	/* Register with CPP VBIF error handler */
-	msm_cpp_vbif_register_error_handler((void *)ctx,
-		VBIF_CLIENT_FD, msm_fd_vbif_error_handler);
-
 	return 0;
 
-error_ahb_config:
-	vfree(ctx->stats);
 error_stats_vmalloc:
+	ion_client_destroy(ctx->mem_pool.client);
+error_ion_client_create:
 	vb2_queue_release(&ctx->vb2_q);
 error_vb2_queue_init:
 	v4l2_fh_del(&ctx->fh);
@@ -478,25 +411,19 @@ static int msm_fd_release(struct file *file)
 {
 	struct fd_ctx *ctx = msm_fd_ctx_from_fh(file->private_data);
 
-	/* Un-register with CPP VBIF error handler */
-	msm_cpp_vbif_register_error_handler((void *)ctx,
-		VBIF_CLIENT_FD, NULL);
-
 	vb2_queue_release(&ctx->vb2_q);
 
 	vfree(ctx->stats);
 
-	if (ctx->work_buf.fd != -1)
+	if (ctx->work_buf.handle)
 		msm_fd_hw_unmap_buffer(&ctx->work_buf);
+
+	ion_client_destroy(ctx->mem_pool.client);
 
 	v4l2_fh_del(&ctx->fh);
 	v4l2_fh_exit(&ctx->fh);
 
 	kfree(ctx);
-
-	if (cam_config_ahb_clk(NULL, 0, CAM_AHB_CLIENT_FD,
-		CAM_AHB_SUSPEND_VOTE) < 0)
-		pr_err("%s: failed to remove vote for AHB\n", __func__);
 
 	return 0;
 }
@@ -538,7 +465,7 @@ static long msm_fd_private_ioctl(struct file *file, void *fh,
 	struct fd_ctx *ctx = msm_fd_ctx_from_fh(fh);
 	struct msm_fd_stats *stats;
 	int stats_idx;
-	int ret = 0;
+	int ret;
 	int i;
 
 	switch (cmd) {
@@ -622,6 +549,8 @@ static long msm_fd_compat_ioctl32(struct file *file,
 		break;
 	}
 	default:
+		pr_err_ratelimited("%s: unsupported compat type 0x%x\n",
+				__func__, cmd);
 		ret = -ENOIOCTLCMD;
 		break;
 
@@ -972,7 +901,7 @@ static int msm_fd_g_ctrl(struct file *file, void *fh, struct v4l2_control *a)
 		a->value = ctx->format.size->work_size;
 		break;
 	case V4L2_CID_FD_WORK_MEMORY_FD:
-		if (ctx->work_buf.fd == -1)
+		if (!ctx->work_buf.handle)
 			return -EINVAL;
 
 		a->value = ctx->work_buf.fd;
@@ -998,8 +927,8 @@ static int msm_fd_s_ctrl(struct file *file, void *fh, struct v4l2_control *a)
 
 	switch (a->id) {
 	case V4L2_CID_FD_SPEED:
-		if (a->value > ctx->fd_device->clk_rates_num - 1)
-			a->value = ctx->fd_device->clk_rates_num - 1;
+		if (a->value > ctx->fd_device->clk_rates_num)
+			a->value = ctx->fd_device->clk_rates_num;
 		else if (a->value < 0)
 			a->value = 0;
 
@@ -1042,8 +971,9 @@ static int msm_fd_s_ctrl(struct file *file, void *fh, struct v4l2_control *a)
 			a->value = ctx->format.size->work_size;
 		break;
 	case V4L2_CID_FD_WORK_MEMORY_FD:
-		if (ctx->work_buf.fd != -1)
+		if (ctx->work_buf.handle)
 			msm_fd_hw_unmap_buffer(&ctx->work_buf);
+
 		if (a->value >= 0) {
 			ret = msm_fd_hw_map_buffer(&ctx->mem_pool,
 				a->value, &ctx->work_buf);
@@ -1246,12 +1176,6 @@ static void msm_fd_wq_handler(struct work_struct *work)
 	/* Stats are ready, set correct frame id */
 	atomic_set(&stats->frame_id, ctx->sequence);
 
-	/* If Recovery mode is on, we got IRQ after recovery, reset it */
-	if (fd->recovery_mode) {
-		fd->recovery_mode = 0;
-		dev_dbg(fd->dev, "Got IRQ after Recovery\n");
-	}
-
 	/* We have the data from fd hw, we can start next processing */
 	msm_fd_hw_schedule_next_buffer(fd);
 
@@ -1288,10 +1212,8 @@ static int fd_probe(struct platform_device *pdev)
 
 	mutex_init(&fd->lock);
 	spin_lock_init(&fd->slock);
-	mutex_init(&fd->recovery_lock);
 	init_completion(&fd->hw_halt_completion);
 	INIT_LIST_HEAD(&fd->buf_queue);
-	fd->pdev = pdev;
 	fd->dev = &pdev->dev;
 
 	/* Get resources */
@@ -1302,23 +1224,23 @@ static int fd_probe(struct platform_device *pdev)
 		goto error_mem_resources;
 	}
 
-	ret = msm_camera_get_regulator_info(pdev, &fd->vdd_info,
-		&fd->num_reg);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "Fail to get regulators\n");
+	fd->vdd = regulator_get(&pdev->dev, "vdd");
+	if (IS_ERR(fd->vdd)) {
+		dev_err(&pdev->dev, "Fail to get vdd regulator\n");
+		ret = -ENODEV;
 		goto error_get_regulator;
 	}
-	ret = msm_camera_get_clk_info_and_rates(pdev, &fd->clk_info,
-		&fd->clk, &fd->clk_rates, &fd->clk_rates_num, &fd->clk_num);
+
+	ret = msm_fd_hw_get_clocks(fd);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Fail to get clocks\n");
 		goto error_get_clocks;
 	}
 
-	ret = msm_camera_register_bus_client(pdev, CAM_BUS_CLIENT_FD);
+	ret = msm_fd_hw_get_iommu(fd);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "Fail to get bus\n");
-		goto error_get_bus;
+		dev_err(&pdev->dev, "Fail to get iommu\n");
+		goto error_iommu_get;
 	}
 
 	/* Get face detect hw before read engine revision */
@@ -1371,12 +1293,11 @@ error_video_register:
 error_v4l2_register:
 	msm_fd_hw_release_irq(fd);
 error_hw_get_request_irq:
-	msm_camera_unregister_bus_client(CAM_BUS_CLIENT_FD);
-error_get_bus:
-	msm_camera_put_clk_info_and_rates(pdev, &fd->clk_info,
-		&fd->clk, &fd->clk_rates, fd->clk_rates_num, fd->clk_num);
+	msm_fd_hw_put_iommu(fd);
+error_iommu_get:
+	msm_fd_hw_put_clocks(fd);
 error_get_clocks:
-	msm_camera_put_regulators(pdev, &fd->vdd_info, fd->num_reg);
+	regulator_put(fd->vdd);
 error_get_regulator:
 	msm_fd_hw_release_mem_resources(fd);
 error_mem_resources:
@@ -1400,10 +1321,9 @@ static int fd_device_remove(struct platform_device *pdev)
 	video_unregister_device(&fd->video);
 	v4l2_device_unregister(&fd->v4l2_dev);
 	msm_fd_hw_release_irq(fd);
-	msm_camera_unregister_bus_client(CAM_BUS_CLIENT_FD);
-	msm_camera_put_clk_info_and_rates(pdev, &fd->clk_info,
-		&fd->clk, &fd->clk_rates, fd->clk_rates_num, fd->clk_num);
-	msm_camera_put_regulators(pdev, &fd->vdd_info, fd->num_reg);
+	msm_fd_hw_put_iommu(fd);
+	msm_fd_hw_put_clocks(fd);
+	regulator_put(fd->vdd);
 	msm_fd_hw_release_mem_resources(fd);
 	kfree(fd);
 

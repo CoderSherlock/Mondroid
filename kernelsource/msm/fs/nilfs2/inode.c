@@ -57,7 +57,7 @@ void nilfs_inode_add_blocks(struct inode *inode, int n)
 
 	inode_add_bytes(inode, (1 << inode->i_blkbits) * n);
 	if (root)
-		atomic64_add(n, &root->blocks_count);
+		atomic_add(n, &root->blocks_count);
 }
 
 void nilfs_inode_sub_blocks(struct inode *inode, int n)
@@ -66,7 +66,7 @@ void nilfs_inode_sub_blocks(struct inode *inode, int n)
 
 	inode_sub_bytes(inode, (1 << inode->i_blkbits) * n);
 	if (root)
-		atomic64_sub(n, &root->blocks_count);
+		atomic_sub(n, &root->blocks_count);
 }
 
 /**
@@ -128,7 +128,7 @@ int nilfs_get_block(struct inode *inode, sector_t blkoff,
 			nilfs_transaction_abort(inode->i_sb);
 			goto out;
 		}
-		nilfs_mark_inode_dirty_sync(inode);
+		nilfs_mark_inode_dirty(inode);
 		nilfs_transaction_commit(inode->i_sb); /* never fails */
 		/* Error handling should be detailed */
 		set_buffer_new(bh_result);
@@ -261,7 +261,7 @@ void nilfs_write_failed(struct address_space *mapping, loff_t to)
 	struct inode *inode = mapping->host;
 
 	if (to > inode->i_size) {
-		truncate_pagecache(inode, inode->i_size);
+		truncate_pagecache(inode, to, inode->i_size);
 		nilfs_truncate(inode);
 	}
 }
@@ -305,20 +305,19 @@ static int nilfs_write_end(struct file *file, struct address_space *mapping,
 }
 
 static ssize_t
-nilfs_direct_IO(int rw, struct kiocb *iocb, struct iov_iter *iter,
-		loff_t offset)
+nilfs_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
+		loff_t offset, unsigned long nr_segs)
 {
 	struct file *file = iocb->ki_filp;
 	struct address_space *mapping = file->f_mapping;
 	struct inode *inode = file->f_mapping->host;
-	size_t count = iov_iter_count(iter);
 	ssize_t size;
 
 	if (rw == WRITE)
 		return 0;
 
 	/* Needs synchronization with the cleaner */
-	size = blockdev_direct_IO(rw, iocb, inode, iter, offset,
+	size = blockdev_direct_IO(rw, iocb, inode, iov, offset, nr_segs,
 				  nilfs_get_block);
 
 	/*
@@ -327,7 +326,7 @@ nilfs_direct_IO(int rw, struct kiocb *iocb, struct iov_iter *iter,
 	 */
 	if (unlikely((rw & WRITE) && size < 0)) {
 		loff_t isize = i_size_read(inode);
-		loff_t end = offset + count;
+		loff_t end = offset + iov_length(iov, nr_segs);
 
 		if (end > isize)
 			nilfs_write_failed(mapping, end);
@@ -388,7 +387,7 @@ struct inode *nilfs_new_inode(struct inode *dir, umode_t mode)
 		goto failed_ifile_create_inode;
 	/* reference count of i_bh inherits from nilfs_mdt_read_block() */
 
-	atomic64_inc(&root->inodes_count);
+	atomic_inc(&root->inodes_count);
 	inode_init_owner(inode, dir, mode);
 	inode->i_ino = ino;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
@@ -688,7 +687,7 @@ void nilfs_write_inode_common(struct inode *inode,
 	   for substitutions of appended fields */
 }
 
-void nilfs_update_inode(struct inode *inode, struct buffer_head *ibh, int flags)
+void nilfs_update_inode(struct inode *inode, struct buffer_head *ibh)
 {
 	ino_t ino = inode->i_ino;
 	struct nilfs_inode_info *ii = NILFS_I(inode);
@@ -699,8 +698,7 @@ void nilfs_update_inode(struct inode *inode, struct buffer_head *ibh, int flags)
 
 	if (test_and_clear_bit(NILFS_I_NEW, &ii->i_state))
 		memset(raw_inode, 0, NILFS_MDT(ifile)->mi_entry_size);
-	if (flags & I_DIRTY_DATASYNC)
-		set_bit(NILFS_I_INODE_SYNC, &ii->i_state);
+	set_bit(NILFS_I_INODE_DIRTY, &ii->i_state);
 
 	nilfs_write_inode_common(inode, raw_inode, 0);
 		/* XXX: call with has_bmap = 0 is a workaround to avoid
@@ -806,14 +804,16 @@ void nilfs_evict_inode(struct inode *inode)
 	int ret;
 
 	if (inode->i_nlink || !ii->i_root || unlikely(is_bad_inode(inode))) {
-		truncate_inode_pages_final(&inode->i_data);
+		if (inode->i_data.nrpages)
+			truncate_inode_pages(&inode->i_data, 0);
 		clear_inode(inode);
 		nilfs_clear_inode(inode);
 		return;
 	}
 	nilfs_transaction_begin(sb, &ti, 0); /* never fails */
 
-	truncate_inode_pages_final(&inode->i_data);
+	if (inode->i_data.nrpages)
+		truncate_inode_pages(&inode->i_data, 0);
 
 	/* TODO: some of the following operations may fail.  */
 	nilfs_truncate_bmap(ii, 0);
@@ -822,7 +822,7 @@ void nilfs_evict_inode(struct inode *inode)
 
 	ret = nilfs_ifile_delete_inode(ii->i_root->ifile, inode->i_ino);
 	if (!ret)
-		atomic64_dec(&ii->i_root->inodes_count);
+		atomic_dec(&ii->i_root->inodes_count);
 
 	nilfs_clear_inode(inode);
 
@@ -956,7 +956,7 @@ int nilfs_set_file_dirty(struct inode *inode, unsigned nr_dirty)
 	return 0;
 }
 
-int __nilfs_mark_inode_dirty(struct inode *inode, int flags)
+int nilfs_mark_inode_dirty(struct inode *inode)
 {
 	struct buffer_head *ibh;
 	int err;
@@ -967,7 +967,7 @@ int __nilfs_mark_inode_dirty(struct inode *inode, int flags)
 			      "failed to reget inode block.\n");
 		return err;
 	}
-	nilfs_update_inode(inode, ibh, flags);
+	nilfs_update_inode(inode, ibh);
 	mark_buffer_dirty(ibh);
 	nilfs_mdt_mark_dirty(NILFS_I(inode)->i_root->ifile);
 	brelse(ibh);
@@ -1000,7 +1000,7 @@ void nilfs_dirty_inode(struct inode *inode, int flags)
 		return;
 	}
 	nilfs_transaction_begin(inode->i_sb, &ti, 0);
-	__nilfs_mark_inode_dirty(inode, flags);
+	nilfs_mark_inode_dirty(inode);
 	nilfs_transaction_commit(inode->i_sb); /* never fails */
 }
 

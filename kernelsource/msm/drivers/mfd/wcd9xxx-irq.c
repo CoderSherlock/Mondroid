@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,6 +17,7 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/wcd9xxx/core-resource.h>
 #include <linux/mfd/wcd9xxx/wcd9xxx_registers.h>
+#include <linux/mfd/wcd9xxx/wcd9310_registers.h>
 #include <linux/delay.h>
 #include <linux/irqdomain.h>
 #include <linux/interrupt.h>
@@ -25,8 +26,6 @@
 #include <linux/slab.h>
 #include <linux/ratelimit.h>
 #include <soc/qcom/pm.h>
-#include <linux/gpio.h>
-#include <linux/of_gpio.h>
 
 #define BYTE_BIT_MASK(nr)		(1UL << ((nr) % BITS_PER_BYTE))
 #define BIT_BYTE(nr)			((nr) / BITS_PER_BYTE)
@@ -91,8 +90,8 @@ static void wcd9xxx_irq_sync_unlock(struct irq_data *data)
 			wcd9xxx_res->irq_masks_cache[i] =
 					wcd9xxx_res->irq_masks_cur[i];
 			wcd9xxx_res->codec_reg_write(wcd9xxx_res,
-			wcd9xxx_res->intr_reg[WCD9XXX_INTR_MASK_BASE] + i,
-			wcd9xxx_res->irq_masks_cur[i]);
+					  WCD9XXX_A_INTR_MASK0 + i,
+					  wcd9xxx_res->irq_masks_cur[i]);
 		}
 	}
 
@@ -253,27 +252,23 @@ static void wcd9xxx_irq_dispatch(struct wcd9xxx_core_resource *wcd9xxx_res,
 	if (irqdata->clear_first) {
 		wcd9xxx_nested_irq_lock(wcd9xxx_res);
 		wcd9xxx_res->codec_reg_write(wcd9xxx_res,
-			wcd9xxx_res->intr_reg[WCD9XXX_INTR_CLEAR_BASE] +
-					      BIT_BYTE(irqbit),
-			BYTE_BIT_MASK(irqbit));
+				WCD9XXX_A_INTR_CLEAR0 + BIT_BYTE(irqbit),
+				BYTE_BIT_MASK(irqbit));
 
 		if (wcd9xxx_get_intf_type() == WCD9XXX_INTERFACE_TYPE_I2C)
 			wcd9xxx_res->codec_reg_write(wcd9xxx_res,
-				wcd9xxx_res->intr_reg[WCD9XXX_INTR_CLR_COMMIT],
-				0x02);
+						WCD9XXX_A_INTR_MODE, 0x02);
 		handle_nested_irq(phyirq_to_virq(wcd9xxx_res, irqbit));
 		wcd9xxx_nested_irq_unlock(wcd9xxx_res);
 	} else {
 		wcd9xxx_nested_irq_lock(wcd9xxx_res);
 		handle_nested_irq(phyirq_to_virq(wcd9xxx_res, irqbit));
 		wcd9xxx_res->codec_reg_write(wcd9xxx_res,
-			wcd9xxx_res->intr_reg[WCD9XXX_INTR_CLEAR_BASE] +
-					      BIT_BYTE(irqbit),
-			BYTE_BIT_MASK(irqbit));
+				WCD9XXX_A_INTR_CLEAR0 + BIT_BYTE(irqbit),
+				BYTE_BIT_MASK(irqbit));
 		if (wcd9xxx_get_intf_type() == WCD9XXX_INTERFACE_TYPE_I2C)
 			wcd9xxx_res->codec_reg_write(wcd9xxx_res,
-				wcd9xxx_res->intr_reg[WCD9XXX_INTR_CLR_COMMIT],
-				0x02);
+						WCD9XXX_A_INTR_MODE, 0x02);
 
 		wcd9xxx_nested_irq_unlock(wcd9xxx_res);
 	}
@@ -303,8 +298,8 @@ static irqreturn_t wcd9xxx_irq_thread(int irq, void *data)
 	}
 
 	ret = wcd9xxx_res->codec_bulk_read(wcd9xxx_res,
-		wcd9xxx_res->intr_reg[WCD9XXX_INTR_STATUS_BASE],
-		num_irq_regs, status);
+				WCD9XXX_A_INTR_STATUS0,
+				num_irq_regs, status);
 
 	if (ret < 0) {
 		dev_err(wcd9xxx_res->dev,
@@ -359,12 +354,11 @@ static irqreturn_t wcd9xxx_irq_thread(int irq, void *data)
 		memset(status, 0xff, num_irq_regs);
 
 		ret = wcd9xxx_res->codec_bulk_write(wcd9xxx_res,
-			wcd9xxx_res->intr_reg[WCD9XXX_INTR_CLEAR_BASE],
-			num_irq_regs, status);
+				WCD9XXX_A_INTR_CLEAR0,
+				num_irq_regs, status);
 		if (wcd9xxx_get_intf_type() == WCD9XXX_INTERFACE_TYPE_I2C)
 			wcd9xxx_res->codec_reg_write(wcd9xxx_res,
-				wcd9xxx_res->intr_reg[WCD9XXX_INTR_CLR_COMMIT],
-				0x02);
+					WCD9XXX_A_INTR_MODE, 0x02);
 	}
 	wcd9xxx_unlock_sleep(wcd9xxx_res);
 
@@ -388,21 +382,18 @@ void wcd9xxx_free_irq(struct wcd9xxx_core_resource *wcd9xxx_res,
 
 void wcd9xxx_enable_irq(struct wcd9xxx_core_resource *wcd9xxx_res, int irq)
 {
-	if (wcd9xxx_res->irq)
-		enable_irq(phyirq_to_virq(wcd9xxx_res, irq));
+	enable_irq(phyirq_to_virq(wcd9xxx_res, irq));
 }
 
 void wcd9xxx_disable_irq(struct wcd9xxx_core_resource *wcd9xxx_res, int irq)
 {
-	if (wcd9xxx_res->irq)
-		disable_irq_nosync(phyirq_to_virq(wcd9xxx_res, irq));
+	disable_irq_nosync(phyirq_to_virq(wcd9xxx_res, irq));
 }
 
 void wcd9xxx_disable_irq_sync(
 			struct wcd9xxx_core_resource *wcd9xxx_res, int irq)
 {
-	if (wcd9xxx_res->irq)
-		disable_irq(phyirq_to_virq(wcd9xxx_res, irq));
+	disable_irq(phyirq_to_virq(wcd9xxx_res, irq));
 }
 
 static int wcd9xxx_irq_setup_downstream_irq(
@@ -494,11 +485,11 @@ int wcd9xxx_irq_init(struct wcd9xxx_core_resource *wcd9xxx_res)
 	for (i = 0; i < wcd9xxx_res->num_irq_regs; i++) {
 		/* Initialize interrupt mask and level registers */
 		wcd9xxx_res->codec_reg_write(wcd9xxx_res,
-			wcd9xxx_res->intr_reg[WCD9XXX_INTR_LEVEL_BASE] + i,
+					WCD9XXX_A_INTR_LEVEL0 + i,
 					irq_level[i]);
 		wcd9xxx_res->codec_reg_write(wcd9xxx_res,
-			wcd9xxx_res->intr_reg[WCD9XXX_INTR_MASK_BASE] + i,
-			wcd9xxx_res->irq_masks_cur[i]);
+					WCD9XXX_A_INTR_MASK0 + i,
+					wcd9xxx_res->irq_masks_cur[i]);
 	}
 
 	ret = request_threaded_irq(wcd9xxx_res->irq, NULL, wcd9xxx_irq_thread,
@@ -562,7 +553,6 @@ void wcd9xxx_irq_exit(struct wcd9xxx_core_resource *wcd9xxx_res)
 		disable_irq_wake(wcd9xxx_res->irq);
 		free_irq(wcd9xxx_res->irq, wcd9xxx_res);
 		/* Release parent's of node */
-		wcd9xxx_res->irq = 0;
 		wcd9xxx_irq_put_upstream_irq(wcd9xxx_res);
 	}
 	mutex_destroy(&wcd9xxx_res->irq_lock);
@@ -707,19 +697,14 @@ static int wcd9xxx_irq_probe(struct platform_device *pdev)
 	int irq;
 	struct irq_domain *domain;
 	struct wcd9xxx_irq_drv_data *data;
-	struct device_node *node = pdev->dev.of_node;
 	int ret = -EINVAL;
 
-	irq = of_get_named_gpio(node, "qcom,gpio-connect", 0);
-	if (!gpio_is_valid(irq)) {
-		dev_err(&pdev->dev, "TLMM connect gpio not found\n");
-		return -EPROBE_DEFER;
+	irq = platform_get_irq_byname(pdev, "cdc-int");
+	if (irq < 0) {
+		dev_err(&pdev->dev, "%s: Couldn't find cdc-int node(%d)\n",
+			__func__, irq);
+		return -EINVAL;
 	} else {
-		irq = gpio_to_irq(irq);
-		if (irq < 0) {
-			dev_err(&pdev->dev, "Unable to configure irq\n");
-			return irq;
-		}
 		dev_dbg(&pdev->dev, "%s: virq = %d\n", __func__, irq);
 		domain = irq_find_host(pdev->dev.of_node);
 		if (unlikely(!domain)) {

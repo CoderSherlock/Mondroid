@@ -268,8 +268,7 @@ static struct irqaction gatwick_cascade_action = {
 	.name		= "cascade",
 };
 
-static int pmac_pic_host_match(struct irq_domain *h, struct device_node *node,
-			       enum irq_domain_bus_token bus_token)
+static int pmac_pic_host_match(struct irq_domain *h, struct device_node *node)
 {
 	/* We match all, we don't always have a node anyway */
 	return 1;
@@ -394,8 +393,8 @@ static void __init pmac_pic_probe_oldstyle(void)
 #endif
 }
 
-int of_irq_parse_oldworld(struct device_node *device, int index,
-			struct of_phandle_args *out_irq)
+int of_irq_map_oldworld(struct device_node *device, int index,
+			struct of_irq *out_irq)
 {
 	const u32 *ints = NULL;
 	int intlen;
@@ -423,9 +422,9 @@ int of_irq_parse_oldworld(struct device_node *device, int index,
 	if (index >= intlen)
 		return -EINVAL;
 
-	out_irq->np = NULL;
-	out_irq->args[0] = ints[index];
-	out_irq->args_count = 1;
+	out_irq->controller = NULL;
+	out_irq->specifier[0] = ints[index];
+	out_irq->size = 1;
 
 	return 0;
 }

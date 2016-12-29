@@ -521,7 +521,7 @@
 		      <0x78c5010 0x4>,
 		      <0x7885010 0x4>;
 		reg-names = "wrapper-mux", "wrapper-lockaccess", "usbbam-mux",
-				"blsp-mux";
+		            "blsp-mux";
 		coresight-id = <31>;
 		coresight-name = "coresight-hwevent";
 		coresight-nr-inports = <0>;
@@ -532,7 +532,7 @@
 	};
 
 	rpm_etm0 {
-		compatible = "qcom,coresight-remote-etm";
+		compatible = "qcom,coresight-rpm-etm";
 
 		coresight-id = <32>;
 		coresight-name = "coresight-rpm-etm0";
@@ -540,12 +540,10 @@
 		coresight-outports = <0>;
 		coresight-child-list = <&funnel_in0>;
 		coresight-child-ports = <0>;
-
-		qcom,inst-id = <4>;
 	};
 
 	wcn_etm0 {
-		compatible = "qcom,coresight-remote-etm";
+		compatible = "qcom,coresight-wcn-etm";
 
 		coresight-id = <33>;
 		coresight-name = "coresight-wcn-etm0";
@@ -553,12 +551,10 @@
 		coresight-outports = <0>;
 		coresight-child-list = <&funnel_in3>;
 		coresight-child-ports = <0>;
-
-		qcom,inst-id = <3>;
 	};
 
 	modem_etm0 {
-		compatible = "qcom,coresight-remote-etm";
+		compatible = "qcom,coresight-modem-etm";
 
 		coresight-id = <34>;
 		coresight-name = "coresight-modem-etm0";
@@ -566,8 +562,6 @@
 		coresight-outports = <0>;
 		coresight-child-list = <&funnel_in0>;
 		coresight-child-ports = <2>;
-
-		qcom,inst-id = <2>;
 	};
 
 	fuse: fuse@5e01c {
@@ -598,27 +592,6 @@
 		vdd-io-supply = <&pm8909_l12>;
 		qcom,vdd-io-voltage-level = <1800000 2950000>;
 		qcom,vdd-io-current-level = <200 50000>;
-	};
-
-	dbgui: dbgui@86d000 {
-		compatible = "qcom,coresight-dbgui";
-		reg = <0x86d000 0x1000>;
-		reg-names = "dbgui-base";
-
-		coresight-id = <37>;
-		coresight-name = "coresight-dbgui";
-		coresight-nr-inports = <0>;
-		coresight-outports = <0>;
-		coresight-child-list = <&funnel_in2>;
-		coresight-child-ports = <2>;
-
-		qcom,dbgui-addr-offset = <0x30>;
-		qcom,dbgui-data-offset = <0xB0>;
-		qcom,dbgui-size = <32>;
-
-		clocks = <&clock_rpm clk_qdss_clk>,
-			 <&clock_rpm clk_qdss_a_clk>;
-		clock-names = "core_clk", "core_a_clk";
 	};
 };
 

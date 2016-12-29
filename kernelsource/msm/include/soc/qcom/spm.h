@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,14 +19,7 @@ enum {
 	MSM_SPM_MODE_RETENTION,
 	MSM_SPM_MODE_GDHS,
 	MSM_SPM_MODE_POWER_COLLAPSE,
-	MSM_SPM_MODE_STANDALONE_POWER_COLLAPSE,
-	MSM_SPM_MODE_FASTPC,
 	MSM_SPM_MODE_NR
-};
-
-enum msm_spm_avs_irq {
-	MSM_SPM_AVS_IRQ_MIN,
-	MSM_SPM_AVS_IRQ_MAX,
 };
 
 struct msm_spm_device;
@@ -37,26 +30,15 @@ struct device_node;
 int msm_spm_set_low_power_mode(unsigned int mode, bool notify_rpm);
 int msm_spm_probe_done(void);
 int msm_spm_set_vdd(unsigned int cpu, unsigned int vlevel);
-int msm_spm_get_vdd(unsigned int cpu);
+unsigned int msm_spm_get_vdd(unsigned int cpu);
 int msm_spm_turn_on_cpu_rail(struct device_node *l2ccc_node,
 		unsigned int val, int cpu, int vctl_offset);
 struct msm_spm_device *msm_spm_get_device_by_name(const char *name);
 int msm_spm_config_low_power_mode(struct msm_spm_device *dev,
 		unsigned int mode, bool notify_rpm);
-int msm_spm_config_low_power_mode_addr(struct msm_spm_device *dev,
-		unsigned int mode, bool notify_rpm);
 int msm_spm_device_init(void);
 bool msm_spm_is_mode_avail(unsigned int mode);
 void msm_spm_dump_regs(unsigned int cpu);
-int msm_spm_is_avs_enabled(unsigned int cpu);
-int msm_spm_avs_enable(unsigned int cpu);
-int msm_spm_avs_disable(unsigned int cpu);
-int msm_spm_avs_set_limit(unsigned int cpu, uint32_t min_lvl,
-		uint32_t max_lvl);
-int msm_spm_avs_enable_irq(unsigned int cpu, enum msm_spm_avs_irq irq);
-int msm_spm_avs_disable_irq(unsigned int cpu, enum msm_spm_avs_irq irq);
-int msm_spm_avs_clear_irq(unsigned int cpu, enum msm_spm_avs_irq irq);
-
 #if defined(CONFIG_MSM_L2_SPM)
 
 /* Public functions */
@@ -92,7 +74,7 @@ static inline int msm_spm_set_vdd(unsigned int cpu, unsigned int vlevel)
 	return -ENOSYS;
 }
 
-static inline int msm_spm_get_vdd(unsigned int cpu)
+static inline unsigned int msm_spm_get_vdd(unsigned int cpu)
 {
 	return 0;
 }
@@ -113,44 +95,19 @@ static inline void msm_spm_dump_regs(unsigned int cpu)
 	return;
 }
 
-static inline int msm_spm_config_low_power_mode(struct msm_spm_device *dev,
+int msm_spm_config_low_power_mode(struct msm_spm_device *dev,
 		unsigned int mode, bool notify_rpm)
 {
 	return -ENODEV;
 }
-
-static inline int msm_spm_config_low_power_mode_addr(
-	struct msm_spm_device *dev, unsigned int mode, bool notify_rpm)
-{
-	return -ENODEV;
-}
-
-static inline struct msm_spm_device *msm_spm_get_device_by_name(const char *name)
+struct msm_spm_device *msm_spm_get_device_by_name(const char *name)
 {
 	return NULL;
 }
 
-static inline bool msm_spm_is_mode_avail(unsigned int mode)
+bool msm_spm_is_mode_avail(unsigned int mode)
 {
 	return false;
-}
-
-static inline int msm_spm_avs_enable_irq(unsigned int cpu,
-		enum msm_spm_avs_irq irq)
-{
-	return -ENOSYS;
-}
-
-static inline int msm_spm_avs_disable_irq(unsigned int cpu,
-		enum msm_spm_avs_irq irq)
-{
-	return -ENOSYS;
-}
-
-static inline int msm_spm_avs_clear_irq(unsigned int cpu,
-		enum msm_spm_avs_irq irq)
-{
-	return -ENOSYS;
 }
 
 #endif  /* defined (CONFIG_MSM_SPM) */

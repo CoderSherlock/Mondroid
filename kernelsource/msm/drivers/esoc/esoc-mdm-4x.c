@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -12,9 +12,59 @@
 
 #include <linux/coresight.h>
 #include <linux/coresight-cti.h>
+#include <linux/delay.h>
+#include <linux/gpio.h>
+#include <linux/jiffies.h>
+#include <linux/module.h>
+#include <linux/of_address.h>
+#include <linux/of_gpio.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/platform_device.h>
 #include <linux/workqueue.h>
+#include <linux/sched.h>
 #include <soc/qcom/sysmon.h>
-#include "esoc-mdm.h"
+#include <mach/gpiomux.h>
+#include "esoc.h"
+
+#define MDM_PBLRDY_CNT			20
+#define INVALID_GPIO			(-1)
+#define MDM_GPIO(mdm, i)		(mdm->gpios[i])
+#define MDM9x25_LABEL			"MDM9x25"
+#define MDM9x25_HSIC			"HSIC"
+#define MDM9x35_LABEL			"MDM9x35"
+#define MDM9x35_PCIE			"PCIe"
+#define MDM9x35_DUAL_LINK		"HSIC+PCIe"
+#define MDM9x35_HSIC			"HSIC"
+#define MDM2AP_STATUS_TIMEOUT_MS	120000L
+#define MDM_MODEM_TIMEOUT		3000
+#define DEF_RAMDUMP_TIMEOUT		120000
+#define DEF_RAMDUMP_DELAY		2000
+#define RD_BUF_SIZE			100
+#define SFR_MAX_RETRIES			10
+#define SFR_RETRY_INTERVAL		1000
+#define MDM_DBG_OFFSET			0x934
+#define MDM_DBG_MODE			0x53444247
+#define MDM_CTI_NAME			"coresight-cti-rpm-cpu0"
+#define MDM_CTI_TRIG			0
+#define MDM_CTI_CH			0
+
+enum mdm_gpio {
+	AP2MDM_WAKEUP = 0,
+	AP2MDM_STATUS,
+	AP2MDM_SOFT_RESET,
+	AP2MDM_VDD_MIN,
+	AP2MDM_CHNLRDY,
+	AP2MDM_ERRFATAL,
+	AP2MDM_VDDMIN,
+	AP2MDM_PMIC_PWR_EN,
+	MDM2AP_WAKEUP,
+	MDM2AP_ERRFATAL,
+	MDM2AP_PBLRDY,
+	MDM2AP_STATUS,
+	MDM2AP_VDDMIN,
+	MDM_LINK_DETECT,
+	NUM_GPIOS,
+};
 
 enum gpio_update_config {
 	GPIO_UPDATE_BOOTING_CONFIG = 1,
@@ -27,6 +77,45 @@ enum irq_mask {
 	IRQ_PBLRDY = 0x4,
 };
 
+struct mdm_ctrl {
+	unsigned gpios[NUM_GPIOS];
+	spinlock_t status_lock;
+	struct workqueue_struct *mdm_queue;
+	struct delayed_work mdm2ap_status_check_work;
+	struct work_struct mdm_status_work;
+	struct work_struct restart_reason_work;
+	struct completion debug_done;
+	struct device *dev;
+	struct gpiomux_setting *mdm2ap_status_gpio_run_cfg;
+	struct gpiomux_setting mdm2ap_status_old_config;
+	int mdm2ap_status_valid_old_config;
+	int soft_reset_inverted;
+	int errfatal_irq;
+	int status_irq;
+	int pblrdy_irq;
+	int debug;
+	int init;
+	bool debug_fail;
+	unsigned int dump_timeout_ms;
+	unsigned int ramdump_delay_ms;
+	struct esoc_clink *esoc;
+	bool get_restart_reason;
+	unsigned long irq_mask;
+	bool ready;
+	bool dual_interface;
+	u32 status;
+	void __iomem *dbg_addr;
+	bool dbg_mode;
+	struct coresight_cti *cti;
+	int trig_cnt;
+};
+
+struct mdm_ops {
+	struct esoc_clink_ops *clink_ops;
+	int (*config_hw)(struct mdm_ctrl *mdm,
+				const struct esoc_clink_ops const *ops,
+						struct platform_device *pdev);
+};
 
 static struct gpio_map {
 	const char *name;
@@ -52,6 +141,7 @@ static const int required_gpios[] = {
 	AP2MDM_ERRFATAL,
 	MDM2AP_STATUS,
 	AP2MDM_STATUS,
+	AP2MDM_SOFT_RESET
 };
 
 static void mdm_debug_gpio_show(struct mdm_ctrl *mdm)
@@ -139,23 +229,32 @@ static void mdm_deconfigure_ipc(struct mdm_ctrl *mdm)
 static void mdm_update_gpio_configs(struct mdm_ctrl *mdm,
 				enum gpio_update_config gpio_config)
 {
-	struct pinctrl_state *pins_state = NULL;
+	struct device *dev = mdm->dev;
 	/* Some gpio configuration may need updating after modem bootup.*/
 	switch (gpio_config) {
 	case GPIO_UPDATE_RUNNING_CONFIG:
-		pins_state = mdm->gpio_state_running;
+		if (mdm->mdm2ap_status_gpio_run_cfg) {
+			if (msm_gpiomux_write(MDM_GPIO(mdm, MDM2AP_STATUS),
+				GPIOMUX_ACTIVE,
+				mdm->mdm2ap_status_gpio_run_cfg,
+				&mdm->mdm2ap_status_old_config))
+				dev_err(dev, "switch to run failed\n");
+			else
+				mdm->mdm2ap_status_valid_old_config = 1;
+		}
 		break;
 	case GPIO_UPDATE_BOOTING_CONFIG:
-		pins_state = mdm->gpio_state_booting;
+		if (mdm->mdm2ap_status_valid_old_config) {
+			msm_gpiomux_write(MDM_GPIO(mdm, MDM2AP_STATUS),
+					GPIOMUX_ACTIVE,
+					&mdm->mdm2ap_status_old_config,
+					NULL);
+			mdm->mdm2ap_status_valid_old_config = 0;
+		}
 		break;
 	default:
-		pins_state = NULL;
-		dev_err(mdm->dev, "%s: called with no config\n", __func__);
+		dev_err(dev, "%s: called with no config\n", __func__);
 		break;
-	}
-	if (pins_state != NULL) {
-		if (pinctrl_select_state(mdm->pinctrl, pins_state))
-			dev_err(mdm->dev, "switching gpio config failed\n");
 	}
 }
 
@@ -171,14 +270,73 @@ static void mdm_trigger_dbg(struct mdm_ctrl *mdm)
 	}
 }
 
+/* This function can be called from atomic context. */
+static void mdm_toggle_soft_reset(struct mdm_ctrl *mdm)
+{
+	int soft_reset_direction_assert = 0,
+	    soft_reset_direction_de_assert = 1;
+
+	if (mdm->soft_reset_inverted) {
+		soft_reset_direction_assert = 1;
+		soft_reset_direction_de_assert = 0;
+	}
+	gpio_direction_output(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+			soft_reset_direction_assert);
+	/*
+	 * Allow PS hold assert to be detected
+	 */
+	usleep_range(8000, 9000);
+	gpio_direction_output(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+			soft_reset_direction_de_assert);
+}
+
+static void mdm_do_first_power_on(struct mdm_ctrl *mdm)
+{
+	int i;
+	int pblrdy;
+	struct device *dev = mdm->dev;
+
+	dev_dbg(dev, "Powering on modem for the first time\n");
+	mdm_toggle_soft_reset(mdm);
+	/* Add a delay to allow PON sequence to complete*/
+	msleep(50);
+	gpio_direction_output(MDM_GPIO(mdm, AP2MDM_STATUS), 1);
+	for (i = 0; i  < MDM_PBLRDY_CNT; i++) {
+		pblrdy = gpio_get_value(MDM_GPIO(mdm, MDM2AP_PBLRDY));
+		if (pblrdy)
+			break;
+		usleep_range(5000, 6000);
+	}
+	dev_dbg(dev, "pblrdy i:%d\n", i);
+	msleep(200);
+}
+
+static void mdm_power_down(struct mdm_ctrl *mdm)
+{
+	struct device *dev = mdm->dev;
+	int soft_reset_direction = mdm->soft_reset_inverted ? 1 : 0;
+	/* Assert the soft reset line whether mdm2ap_status went low or not */
+	gpio_direction_output(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+					soft_reset_direction);
+	dev_dbg(dev, "Doing a hard reset\n");
+	gpio_direction_output(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+						soft_reset_direction);
+	/*
+	* Currently, there is a debounce timer on the charm PMIC. It is
+	* necessary to hold the PMIC RESET low for 400ms
+	* for the reset to fully take place. Sleep here to ensure the
+	* reset has occured before the function exits.
+	*/
+	msleep(400);
+}
+
 static int mdm_cmd_exe(enum esoc_cmd cmd, struct esoc_clink *esoc)
 {
 	unsigned long end_time;
 	bool status_down = false;
 	struct mdm_ctrl *mdm = get_esoc_clink_data(esoc);
 	struct device *dev = mdm->dev;
-	int ret;
-	bool graceful_shutdown = false;
+	bool graceful_shutdown;
 
 	switch (cmd) {
 	case ESOC_PWR_ON:
@@ -193,13 +351,7 @@ static int mdm_cmd_exe(enum esoc_cmd cmd, struct esoc_clink *esoc)
 		mdm->ready = false;
 		mdm->trig_cnt = 0;
 		graceful_shutdown = true;
-		ret = sysmon_send_shutdown(&esoc->subsys);
-		if (ret) {
-			dev_err(mdm->dev, "sysmon shutdown fail, ret = %d\n",
-									ret);
-			graceful_shutdown = false;
-			goto force_poff;
-		}
+
 		dev_dbg(mdm->dev, "Waiting for status gpio go low\n");
 		status_down = false;
 		end_time = jiffies + msecs_to_jiffies(10000);
@@ -216,7 +368,6 @@ static int mdm_cmd_exe(enum esoc_cmd cmd, struct esoc_clink *esoc)
 			dev_dbg(dev, "shutdown successful\n");
 		else
 			dev_err(mdm->dev, "graceful poff ipc fail\n");
-force_poff:
 	case ESOC_FORCE_PWR_OFF:
 		if (!graceful_shutdown) {
 			mdm_disable_irqs(mdm);
@@ -239,7 +390,7 @@ force_poff:
 		mdm_update_gpio_configs(mdm, GPIO_UPDATE_BOOTING_CONFIG);
 		break;
 	case ESOC_RESET:
-		mdm_toggle_soft_reset(mdm, false);
+		mdm_toggle_soft_reset(mdm);
 		break;
 	case ESOC_PREPARE_DEBUG:
 		/*
@@ -256,7 +407,7 @@ force_poff:
 	case ESOC_EXE_DEBUG:
 		mdm->debug = 1;
 		mdm->trig_cnt = 0;
-		mdm_toggle_soft_reset(mdm, false);
+		mdm_toggle_soft_reset(mdm);
 		/*
 		 * wait for ramdumps to be collected
 		 * then power down the mdm and switch gpios to booting
@@ -354,7 +505,7 @@ static void mdm_notify(enum esoc_notify notify, struct esoc_clink *esoc)
 		break;
 	case ESOC_IMG_XFER_RETRY:
 		mdm->init = 1;
-		mdm_toggle_soft_reset(mdm, false);
+		mdm_toggle_soft_reset(mdm);
 		break;
 	case ESOC_IMG_XFER_FAIL:
 		esoc_clink_evt_notify(ESOC_INVALID_STATE, esoc);
@@ -394,14 +545,25 @@ static void mdm_notify(enum esoc_notify notify, struct esoc_clink *esoc)
 		if (!status_down) {
 			dev_err(mdm->dev, "%s MDM2AP status did not go low\n",
 								__func__);
-			mdm_toggle_soft_reset(mdm, true);
+			gpio_direction_output(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+					      !!mdm->soft_reset_inverted);
+			/*
+			 * allow PS hold assert to be detected.
+			 * pmic requires 6ms for crash reset case.
+			 */
+			mdelay(6);
+			gpio_direction_output(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+					      !mdm->soft_reset_inverted);
 		}
 		break;
 	case ESOC_PRIMARY_REBOOT:
-		mdm_disable_irqs(mdm);
-		mdm->debug = 0;
-		mdm->ready = false;
-		mdm_cold_reset(mdm);
+		dev_dbg(mdm->dev, "Triggering mdm cold reset");
+		mdm->ready = 0;
+		gpio_direction_output(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+				!!mdm->soft_reset_inverted);
+		mdelay(300);
+		gpio_direction_output(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+				!mdm->soft_reset_inverted);
 		break;
 	};
 	return;
@@ -536,6 +698,7 @@ static int mdm_dt_parse_gpios(struct mdm_ctrl *mdm)
 {
 	int i, val, rc = 0;
 	struct device_node *node = mdm->dev->of_node;
+	enum of_gpio_flags flags = OF_GPIO_ACTIVE_LOW;
 
 	for (i = 0; i < NUM_GPIOS; i++)
 		mdm->gpios[i] = INVALID_GPIO;
@@ -546,6 +709,13 @@ static int mdm_dt_parse_gpios(struct mdm_ctrl *mdm)
 			MDM_GPIO(mdm, gpio_map[i].index) = val;
 	}
 	/* These two are special because they can be inverted. */
+	val = of_get_named_gpio_flags(node, "qcom,ap2mdm-soft-reset-gpio",
+						0, &flags);
+	if (val >= 0) {
+		MDM_GPIO(mdm, AP2MDM_SOFT_RESET) = val;
+		if (flags & OF_GPIO_ACTIVE_LOW)
+			mdm->soft_reset_inverted = 1;
+	}
 	/* Verify that the required gpios have valid values */
 	for (i = 0; i < ARRAY_SIZE(required_gpios); i++) {
 		if (MDM_GPIO(mdm, required_gpios[i]) == INVALID_GPIO) {
@@ -596,6 +766,13 @@ static int mdm_configure_ipc(struct mdm_ctrl *mdm, struct platform_device *pdev)
 			goto fatal_err;
 		}
 	}
+	if (gpio_is_valid(MDM_GPIO(mdm, AP2MDM_SOFT_RESET))) {
+		if (gpio_request(MDM_GPIO(mdm, AP2MDM_SOFT_RESET),
+					 "AP2MDM_SOFT_RESET")) {
+			dev_err(dev, "Cannot config AP2MDM_SOFT_RESET gpio\n");
+			goto fatal_err;
+		}
+	}
 	if (gpio_is_valid(MDM_GPIO(mdm, AP2MDM_WAKEUP))) {
 		if (gpio_request(MDM_GPIO(mdm, AP2MDM_WAKEUP),
 					"AP2MDM_WAKEUP")) {
@@ -621,11 +798,10 @@ static int mdm_configure_ipc(struct mdm_ctrl *mdm, struct platform_device *pdev)
 	gpio_direction_input(MDM_GPIO(mdm, MDM2AP_ERRFATAL));
 
 	/* ERR_FATAL irq. */
-	irq = gpio_to_irq(MDM_GPIO(mdm, MDM2AP_ERRFATAL));
+	irq = platform_get_irq_byname(pdev, "err_fatal_irq");
 	if (irq < 0) {
 		dev_err(dev, "bad MDM2AP_ERRFATAL IRQ resource\n");
 		goto errfatal_err;
-
 	}
 	ret = request_irq(irq, mdm_errfatal,
 			IRQF_TRIGGER_RISING , "mdm errfatal", mdm);
@@ -639,7 +815,7 @@ static int mdm_configure_ipc(struct mdm_ctrl *mdm, struct platform_device *pdev)
 
 errfatal_err:
 	 /* status irq */
-	irq = gpio_to_irq(MDM_GPIO(mdm, MDM2AP_STATUS));
+	irq = platform_get_irq_byname(pdev, "status_irq");
 	if (irq < 0) {
 		dev_err(dev, "%s: bad MDM2AP_STATUS IRQ resource, err = %d\n",
 				__func__, irq);
@@ -682,66 +858,14 @@ fatal_err:
 
 }
 
-static int mdm_pinctrl_init(struct mdm_ctrl *mdm)
-{
-	int retval = 0;
-
-	mdm->pinctrl = devm_pinctrl_get(mdm->dev);
-	if (IS_ERR_OR_NULL(mdm->pinctrl)) {
-		retval = PTR_ERR(mdm->pinctrl);
-		goto err_state_suspend;
-	}
-	mdm->gpio_state_booting =
-		pinctrl_lookup_state(mdm->pinctrl,
-				"mdm_booting");
-	if (IS_ERR_OR_NULL(mdm->gpio_state_booting)) {
-		mdm->gpio_state_running = NULL;
-		mdm->gpio_state_booting = NULL;
-	} else {
-		mdm->gpio_state_running =
-			pinctrl_lookup_state(mdm->pinctrl,
-				"mdm_running");
-		if (IS_ERR_OR_NULL(mdm->gpio_state_running)) {
-			mdm->gpio_state_booting = NULL;
-			mdm->gpio_state_running = NULL;
-		}
-	}
-	mdm->gpio_state_active =
-		pinctrl_lookup_state(mdm->pinctrl,
-				"mdm_active");
-	if (IS_ERR_OR_NULL(mdm->gpio_state_active)) {
-		retval = PTR_ERR(mdm->gpio_state_active);
-		goto err_state_active;
-	}
-	mdm->gpio_state_suspend =
-		pinctrl_lookup_state(mdm->pinctrl,
-				"mdm_suspend");
-	if (IS_ERR_OR_NULL(mdm->gpio_state_suspend)) {
-		retval = PTR_ERR(mdm->gpio_state_suspend);
-		goto err_state_suspend;
-	}
-	retval = pinctrl_select_state(mdm->pinctrl, mdm->gpio_state_active);
-	return retval;
-
-err_state_suspend:
-	mdm->gpio_state_active = NULL;
-err_state_active:
-	mdm->gpio_state_suspend = NULL;
-	mdm->gpio_state_booting = NULL;
-	mdm->gpio_state_running = NULL;
-	return retval;
-}
 static int mdm9x25_setup_hw(struct mdm_ctrl *mdm,
-					const struct mdm_ops *ops,
+					struct esoc_clink_ops const *ops,
 					struct platform_device *pdev)
 {
 	int ret;
 	struct esoc_clink *esoc;
-	const struct esoc_clink_ops *const clink_ops = ops->clink_ops;
-	const struct mdm_pon_ops *pon_ops = ops->pon_ops;
 
 	mdm->dev = &pdev->dev;
-	mdm->pon_ops = pon_ops;
 	esoc = devm_kzalloc(mdm->dev, sizeof(*esoc), GFP_KERNEL);
 	if (IS_ERR(esoc)) {
 		dev_err(mdm->dev, "cannot allocate esoc device\n");
@@ -758,18 +882,6 @@ static int mdm9x25_setup_hw(struct mdm_ctrl *mdm,
 	if (ret)
 		return ret;
 	dev_err(mdm->dev, "parsing gpio done\n");
-	ret = mdm_pon_dt_init(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "pon dt init done\n");
-	ret = mdm_pinctrl_init(mdm);
-	if (ret)
-		return ret;
-	dev_err(mdm->dev, "pinctrl init done\n");
-	ret = mdm_pon_setup(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "pon setup done\n");
 	ret = mdm_configure_ipc(mdm, pdev);
 	if (ret)
 		return ret;
@@ -777,7 +889,7 @@ static int mdm9x25_setup_hw(struct mdm_ctrl *mdm,
 	dev_err(mdm->dev, "ipc configure done\n");
 	esoc->name = MDM9x25_LABEL;
 	esoc->link_name = MDM9x25_HSIC;
-	esoc->clink_ops = clink_ops;
+	esoc->clink_ops = ops;
 	esoc->parent = mdm->dev;
 	esoc->owner = THIS_MODULE;
 	esoc->np = pdev->dev.of_node;
@@ -800,17 +912,14 @@ static int mdm9x25_setup_hw(struct mdm_ctrl *mdm,
 }
 
 static int mdm9x35_setup_hw(struct mdm_ctrl *mdm,
-					const struct mdm_ops *ops,
+					struct esoc_clink_ops const *ops,
 					struct platform_device *pdev)
 {
 	int ret;
 	struct device_node *node;
 	struct esoc_clink *esoc;
-	const struct esoc_clink_ops *const clink_ops = ops->clink_ops;
-	const struct mdm_pon_ops *pon_ops = ops->pon_ops;
 
 	mdm->dev = &pdev->dev;
-	mdm->pon_ops = pon_ops;
 	node = pdev->dev.of_node;
 	esoc = devm_kzalloc(mdm->dev, sizeof(*esoc), GFP_KERNEL);
 	if (IS_ERR(esoc)) {
@@ -828,18 +937,6 @@ static int mdm9x35_setup_hw(struct mdm_ctrl *mdm,
 	if (ret)
 		return ret;
 	dev_dbg(mdm->dev, "parsing gpio done\n");
-	ret = mdm_pon_dt_init(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "pon dt init done\n");
-	ret = mdm_pinctrl_init(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "pinctrl init done\n");
-	ret = mdm_pon_setup(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "pon setup done\n");
 	ret = mdm_configure_ipc(mdm, pdev);
 	if (ret)
 		return ret;
@@ -865,78 +962,7 @@ static int mdm9x35_setup_hw(struct mdm_ctrl *mdm,
 		esoc->link_name = MDM9x35_DUAL_LINK;
 	else
 		esoc->link_name = MDM9x35_HSIC;
-	esoc->clink_ops = clink_ops;
-	esoc->parent = mdm->dev;
-	esoc->owner = THIS_MODULE;
-	esoc->np = pdev->dev.of_node;
-	set_esoc_clink_data(esoc, mdm);
-	ret = esoc_clink_register(esoc);
-	if (ret) {
-		dev_err(mdm->dev, "esoc registration failed\n");
-		return ret;
-	}
-	dev_dbg(mdm->dev, "esoc registration done\n");
-	init_completion(&mdm->debug_done);
-	INIT_WORK(&mdm->mdm_status_work, mdm_status_fn);
-	INIT_WORK(&mdm->restart_reason_work, mdm_get_restart_reason);
-	INIT_DELAYED_WORK(&mdm->mdm2ap_status_check_work, mdm2ap_status_check);
-	mdm->get_restart_reason = false;
-	mdm->debug_fail = false;
-	mdm->esoc = esoc;
-	mdm->init = 0;
-	return 0;
-}
-
-static int mdm9x55_setup_hw(struct mdm_ctrl *mdm,
-					const struct mdm_ops *ops,
-					struct platform_device *pdev)
-{
-	int ret;
-	struct device_node *node;
-	struct esoc_clink *esoc;
-	const struct esoc_clink_ops *const clink_ops = ops->clink_ops;
-	const struct mdm_pon_ops *pon_ops = ops->pon_ops;
-
-	mdm->dev = &pdev->dev;
-	mdm->pon_ops = pon_ops;
-	node = pdev->dev.of_node;
-	esoc = devm_kzalloc(mdm->dev, sizeof(*esoc), GFP_KERNEL);
-	if (IS_ERR(esoc)) {
-		dev_err(mdm->dev, "cannot allocate esoc device\n");
-		return PTR_ERR(esoc);
-	}
-	mdm->mdm_queue = alloc_workqueue("mdm_queue", 0, 0);
-	if (!mdm->mdm_queue) {
-		dev_err(mdm->dev, "could not create mdm_queue\n");
-		return -ENOMEM;
-	}
-	mdm->irq_mask = 0;
-	mdm->ready = false;
-	ret = mdm_dt_parse_gpios(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "parsing gpio done\n");
-	ret = mdm_pon_dt_init(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "pon dt init done\n");
-	ret = mdm_pinctrl_init(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "pinctrl init done\n");
-	ret = mdm_pon_setup(mdm);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "pon setup done\n");
-	ret = mdm_configure_ipc(mdm, pdev);
-	if (ret)
-		return ret;
-	dev_dbg(mdm->dev, "ipc configure done\n");
-	esoc->name = MDM9x55_LABEL;
-	mdm->dual_interface = of_property_read_bool(node,
-						"qcom,mdm-dual-link");
-	esoc->link_name = MDM9x55_PCIE;
-	esoc->clink_ops = clink_ops;
+	esoc->clink_ops = ops;
 	esoc->parent = mdm->dev;
 	esoc->owner = THIS_MODULE;
 	esoc->np = pdev->dev.of_node;
@@ -967,19 +993,11 @@ static struct esoc_clink_ops mdm_cops = {
 static struct mdm_ops mdm9x25_ops = {
 	.clink_ops = &mdm_cops,
 	.config_hw = mdm9x25_setup_hw,
-	.pon_ops = &mdm9x25_pon_ops,
 };
 
 static struct mdm_ops mdm9x35_ops = {
 	.clink_ops = &mdm_cops,
 	.config_hw = mdm9x35_setup_hw,
-	.pon_ops = &mdm9x35_pon_ops,
-};
-
-static struct mdm_ops mdm9x55_ops = {
-	.clink_ops = &mdm_cops,
-	.config_hw = mdm9x55_setup_hw,
-	.pon_ops = &mdm9x55_pon_ops,
 };
 
 static const struct of_device_id mdm_dt_match[] = {
@@ -987,8 +1005,6 @@ static const struct of_device_id mdm_dt_match[] = {
 		.data = &mdm9x25_ops, },
 	{ .compatible = "qcom,ext-mdm9x35",
 		.data = &mdm9x35_ops, },
-	{ .compatible = "qcom,ext-mdm9x55",
-		.data = &mdm9x55_ops, },
 	{},
 };
 MODULE_DEVICE_TABLE(of, mdm_dt_match);
@@ -1007,7 +1023,7 @@ static int mdm_probe(struct platform_device *pdev)
 	mdm = devm_kzalloc(&pdev->dev, sizeof(*mdm), GFP_KERNEL);
 	if (IS_ERR(mdm))
 		return PTR_ERR(mdm);
-	return mdm_ops->config_hw(mdm, mdm_ops, pdev);
+	return mdm_ops->config_hw(mdm, mdm_ops->clink_ops, pdev);
 }
 
 static struct platform_driver mdm_driver = {

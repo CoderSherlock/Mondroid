@@ -62,8 +62,7 @@ static struct page *get_mapping_page(struct super_block *sb, pgoff_t index,
 		page = read_cache_page(mapping, index, filler, sb);
 	else {
 		page = find_or_create_page(mapping, index, GFP_NOFS);
-		if (page)
-			unlock_page(page);
+		unlock_page(page);
 	}
 	return page;
 }

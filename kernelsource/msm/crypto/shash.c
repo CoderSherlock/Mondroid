@@ -67,8 +67,7 @@ EXPORT_SYMBOL_GPL(crypto_shash_setkey);
 static inline unsigned int shash_align_buffer_size(unsigned len,
 						   unsigned long mask)
 {
-	typedef u8 __attribute__ ((aligned)) u8_aligned;
-	return len + (mask & ~(__alignof__(u8_aligned) - 1));
+	return len + (mask & ~(__alignof__(u8 __attribute__ ((aligned))) - 1));
 }
 
 static int shash_update_unaligned(struct shash_desc *desc, const u8 *data,
@@ -354,10 +353,9 @@ int crypto_init_shash_ops_async(struct crypto_tfm *tfm)
 	crt->final = shash_async_final;
 	crt->finup = shash_async_finup;
 	crt->digest = shash_async_digest;
-	crt->setkey = shash_async_setkey;
 
-	crt->has_setkey = alg->setkey != shash_no_setkey;
-
+	if (alg->setkey)
+		crt->setkey = shash_async_setkey;
 	if (alg->export)
 		crt->export = shash_async_export;
 	if (alg->import)

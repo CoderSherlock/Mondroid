@@ -21,7 +21,7 @@
 #include <linux/mutex.h>
 #include <linux/rwsem.h>
 #include <net/cnss.h>
-#include "cnss_common.h"
+#include <net/cnss_common.h>
 #include <net/cfg80211.h>
 
 enum cnss_dev_bus_type {
@@ -45,19 +45,20 @@ static struct cnss_dfs_nol_info {
 
 int cnss_set_wlan_unsafe_channel(u16 *unsafe_ch_list, u16 ch_count)
 {
+	struct cnss_unsafe_channel_list *unsafe_list;
+
 	mutex_lock(&unsafe_channel_list_lock);
-	if ((!unsafe_ch_list) || (ch_count > CNSS_MAX_CH_NUM)) {
+	if ((!unsafe_ch_list) || (!ch_count) || (ch_count > CNSS_MAX_CH_NUM)) {
 		mutex_unlock(&unsafe_channel_list_lock);
 		return -EINVAL;
 	}
 
+	unsafe_list = &unsafe_channel_list;
 	unsafe_channel_list.unsafe_ch_count = ch_count;
 
-	if (ch_count != 0) {
-		memcpy(
-			(char *)unsafe_channel_list.unsafe_ch_list,
-			(char *)unsafe_ch_list, ch_count * sizeof(u16));
-	}
+	memcpy(
+		(char *)unsafe_list->unsafe_ch_list,
+		(char *)unsafe_ch_list, ch_count * sizeof(u16));
 	mutex_unlock(&unsafe_channel_list_lock);
 
 	return 0;
@@ -68,22 +69,25 @@ int cnss_get_wlan_unsafe_channel(
 			u16 *unsafe_ch_list,
 			u16 *ch_count, u16 buf_len)
 {
+	struct cnss_unsafe_channel_list *unsafe_list;
+
 	mutex_lock(&unsafe_channel_list_lock);
 	if (!unsafe_ch_list || !ch_count) {
 		mutex_unlock(&unsafe_channel_list_lock);
 		return -EINVAL;
 	}
 
-	if (buf_len < (unsafe_channel_list.unsafe_ch_count * sizeof(u16))) {
+	unsafe_list = &unsafe_channel_list;
+	if (buf_len < (unsafe_list->unsafe_ch_count * sizeof(u16))) {
 		mutex_unlock(&unsafe_channel_list_lock);
 		return -ENOMEM;
 	}
 
-	*ch_count = unsafe_channel_list.unsafe_ch_count;
+	*ch_count = unsafe_list->unsafe_ch_count;
 	memcpy(
 		(char *)unsafe_ch_list,
-		(char *)unsafe_channel_list.unsafe_ch_list,
-		unsafe_channel_list.unsafe_ch_count * sizeof(u16));
+		(char *)unsafe_list->unsafe_ch_list,
+		unsafe_list->unsafe_ch_count * sizeof(u16));
 	mutex_unlock(&unsafe_channel_list_lock);
 
 	return 0;
@@ -240,10 +244,7 @@ EXPORT_SYMBOL(cnss_dump_stack);
 
 enum cnss_dev_bus_type cnss_get_dev_bus_type(struct device *dev)
 {
-	if (!dev)
-		return CNSS_BUS_NONE;
-
-	if (!dev->bus)
+	if (!dev || !dev->bus)
 		return CNSS_BUS_NONE;
 
 	if (memcmp(dev->bus->name, "sdio", 4) == 0)
@@ -254,169 +255,122 @@ enum cnss_dev_bus_type cnss_get_dev_bus_type(struct device *dev)
 		return CNSS_BUS_NONE;
 }
 
+#ifdef CONFIG_CNSS_SDIO
 int cnss_common_request_bus_bandwidth(struct device *dev, int bandwidth)
 {
-	int ret;
-
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_SDIO:
-		ret = cnss_sdio_request_bus_bandwidth(bandwidth);
-		break;
-	case CNSS_BUS_PCI:
-		ret = cnss_pci_request_bus_bandwidth(bandwidth);
-		break;
-	default:
-		pr_debug("%s: Invalid device type\n", __func__);
-		ret = -EINVAL;
-		break;
-	}
-
-	return ret;
+	if (CNSS_BUS_SDIO == cnss_get_dev_bus_type(dev))
+		return cnss_sdio_request_bus_bandwidth(bandwidth);
+	else
+		return 0;
 }
 EXPORT_SYMBOL(cnss_common_request_bus_bandwidth);
 
 void *cnss_common_get_virt_ramdump_mem(struct device *dev, unsigned long *size)
 {
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_SDIO:
+	if (CNSS_BUS_SDIO == cnss_get_dev_bus_type(dev))
 		return cnss_sdio_get_virt_ramdump_mem(size);
-	case CNSS_BUS_PCI:
-		return cnss_pci_get_virt_ramdump_mem(size);
-	default:
-		pr_debug("%s: Invalid device type\n", __func__);
+	else
 		return NULL;
-	}
 }
 EXPORT_SYMBOL(cnss_common_get_virt_ramdump_mem);
 
 void cnss_common_device_self_recovery(struct device *dev)
 {
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_SDIO:
+	if (CNSS_BUS_SDIO == cnss_get_dev_bus_type(dev))
 		cnss_sdio_device_self_recovery();
-		break;
-	case CNSS_BUS_PCI:
-		cnss_pci_device_self_recovery();
-		break;
-	default:
-		pr_debug("%s: Invalid device type\n", __func__);
-		break;
-	}
 }
 EXPORT_SYMBOL(cnss_common_device_self_recovery);
 
 void cnss_common_schedule_recovery_work(struct device *dev)
 {
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_SDIO:
+	if (CNSS_BUS_SDIO == cnss_get_dev_bus_type(dev))
 		cnss_sdio_schedule_recovery_work();
-		break;
-	case CNSS_BUS_PCI:
-		cnss_pci_schedule_recovery_work();
-		break;
-	default:
-		pr_debug("%s: Invalid device type\n", __func__);
-		break;
-	}
 }
 EXPORT_SYMBOL(cnss_common_schedule_recovery_work);
 
 void cnss_common_device_crashed(struct device *dev)
 {
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_SDIO:
+	if (CNSS_BUS_SDIO == cnss_get_dev_bus_type(dev))
 		cnss_sdio_device_crashed();
-		break;
-	case CNSS_BUS_PCI:
-		cnss_pci_device_crashed();
-		break;
-	default:
-		pr_debug("%s: Invalid device type\n", __func__);
-		break;
-	}
 }
 EXPORT_SYMBOL(cnss_common_device_crashed);
 
 u8 *cnss_common_get_wlan_mac_address(struct device *dev, uint32_t *num)
 {
-	u8 *ret;
-
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_SDIO:
-		ret = cnss_sdio_get_wlan_mac_address(num);
-		break;
-	case CNSS_BUS_PCI:
-		ret = cnss_pci_get_wlan_mac_address(num);
-		break;
-	default:
-		pr_debug("%s: Invalid device type\n", __func__);
-		ret = NULL;
-		break;
-	}
-	return ret;
+	if (CNSS_BUS_SDIO == cnss_get_dev_bus_type(dev))
+		return cnss_sdio_get_wlan_mac_address(num);
+	else
+		return NULL;
 }
 EXPORT_SYMBOL(cnss_common_get_wlan_mac_address);
 
 int cnss_common_set_wlan_mac_address(
 		struct device *dev, const u8 *in, uint32_t len)
 {
-	int ret;
-
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_SDIO:
-		ret = cnss_sdio_set_wlan_mac_address(in, len);
-		break;
-	case CNSS_BUS_PCI:
-		ret = cnss_pcie_set_wlan_mac_address(in, len);
-		break;
-	default:
-		pr_debug("%s: Invalid device type\n", __func__);
-		ret = -EINVAL;
-		break;
-	}
-
-	return ret;
+	if (CNSS_BUS_SDIO == cnss_get_dev_bus_type(dev))
+		return cnss_sdio_set_wlan_mac_address(in, len);
+	else
+		return -EINVAL;
 }
 EXPORT_SYMBOL(cnss_common_set_wlan_mac_address);
+#endif
 
-int cnss_power_up(struct device *dev)
+#ifdef CONFIG_CNSS_PCI
+int cnss_common_request_bus_bandwidth(struct device *dev, int bandwidth)
 {
-	int ret;
-
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_PCI:
-		ret = cnss_pcie_power_up(dev);
-		break;
-	case CNSS_BUS_SDIO:
-		ret = cnss_sdio_power_up(dev);
-		break;
-	default:
-		pr_err("%s: Invalid Bus Type\n", __func__);
-		ret = -EINVAL;
-		break;
-	}
-
-	return ret;
+	if (CNSS_BUS_PCI == cnss_get_dev_bus_type(dev))
+		return cnss_pci_request_bus_bandwidth(bandwidth);
+	else
+		return 0;
 }
-EXPORT_SYMBOL(cnss_power_up);
+EXPORT_SYMBOL(cnss_common_request_bus_bandwidth);
 
-int cnss_power_down(struct device *dev)
+void *cnss_common_get_virt_ramdump_mem(struct device *dev, unsigned long *size)
 {
-	int ret;
-
-	switch (cnss_get_dev_bus_type(dev)) {
-	case CNSS_BUS_PCI:
-		ret = cnss_pcie_power_down(dev);
-		break;
-	case CNSS_BUS_SDIO:
-		ret = cnss_sdio_power_down(dev);
-		break;
-	default:
-		pr_err("%s: Invalid Bus Type\n", __func__);
-		ret = -EINVAL;
-		break;
-	}
-
-	return ret;
+	if (CNSS_BUS_PCI == cnss_get_dev_bus_type(dev))
+		return cnss_pci_get_virt_ramdump_mem(size);
+	else
+		return NULL;
 }
-EXPORT_SYMBOL(cnss_power_down);
+EXPORT_SYMBOL(cnss_common_get_virt_ramdump_mem);
+
+void cnss_common_device_self_recovery(struct device *dev)
+{
+	if (CNSS_BUS_PCI == cnss_get_dev_bus_type(dev))
+		cnss_pci_device_self_recovery();
+}
+EXPORT_SYMBOL(cnss_common_device_self_recovery);
+
+void cnss_common_schedule_recovery_work(struct device *dev)
+{
+	if (CNSS_BUS_PCI == cnss_get_dev_bus_type(dev))
+		cnss_pci_schedule_recovery_work();
+}
+EXPORT_SYMBOL(cnss_common_schedule_recovery_work);
+
+void cnss_common_device_crashed(struct device *dev)
+{
+	if (CNSS_BUS_PCI == cnss_get_dev_bus_type(dev))
+		cnss_pci_device_crashed();
+}
+EXPORT_SYMBOL(cnss_common_device_crashed);
+
+u8 *cnss_common_get_wlan_mac_address(struct device *dev, uint32_t *num)
+{
+	if (CNSS_BUS_PCI == cnss_get_dev_bus_type(dev))
+		return cnss_pci_get_wlan_mac_address(num);
+	else
+		return NULL;
+}
+EXPORT_SYMBOL(cnss_common_get_wlan_mac_address);
+
+int cnss_common_set_wlan_mac_address(
+		struct device *dev, const u8 *in, uint32_t len)
+{
+	if (CNSS_BUS_PCI == cnss_get_dev_bus_type(dev))
+		return cnss_pcie_set_wlan_mac_address(in, len);
+	else
+		return -EINVAL;
+}
+EXPORT_SYMBOL(cnss_common_set_wlan_mac_address);
+#endif

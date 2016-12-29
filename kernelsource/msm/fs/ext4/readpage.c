@@ -62,16 +62,12 @@ static void completion_pages(struct work_struct *work)
 	bio_for_each_segment_all(bv, bio, i) {
 		struct page *page = bv->bv_page;
 
-		if (bio->bi_crypt_ctx.bc_flags & BC_ENCRYPT_FL) {
+		int ret = ext4_decrypt(page);
+		if (ret) {
+			WARN_ON_ONCE(1);
+			SetPageError(page);
+		} else
 			SetPageUptodate(page);
-		} else {
-			int ret = ext4_decrypt(page);
-			if (ret) {
-				WARN_ON_ONCE(1);
-				SetPageError(page);
-			} else
-				SetPageUptodate(page);
-		}
 		unlock_page(page);
 	}
 	ext4_release_crypto_ctx(ctx);
@@ -275,9 +271,6 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		 */
 		if (bio && (last_block_in_bio != blocks[0] - 1)) {
 		submit_and_realloc:
-#ifdef CONFIG_EXT4_FS_ENCRYPTION
-			ext4_set_bio_crypt_context(inode, bio);
-#endif
 			submit_bio(READ, bio);
 			bio = NULL;
 		}
@@ -298,7 +291,7 @@ int ext4_mpage_readpages(struct address_space *mapping,
 				goto set_error_page;
 			}
 			bio->bi_bdev = bdev;
-			bio->bi_iter.bi_sector = blocks[0] << (blkbits - 9);
+			bio->bi_sector = blocks[0] << (blkbits - 9);
 			bio->bi_end_io = mpage_end_io;
 			bio->bi_private = ctx;
 		}
@@ -310,9 +303,6 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		if (((map.m_flags & EXT4_MAP_BOUNDARY) &&
 		     (relative_block == map.m_len)) ||
 		    (first_hole != blocks_per_page)) {
-#ifdef CONFIG_EXT4_FS_ENCRYPTION
-			ext4_set_bio_crypt_context(inode, bio);
-#endif
 			submit_bio(READ, bio);
 			bio = NULL;
 		} else
@@ -320,9 +310,6 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		goto next_page;
 	confused:
 		if (bio) {
-#ifdef CONFIG_EXT4_FS_ENCRYPTION
-			ext4_set_bio_crypt_context(inode, bio);
-#endif
 			submit_bio(READ, bio);
 			bio = NULL;
 		}
@@ -335,11 +322,7 @@ int ext4_mpage_readpages(struct address_space *mapping,
 			page_cache_release(page);
 	}
 	BUG_ON(pages && !list_empty(pages));
-	if (bio) {
-#ifdef CONFIG_EXT4_FS_ENCRYPTION
-		ext4_set_bio_crypt_context(inode, bio);
-#endif
+	if (bio)
 		submit_bio(READ, bio);
-	}
 	return 0;
 }

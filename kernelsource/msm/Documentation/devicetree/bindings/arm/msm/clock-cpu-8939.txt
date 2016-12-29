@@ -1,19 +1,19 @@
-Qualcomm Technology Inc MSM8939 CPU clock tree
+Qualcomm MSM8939 CPU clock tree
 
-clock-cpu-8939 is a device that represents the MSM8939 or MSM8952 CPU
+clock-cpu-8939 is a device that represents the MSM8939 or MSMTellurium CPU
 subsystem clock tree. It lists the various power supplies that need to be
 scaled when the clocks are scaled and also other HW specific parameters like
 fmax tables, avs settings table, etc.
 
 Required properties:
 - compatible:		Must be one of "qcom,clock-cpu-8939" or
-			"qcom,cpu-clock-8952", "qcom,cpu-clock-8917".
+			"qcom,cpu-clock-tellurium"
 - reg:			Pairs of physical base addresses and region sizes of
 			memory mapped registers.
 - reg-names:		Names of the bases for the above registers. Expected
 			bases are:
 			"apcs-c0-rcg-base", "apcs-c1-rcg-base",
-			"apcs-cci-rcg-base", "efuse", "efuse1", "efuse2"
+			"apcs-cci-rcg-base", "efuse"
 - vdd-c0-supply:	The regulator powering the little cluster
 - vdd-c1-supply:	The regulator powering the big cluster
 - vdd-cci-supply:	The regulator powering the CCI cluster
@@ -30,11 +30,6 @@ Required properties:
 			the right table is picked from multiple possible tables.
 			'ZZZ' can be c1, c0 or cci depending on whether the table
 			is for the big cluster, little cluster or cci.
-Optional properties:
-- qcom,cpu-pcnoc-vote:  Boolean to indicate cpu clocks would need to keep
-			active pcnoc vote.
-- qcom,num-cluster:     Boolean to indicate cpu clock code is used for single
-			cluster.
 Example:
 	clock_cpu: qcom,cpu-clock-8939@f9015000 {
 		compatible = "qcom,cpu-clock-8939";
@@ -45,8 +40,7 @@ Example:
 		      <0xf900f000 0x1000>,
 		      <0xf9112000 0x1000>;
 		reg-names = "apcs-c0-rcg-base", "apcs-c1-rcg-base",
-			     "apcs-cci-rcg-base", "efuse", "efuse1",
-				"efuse2";
+			     "apcs-cci-rcg-base", "efuse";
                 vdd-c0-supply = <&apc_vreg_corner>;
 		vdd-c1-supply = <&apc_vreg_corner>;
 		vdd-cci-supply = <&apc_vreg_corner>;

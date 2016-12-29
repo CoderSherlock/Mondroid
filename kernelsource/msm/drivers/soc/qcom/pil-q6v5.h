@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -32,10 +32,6 @@ struct q6v5_data {
 	struct clk *reg_clk;	   /* CPU access registers */
 	struct clk *gpll0_mss_clk; /* GPLL0 to MSS connection */
 	struct clk *rom_clk;	   /* Boot ROM */
-	struct clk *snoc_axi_clk;
-	struct clk *mnoc_axi_clk;
-	struct clk *qdss_clk;
-	struct clk *qpic_clk;
 	void __iomem *axi_halt_base; /* Halt base of q6, mss,
 					nc are in same 4K page */
 	void __iomem *axi_halt_q6;
@@ -49,26 +45,17 @@ struct q6v5_data {
 	bool is_booted;
 	struct pil_desc desc;
 	bool self_auth;
-	phys_addr_t mba_dp_phys;
-	void *mba_dp_virt;
-	size_t mba_dp_size;
-	size_t dp_size;
+	phys_addr_t mba_phys;
+	void *mba_virt;
+	size_t mba_size;
 	bool qdsp6v55;
 	bool qdsp6v5_2_0;
 	bool qdsp6v56;
 	bool qdsp6v56_1_3;
-	bool qdsp6v56_1_5;
-	bool qdsp6v56_1_8;
-	bool qdsp6v56_1_8_inrush_current;
-	bool qdsp6v56_1_10;
-	bool qdsp6v61_1_1;
-	bool qdsp6v62_1_2;
 	bool non_elf_image;
 	bool restart_reg_sec;
 	bool override_acc;
-	int override_acc_1;
 	bool ahb_clk_vote;
-	bool mx_spike_wa;
 };
 
 int pil_q6v5_make_proxy_votes(struct pil_desc *pil);
@@ -76,7 +63,6 @@ void pil_q6v5_remove_proxy_votes(struct pil_desc *pil);
 void pil_q6v5_halt_axi_port(struct pil_desc *pil, void __iomem *halt_base);
 void pil_q6v5_shutdown(struct pil_desc *pil);
 int pil_q6v5_reset(struct pil_desc *pil);
-void assert_clamps(struct pil_desc *pil);
 struct q6v5_data *pil_q6v5_init(struct platform_device *pdev);
 
 #endif

@@ -192,8 +192,7 @@ void __init setup_memory(void)
 		start_pfn = memblock_region_memory_base_pfn(reg);
 		end_pfn = memblock_region_memory_end_pfn(reg);
 		memblock_set_node(start_pfn << PAGE_SHIFT,
-				  (end_pfn - start_pfn) << PAGE_SHIFT,
-				  &memblock.memory, 0);
+					(end_pfn - start_pfn) << PAGE_SHIFT, 0);
 	}
 
 	/* free bootmem is whole main memory */
@@ -228,13 +227,13 @@ void __init setup_memory(void)
 #ifdef CONFIG_BLK_DEV_INITRD
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
-	free_reserved_area((void *)start, (void *)end, -1, "initrd");
+	free_reserved_area(start, end, 0, "initrd");
 }
 #endif
 
 void free_initmem(void)
 {
-	free_initmem_default(-1);
+	free_initmem_default(0);
 }
 
 void __init mem_init(void)
@@ -369,7 +368,7 @@ asmlinkage void __init mmu_init(void)
 	if (initrd_start) {
 		unsigned long size;
 		size = initrd_end - initrd_start;
-		memblock_reserve(__virt_to_phys(initrd_start), size);
+		memblock_reserve(virt_to_phys(initrd_start), size);
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
 

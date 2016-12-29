@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -16,6 +16,7 @@
 #include <media/msm_jpeg.h>
 #include "msm_jpeg_hw_reg.h"
 #include <linux/ion.h>
+#include <linux/msm_iommu_domains.h>
 
 struct msm_jpeg_hw_buf {
 	struct msm_jpeg_buf vbuf;
@@ -26,7 +27,7 @@ struct msm_jpeg_hw_buf {
 	uint32_t cbcr_buffer_addr;
 	uint32_t cbcr_len;
 	uint32_t num_of_mcu_rows;
-	int ion_fd;
+	struct ion_handle *handle;
 	uint32_t pln2_addr;
 	uint32_t pln2_len;
 };
@@ -114,13 +115,6 @@ void msm_jpegdma_hw_we_buffer_update(struct msm_jpeg_hw_buf *p_input,
 
 
 void msm_jpeg_hw_we_buffer_cfg(uint8_t is_realtime);
-
-void msm_jpeg_hw_fe_mmu_prefetch(struct msm_jpeg_hw_buf *buf, void *,
-	uint8_t decode_flag);
-void msm_jpeg_hw_we_mmu_prefetch(struct msm_jpeg_hw_buf *buf, void *,
-	uint8_t decode_flag);
-void msm_jpegdma_hw_fe_mmu_prefetch(struct msm_jpeg_hw_buf *buf, void *);
-void msm_jpegdma_hw_we_mmu_prefetch(struct msm_jpeg_hw_buf *buf, void *);
 
 void msm_jpeg_hw_fe_start(void *);
 void msm_jpeg_hw_clk_cfg(void);

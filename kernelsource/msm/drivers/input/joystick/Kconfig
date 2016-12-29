@@ -196,7 +196,6 @@ config JOYSTICK_TWIDJOY
 config JOYSTICK_ZHENHUA
 	tristate "5-byte Zhenhua RC transmitter"
 	select SERIO
-	select BITREVERSE
 	help
 	  Say Y here if you have a Zhen Hua PPM-4CH transmitter which is
 	  supplied with a ready to fly micro electric indoor helicopters
@@ -329,5 +328,4 @@ config JOYSTICK_MAPLE
 
 	  To compile this as a module choose M here: the module will be called
 	  maplecontrol.
-
 endif

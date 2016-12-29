@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -50,23 +50,40 @@ struct debug_bus {
 	u32 test_id;
 };
 
-struct vbif_debug_bus {
-	u32 disable_bus_addr;
-	u32 block_bus_addr;
-	u32 bit_offset;
-	u32 block_cnt;
-	u32 test_pnt_cnt;
-};
-
 #define MDSS_XLOG(...) mdss_xlog(__func__, __LINE__, MDSS_XLOG_DEFAULT, \
 		##__VA_ARGS__, DATA_LIMITER)
 
+/*
+ * MDSS_XLOG_TOUT_HANDLER:
+ * If xlog is enabled, will dump registers requested and the xlog buffer.
+ * This cannot be called from interrupt context.
+ */
 #define MDSS_XLOG_TOUT_HANDLER(...)	\
-	mdss_xlog_tout_handler_default(false, __func__, ##__VA_ARGS__, \
+	mdss_xlog_tout_handler_default(false, false, __func__, ##__VA_ARGS__, \
 		XLOG_TOUT_DATA_LIMITER)
 
+/*
+ * MDSS_XLOG_TOUT_HANDLER_WQ:
+ * If xlog is enabled, will dump the registers requested and the xlog buffer
+ * from a work item.
+ * This can be called from interrupt context.
+ */
 #define MDSS_XLOG_TOUT_HANDLER_WQ(...)	\
-	mdss_xlog_tout_handler_default(true, __func__, ##__VA_ARGS__, \
+	mdss_xlog_tout_handler_default(false, true, __func__, ##__VA_ARGS__, \
+		XLOG_TOUT_DATA_LIMITER)
+
+/*
+ * MDSS_XLOG_TOUT_HANDLER_FATAL_DUMP:
+ * Will enforce a dump of the registers requested
+ * (and debug bus, if requested by the caller).
+ * If xlog is enabled: will dump the registers, bus and xlog buffer.
+ * If xlog is disabled: will dump the registers and debug bus.
+ * This must be used only in fatal error conditions, since the
+ * dump of the registers (and debug bus, if requested) will be
+ * forced to happen during the call, even when xlog is disabled.
+ */
+#define MDSS_XLOG_TOUT_HANDLER_FATAL_DUMP(...)	\
+	mdss_xlog_tout_handler_default(true, false, __func__, ##__VA_ARGS__, \
 		XLOG_TOUT_DATA_LIMITER)
 
 #define MDSS_XLOG_DBG(...) mdss_xlog(__func__, __LINE__, MDSS_XLOG_DBG, \
@@ -97,7 +114,6 @@ struct mdss_debug_base {
 	void __iomem *base;
 	size_t off;
 	size_t cnt;
-	u8 cmd_data_type;
 	size_t max_offset;
 	char *buf;
 	size_t buf_len;
@@ -107,8 +123,6 @@ struct mdss_debug_base {
 struct mdss_debug_data {
 	struct dentry *root;
 	struct dentry *perf;
-	struct dentry *bordercolor;
-	struct dentry *postproc;
 	struct list_head base_list;
 };
 
@@ -122,7 +136,6 @@ struct range_dump_node {
 	u32 *reg_dump; /* address for the mem dump */
 	char range_name[40]; /* name of this range */
 	struct dump_offset offset; /* range to dump */
-	uint32_t xin_id; /* client xin id */
 };
 
 #define DEFINE_MDSS_DEBUGFS_SEQ_FOPS(__prefix)				\
@@ -144,32 +157,23 @@ int mdss_debug_register_base(const char *name, void __iomem *base,
 	size_t max_offset, struct mdss_debug_base **dbg_blk);
 void mdss_debug_register_dump_range(struct platform_device *pdev,
 	struct mdss_debug_base *blk_base, const char *ranges_prop,
-	const char *name_prop, const char *xin_prop);
+	const char *name_prop);
 int panel_debug_register_base(const char *name, void __iomem *base,
 				    size_t max_offset);
-int mdss_misr_set(struct mdss_data_type *mdata,
-			struct mdp_misr *req,
+int mdss_misr_set(struct mdss_data_type *mdata, struct mdp_misr *req,
 			struct mdss_mdp_ctl *ctl);
-int mdss_misr_get(struct mdss_data_type *mdata,
-			struct mdp_misr *resp,
-			struct mdss_mdp_ctl *ctl,
-			bool is_video_mode);
-void mdss_misr_disable(struct mdss_data_type *mdata,
-			struct mdp_misr *req,
+int mdss_misr_get(struct mdss_data_type *mdata, struct mdp_misr *resp,
 			struct mdss_mdp_ctl *ctl);
-void mdss_misr_crc_collect(struct mdss_data_type *mdata, int block_id,
-	bool is_video_mode);
+void mdss_misr_crc_collect(struct mdss_data_type *mdata, int block_id);
 
 int mdss_create_xlog_debug(struct mdss_debug_data *mdd);
 void mdss_xlog(const char *name, int line, int flag, ...);
-void mdss_xlog_tout_handler_default(bool queue, const char *name, ...);
-u32 get_dump_range(struct dump_offset *range_node, size_t max_offset);
-void mdss_dump_reg(const char *dump_name, u32 reg_dump_flag, char *addr,
-	int len, u32 **dump_mem, bool from_isr);
-void mdss_mdp_debug_mid(u32 mid);
+void mdss_xlog_tout_handler_default(bool enforce_dump,
+	bool queue, const char *name, ...);
+int mdss_xlog_tout_handler_iommu(struct iommu_domain *domain,
+	struct device *dev, unsigned long iova, int flags, void *token);
 #else
 struct mdss_debug_base;
-struct dump_offset;
 
 static inline int mdss_debugfs_init(struct mdss_data_type *mdata) { return 0; }
 static inline int mdss_debugfs_remove(struct mdss_data_type *mdata)
@@ -180,7 +184,7 @@ static inline int mdss_debug_register_base(const char *name, void __iomem *base,
 	size_t max_offset, struct mdss_debug_base **dbg_blk) { return 0; }
 static inline void mdss_debug_register_dump_range(struct platform_device *pdev,
 	struct mdss_debug_base *blk_base, const char *ranges_prop,
-	const char *name_prop, const char *xin_prop) { }
+	const char *name_prop) { }
 static inline int panel_debug_register_base(const char *name,
 					void __iomem *base,
 					size_t max_offset)
@@ -191,32 +195,22 @@ static inline int mdss_misr_set(struct mdss_data_type *mdata,
 { return 0; }
 static inline int mdss_misr_get(struct mdss_data_type *mdata,
 					struct mdp_misr *resp,
-					struct mdss_mdp_ctl *ctl,
-					bool is_video_mode)
-{ return 0; }
-static inline void mdss_misr_disable(struct mdss_data_type *mdata,
-					struct mdp_misr *req,
 					struct mdss_mdp_ctl *ctl)
-{ return; }
-
+{ return 0; }
 static inline void mdss_misr_crc_collect(struct mdss_data_type *mdata,
-					int block_id, bool is_video_mode) { }
+						int block_id) { }
 
 static inline int create_xlog_debug(struct mdss_data_type *mdata) { return 0; }
 static inline void mdss_xlog_dump(void) { }
 static inline void mdss_xlog(const char *name, int line, int flag, ...) { }
 
 static inline void mdss_dsi_debug_check_te(struct mdss_panel_data *pdata) { }
-static inline void mdss_xlog_tout_handler_default(bool queue,
-	const char *name, ...) { }
-u32 get_dump_range(struct dump_offset *range_node, size_t max_offset)
-	{ return 0; }
-void mdss_dump_reg(const char *dump_name, u32 reg_dump_flag, char *addr,
-	int len, u32 **dump_mem, bool from_isr) { }
-void mdss_mdp_debug_mid(u32 mid) { }
+static inline void mdss_xlog_tout_handler_default(bool enforce_dump,
+	bool queue, const char *name, ...) { }
+static inline int  mdss_xlog_tout_handler_iommu(struct iommu_domain *domain,
+	struct device *dev, unsigned long iova, int flags, void *token)
+{ return 0; }
 #endif
-
-int mdss_dump_misr_data(char **buf, u32 size);
 
 static inline int mdss_debug_register_io(const char *name,
 		struct dss_io_data *io_data, struct mdss_debug_base **dbg_blk)

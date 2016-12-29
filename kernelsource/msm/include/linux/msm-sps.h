@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,7 +24,7 @@
 
 /* Returns 36bits physical address from 32bit address &
  * flags word */
-#define DESC_FULL_ADDR(flags, addr) ((((phys_addr_t)flags & 0xF) << 32) | addr)
+#define DESC_FULL_ADDR(flags, addr) (((flags & 0xF) << 32) | addr)
 
 /* Returns flags word with flags and 4bit upper address
  * from flags and 36bit physical address */
@@ -57,7 +57,7 @@
 #define SPS_IRQ_INVALID          0
 
 /* Invalid address value */
-#define SPS_ADDR_INVALID      ((unsigned long)0xDEADBEEF)
+#define SPS_ADDR_INVALID      ((unsigned long)0)
 
 /* Invalid peripheral device enumeration class */
 #define SPS_CLASS_INVALID     ((unsigned long)-1)
@@ -109,14 +109,8 @@
 #define SPS_BAM_NO_LOCAL_CLK_GATING (1UL << 5)
 /* Don't enable writeback cancel*/
 #define SPS_BAM_CANCEL_WB           (1UL << 6)
-/* BAM uses SMMU */
-#define SPS_BAM_SMMU_EN             (1UL << 9)
 /* Confirm resource status before access BAM*/
 #define SPS_BAM_RES_CONFIRM         (1UL << 7)
-/* Hold memory for BAM DMUX */
-#define SPS_BAM_HOLD_MEM            (1UL << 8)
-/* Use cached write pointer */
-#define SPS_BAM_CACHED_WP           (1UL << 10)
 
 /* BAM device management flags */
 
@@ -459,9 +453,6 @@ struct sps_bam_props {
 	u32 restricted_pipes;
 	u32 ee;
 
-	/* Log Level property */
-	u32 ipc_loglevel;
-
 	/* BAM MTI interrupt generation */
 
 	u32 irq_gen_addr;
@@ -489,7 +480,6 @@ struct sps_bam_props {
 struct sps_mem_buffer {
 	void *base;
 	phys_addr_t phys_base;
-	unsigned long iova;
 	u32 size;
 	u32 min_size;
 };
@@ -533,10 +523,8 @@ struct sps_mem_buffer {
  */
 struct sps_connect {
 	unsigned long source;
-	unsigned long source_iova;
 	u32 src_pipe_index;
 	unsigned long destination;
-	unsigned long dest_iova;
 	u32 dest_pipe_index;
 
 	enum sps_mode mode;
@@ -1407,30 +1395,6 @@ int sps_pipe_pending_desc(unsigned long dev, u32 pipe, bool *pending);
  * Return: 0 on success, negative value on error
  */
 int sps_bam_process_irq(unsigned long dev);
-
-/*
- * sps_get_bam_addr - get address info of a BAM.
- * @dev:	BAM device handle
- * @base:	beginning address
- * @size:	address range size
- *
- * This function returns the address info of a BAM.
- *
- * Return: 0 on success, negative value on error
- */
-int sps_get_bam_addr(unsigned long dev, phys_addr_t *base,
-				u32 *size);
-
-/*
- * sps_pipe_inject_zlt - inject a ZLT with EOT.
- * @dev:	BAM device handle
- * @pipe_index:	pipe index
- *
- * This function injects a ZLT with EOT for a pipe of a BAM.
- *
- * Return: 0 on success, negative value on error
- */
-int sps_pipe_inject_zlt(unsigned long dev, u32 pipe_index);
 #else
 static inline int sps_register_bam_device(const struct sps_bam_props
 			*bam_props, unsigned long *dev_handle)
@@ -1616,17 +1580,6 @@ static inline int sps_pipe_pending_desc(unsigned long dev, u32 pipe,
 }
 
 static inline int sps_bam_process_irq(unsigned long dev)
-{
-	return -EPERM;
-}
-
-static inline int sps_get_bam_addr(unsigned long dev, phys_addr_t *base,
-				u32 *size);
-{
-	return -EPERM;
-}
-
-static inline int sps_pipe_inject_zlt(unsigned long dev, u32 pipe_index)
 {
 	return -EPERM;
 }

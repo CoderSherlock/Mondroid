@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -167,7 +167,6 @@ static struct restart_notifier_block restart_notifiers[] = {
 	{SMEM_DSPS, "dsps", .nb.notifier_call = restart_notifier_cb},
 	{SMEM_MODEM, "gss", .nb.notifier_call = restart_notifier_cb},
 	{SMEM_Q6, "adsp", .nb.notifier_call = restart_notifier_cb},
-	{SMEM_DSPS, "slpi", .nb.notifier_call = restart_notifier_cb},
 };
 
 static int init_smem_remote_spinlock(void);
@@ -306,7 +305,6 @@ static void *__smem_get_entry_nonsecure(unsigned id, unsigned *size,
 	int use_spinlocks = spinlocks_initialized && use_rspinlock;
 	void *ret = 0;
 	unsigned long flags = 0;
-	int rc;
 
 	if (!skip_init_check && !smem_initialized_check())
 		return ret;
@@ -314,12 +312,8 @@ static void *__smem_get_entry_nonsecure(unsigned id, unsigned *size,
 	if (id >= SMEM_NUM_ITEMS)
 		return ret;
 
-	if (use_spinlocks) {
-		do {
-			rc = remote_spin_trylock_irqsave(&remote_spinlock,
-				flags);
-		} while (!rc);
-	}
+	if (use_spinlocks)
+		remote_spin_lock_irqsave(&remote_spinlock, flags);
 	/* toc is in device memory and cannot be speculatively accessed */
 	if (toc[id].allocated) {
 		phys_addr_t phys_base;
@@ -399,12 +393,8 @@ static void *__smem_get_entry_secure(unsigned id,
 			return NULL;
 		}
 	}
-	if (use_rspinlock) {
-		do {
-			rc = remote_spin_trylock_irqsave(&remote_spinlock,
-				lflags);
-		} while (!rc);
-	}
+	if (use_rspinlock)
+		remote_spin_lock_irqsave(&remote_spinlock, lflags);
 	if (hdr->identifier != SMEM_PART_HDR_IDENTIFIER) {
 		LOG_ERR(
 			"%s: SMEM corruption detected.  Partition %d to %d at %p\n",
@@ -738,9 +728,7 @@ void *smem_alloc(unsigned id, unsigned size_in, unsigned to_proc,
 	}
 
 	a_size_in = ALIGN(size_in, 8);
-	do {
-		rc = remote_spin_trylock_irqsave(&remote_spinlock, lflags);
-	} while (!rc);
+	remote_spin_lock_irqsave(&remote_spinlock, lflags);
 
 	ret = __smem_get_entry_secure(id, &size_out, to_proc, flags, true,
 									false);
@@ -1015,12 +1003,8 @@ static int restart_notifier_cb(struct notifier_block *this,
 		remote_spin_release(&remote_spinlock, notifier->processor);
 		remote_spin_release_all(notifier->processor);
 		break;
-	case SUBSYS_SOC_RESET:
-		if (!(smem_ramdump_dev && notifdata->enable_mini_ramdumps))
-			break;
 	case SUBSYS_RAMDUMP_NOTIFICATION:
-		if (!(smem_ramdump_dev && (notifdata->enable_mini_ramdumps
-						|| notifdata->enable_ramdump)))
+		if (!(smem_ramdump_dev && notifdata->enable_ramdump))
 			break;
 		SMEM_DBG("%s: saving ramdump\n", __func__);
 		/*
@@ -1152,13 +1136,6 @@ static void smem_init_security_partition(struct smem_toc_entry *entry,
 
 	hdr = smem_areas[0].virt_addr + entry->offset;
 
-	if (entry->host0 != SMEM_APPS && entry->host1 != SMEM_APPS) {
-		SMEM_INFO(
-			"Non-APSS Partition %d offset:%x host0:%d host1:%d\n",
-			num, entry->offset, entry->host0, entry->host1);
-		return;
-	}
-
 	if (hdr->identifier != SMEM_PART_HDR_IDENTIFIER) {
 		LOG_ERR("Smem partition %d hdr magic is bad\n", num);
 		BUG();
@@ -1217,7 +1194,10 @@ static void smem_init_security(void)
 		SMEM_DBG("Partition %d host0:%d host1:%d\n", i,
 							toc->entry[i].host0,
 							toc->entry[i].host1);
-		smem_init_security_partition(&toc->entry[i], i);
+
+		if (toc->entry[i].host0 == SMEM_APPS ||
+					toc->entry[i].host1 == SMEM_APPS)
+			smem_init_security_partition(&toc->entry[i], i);
 	}
 
 	SMEM_DBG("%s done\n", __func__);

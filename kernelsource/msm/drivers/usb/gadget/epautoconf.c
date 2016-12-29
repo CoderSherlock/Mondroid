@@ -11,6 +11,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/types.h>
 #include <linux/device.h>
 
@@ -57,7 +58,7 @@ ep_matches (
 		return 0;
 
 	/* only support ep0 for portable CONTROL traffic */
-	type = usb_endpoint_type(desc);
+	type = desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK;
 	if (USB_ENDPOINT_XFER_CONTROL == type)
 		return 0;
 
@@ -128,7 +129,7 @@ ep_matches (
 	 * and wants to know the maximum possible, provide the info.
 	 */
 	if (desc->wMaxPacketSize == 0)
-		desc->wMaxPacketSize = cpu_to_le16(ep->maxpacket_limit);
+		desc->wMaxPacketSize = cpu_to_le16(ep->maxpacket);
 
 	/* endpoint maxpacket size is an input parameter, except for bulk
 	 * where it's an output parameter representing the full speed limit.
@@ -144,7 +145,7 @@ ep_matches (
 
 	case USB_ENDPOINT_XFER_ISOC:
 		/* ISO:  limit 1023 bytes full speed, 1024 high/super speed */
-		if (ep->maxpacket_limit < max)
+		if (ep->maxpacket < max)
 			return 0;
 		if (!gadget_is_dualspeed(gadget) && max > 1023)
 			return 0;
@@ -177,7 +178,7 @@ ep_matches (
 
 	/* report (variable) full speed bulk maxpacket */
 	if ((USB_ENDPOINT_XFER_BULK == type) && !ep_comp) {
-		int size = ep->maxpacket_limit;
+		int size = ep->maxpacket;
 
 		/* min() doesn't work on bitfields with gcc-3.5 */
 		if (size > 64)
@@ -377,42 +378,3 @@ void usb_ep_autoconfig_reset (struct usb_gadget *gadget)
 	gadget->out_epnum = 0;
 }
 EXPORT_SYMBOL_GPL(usb_ep_autoconfig_reset);
-
-/**
- * usb_ep_autoconfig_by_name - Used to pick the endpoint by name. eg ep1in-gsi
- * @gadget: The device to which the endpoint must belong.
- * @desc: Endpoint descriptor, with endpoint direction and transfer mode
- *	initialized.
- * @ep_name: EP name that is to be searched.
- *
- */
-struct usb_ep *usb_ep_autoconfig_by_name(
-			struct usb_gadget		*gadget,
-			struct usb_endpoint_descriptor	*desc,
-			const char			*ep_name
-)
-{
-	struct usb_ep	*ep;
-	bool ep_found = false;
-
-	list_for_each_entry(ep, &gadget->ep_list, ep_list)
-		if (0 == strcmp(ep->name, ep_name) &&
-				!ep->driver_data) {
-			ep_found = true;
-			break;
-		}
-
-	if (ep_found) {
-		desc->bEndpointAddress &= USB_DIR_IN;
-		desc->bEndpointAddress |= ep->ep_num;
-		ep->address = desc->bEndpointAddress;
-		pr_debug("Allocating ep address:%x\n", ep->address);
-		ep->desc = NULL;
-		ep->comp_desc = NULL;
-		return ep;
-	}
-
-	pr_err("%s:error finding ep %s\n", __func__, ep_name);
-	return NULL;
-}
-EXPORT_SYMBOL(usb_ep_autoconfig_by_name);

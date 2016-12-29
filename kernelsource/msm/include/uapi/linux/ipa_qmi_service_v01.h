@@ -44,8 +44,6 @@
 #define QMI_IPA_IPFLTR_NUM_IHL_MEQ_32_EQNS_V01 2
 #define QMI_IPA_IPFLTR_NUM_MEQ_128_EQNS_V01 2
 #define QMI_IPA_MAX_FILTERS_V01 64
-#define QMI_IPA_MAX_PIPES_V01 20
-#define QMI_IPA_MAX_APN_V01 8
 
 #define IPA_INT_MAX	((int)(~0U>>1))
 #define IPA_INT_MIN	(-IPA_INT_MAX - 1)
@@ -168,10 +166,7 @@ struct ipa_zip_tbl_info_type_v01 {
 	 */
 };  /* Type */
 
-/**
- * Request Message; Requests the modem IPA driver
- * to perform initializtion
- */
+/** Request Message; Requests the modem IPA driver to perform initializtion */
 struct ipa_init_modem_driver_req_msg_v01 {
 
 	/* Optional */
@@ -208,8 +203,7 @@ struct ipa_init_modem_driver_req_msg_v01 {
 	if v4_filter_tbl_start_addr is being passed */
 	uint32_t v4_filter_tbl_start_addr;
 	/*	Provides information about the starting address of IPV4 filter
-	 *	table in IPAv2 or non-hashable IPv4 filter table in IPAv3.
-	 *	Denotes the offset from the start of the IPA Shared Mem
+	 *	tableDenotes the offset from the start of the IPA Shared Mem
 	 */
 
 	/* Optional */
@@ -218,8 +212,7 @@ struct ipa_init_modem_driver_req_msg_v01 {
 	/* Must be set to true if v6_filter_tbl_start_addr is being passed */
 	uint32_t v6_filter_tbl_start_addr;
 	/*	Provides information about the starting address of IPV6 filter
-	 *	table in IPAv2 or non-hashable IPv6 filter table in IPAv3.
-	 *	Denotes the offset from the start of the IPA Shared Mem
+	 *	table Denotes the offset from the start of the IPA Shared Mem
 	 */
 
 	/* Optional */
@@ -268,45 +261,11 @@ struct ipa_init_modem_driver_req_msg_v01 {
 	uint8_t zip_tbl_info_valid;
 	/* Must be set to true if zip_tbl_info is being passed */
 	struct ipa_zip_tbl_info_type_v01 zip_tbl_info;
-	/* Provides information about the zip table.
-	*/
-
-	/* Optional */
-	/*  IPv4 Hashable Routing Table Information */
-	/** Must be set to true if v4_hash_route_tbl_info is being passed */
-	uint8_t v4_hash_route_tbl_info_valid;
-	struct ipa_route_tbl_info_type_v01 v4_hash_route_tbl_info;
-
-	/* Optional */
-	/*  IPv6 Hashable Routing Table Information */
-	/** Must be set to true if v6_hash_route_tbl_info is being passed */
-	uint8_t v6_hash_route_tbl_info_valid;
-	struct ipa_route_tbl_info_type_v01 v6_hash_route_tbl_info;
-
-	/* Optional */
-	/*  IPv4 Hashable Filter Table Start Address */
-	/** Must be set to true if v4_hash_filter_tbl_start_addr
-	    is being passed */
-	uint8_t v4_hash_filter_tbl_start_addr_valid;
-	uint32_t v4_hash_filter_tbl_start_addr;
-	/**	Identifies the starting address of the IPv4 hashable filter
-	    table in IPAv3 onwards. Denotes the offset from the start of
-		the IPA shared memory.
-	*/
-
-	/* Optional */
-	/*  IPv6 Hashable Filter Table Start Address */
-	/** Must be set to true if v6_hash_filter_tbl_start_addr
-	    is being passed */
-	uint8_t v6_hash_filter_tbl_start_addr_valid;
-	uint32_t v6_hash_filter_tbl_start_addr;
-	/**	Identifies the starting address of the IPv6 hashable filter
-	    table in IPAv3 onwards. Denotes the offset from the start of
-		the IPA shared memory.
+	/* Provides information about the header processing context table.
 	*/
 };  /* Message */
 
-/* Response Message; Requests the modem IPA driver about initialization */
+/* Response Message; Requests the modem IPA driver about initializtion */
 struct ipa_init_modem_driver_resp_msg_v01 {
 	/* Mandatory */
 	/*  Result Code */
@@ -336,45 +295,8 @@ struct ipa_init_modem_driver_resp_msg_v01 {
 	 *	since IPA only supports 20 end points. This field is looked
 	 *	at only if the result in TLV RESULT_CODE is QMI_RESULT_SUCCESS
 	 */
-
-	/* Optional */
-	/*  Modem Driver Initialization Pending */
-	uint8_t modem_driver_init_pending_valid;
-	/* Must be set to true if modem_driver_init_pending is being passed */
-	uint8_t modem_driver_init_pending;
-	/*
-	 * Identifies if second level message handshake is needed
-	 *	between drivers to indicate when IPA HWP loading is completed.
-	 *	If this is set by modem driver, AP driver will need to wait
-	 *	for a INIT_MODEM_DRIVER_CMPLT message before communicating with
-	 *	IPA HWP.
-	 */
 };  /* Message */
 
-/*
- * Request Message; Request from Modem IPA driver to indicate
- *	modem driver init completion
- */
-struct ipa_init_modem_driver_cmplt_req_msg_v01 {
-	/* Mandatory */
-	/*  Modem Driver init complete status; */
-	uint8_t status;
-	/*
-	 * Specifies whether the modem driver initialization is complete
-	 *	including the micro controller image loading.
-	 */
-};  /* Message */
-
-/*
- * Response Message; Request from Modem IPA driver to indicate
- *	modem driver init completion
- */
-struct ipa_init_modem_driver_cmplt_resp_msg_v01 {
-	/* Mandatory */
-	/*  Result Code */
-	struct ipa_qmi_response_type_v01 resp;
-	/**<   Standard response type.*/
-};  /* Message */
 
 /*	Request Message; This is the message that is exchanged between the
  *	control point and the service in order to register for indications.
@@ -391,19 +313,6 @@ struct ipa_indication_reg_req_msg_v01 {
 	 *	Setting this field in the request message makes sense
 	 *	only when the QMI_IPA_INDICATION_REGISTER_REQ is being
 	 *	originated from the modem driver
-	 */
-
-	/* Optional */
-	/*  Data Usage Quota Reached */
-	uint8_t data_usage_quota_reached_valid;
-	/*  Must be set to true if data_usage_quota_reached is being passed */
-	uint8_t data_usage_quota_reached;
-	/*  If set to TRUE, this field indicates that the client wants to
-	 *  receive indications about reaching the data usage quota that
-	 *  previously set via QMI_IPA_SET_DATA_USAGE_QUOTA. Setting this field
-	 *  in the request message makes sense only when the
-	 *  QMI_IPA_INDICATION_REGISTER_REQ is being originated from the Master
-	 *  driver
 	 */
 };  /* Message */
 
@@ -678,56 +587,6 @@ struct ipa_filter_spec_type_v01 {
 	 */
 };  /* Type */
 
-struct ipa_filter_spec_ex_type_v01 {
-	enum ipa_ip_type_enum_v01 ip_type;
-	/*	This field identifies the IP type for which this rule is
-	 *	applicable. The driver needs to identify the filter table
-	 *	(V6 or V4) and this field is essential for that
-	 */
-
-	struct ipa_filter_rule_type_v01 filter_rule;
-	/*	This field specifies the rules in the filter spec. These rules
-	 *	are the ones that are matched against fields in the packet.
-	 */
-
-	enum ipa_filter_action_enum_v01 filter_action;
-	/*	This field specifies the action to be taken when a filter match
-	 *	occurs. The remote side should install this information into the
-	 *	hardware along with the filter equations.
-	 */
-
-	uint8_t is_routing_table_index_valid;
-	/*	Specifies whether the routing table index is present or not.
-	 *	If the action is "QMI_IPA_FILTER_ACTION_EXCEPTION", this
-	 *	parameter need not be provided.
-	 */
-
-	uint32_t route_table_index;
-	/*	This is the index in the routing table that should be used
-	 *	to route the packets if the filter rule is hit
-	 */
-
-	uint8_t is_mux_id_valid;
-	/*	Specifies whether the mux_id is valid */
-
-	uint32_t mux_id;
-	/*	This field identifies the QMAP MUX ID. As a part of QMAP
-	 *	protocol, several data calls may be multiplexed over the
-	 *	same physical transport channel. This identifier is used to
-	 *	identify one such data call. The maximum value for this
-	 *	identifier is 255.
-	 */
-
-	uint32_t rule_id;
-	/** Rule Id of the given filter. The Rule Id is populated in the rule
-		header when installing the rule in IPA.
-	*/
-
-	uint8_t is_rule_hashable;
-	/** Specifies whether the given rule is hashable.
-	*/
-};  /* Type */
-
 
 /*  Request Message; This is the message that is exchanged between the
  *	control point and the service in order to request the installation
@@ -788,21 +647,6 @@ struct ipa_install_fltr_rule_req_msg_v01 {
 	 * will need to be modified by the receiver if the PDN is XLAT
 	 * before installing them on the associated IPA consumer pipe.
 	 */
-
-	/* Optional */
-	/*  Extended Filter Specification  */
-	uint8_t filter_spec_ex_list_valid;
-	/* Must be set to true if filter_spec_ex_list is being passed */
-	uint32_t filter_spec_ex_list_len;
-	/* Must be set to # of elements in filter_spec_ex_list */
-	struct ipa_filter_spec_ex_type_v01
-		filter_spec_ex_list[QMI_IPA_MAX_FILTERS_V01];
-	/*
-	 * List of filter specifications of filters that must be installed in
-	 *	the IPAv3.x hardware.
-	 *	The driver installing these rules must do so in the same
-	 *	order as specified in this list.
-	 */
 };  /* Message */
 
 struct ipa_filter_rule_identifier_to_handle_map_v01 {
@@ -835,31 +679,17 @@ struct ipa_install_fltr_rule_resp_msg_v01 {
 	 */
 
 	/* Optional */
-	/*  Filter Handle List */
+	/*  Filter Handle list */
 	uint8_t filter_handle_list_valid;
-	/* Must be set to true if filter_handle_list is being passed */
+	/**< Must be set to true if filter_handle_list is being passed */
 	uint32_t filter_handle_list_len;
 	/* Must be set to # of elements in filter_handle_list */
 	struct ipa_filter_rule_identifier_to_handle_map_v01
 		filter_handle_list[QMI_IPA_MAX_FILTERS_V01];
-	/*
-	 * List of handles returned to the control point. Each handle is
-	 *	mapped to the rule identifier that was specified in the
-	 *	request message. Any further reference to the rule is done
-	 *	using the filter handle.
-	 */
-
-	/* Optional */
-	/*  Rule id List */
-	uint8_t rule_id_valid;
-	/* Must be set to true if rule_id is being passed */
-	uint32_t rule_id_len;
-	/* Must be set to # of elements in rule_id */
-	uint32_t rule_id[QMI_IPA_MAX_FILTERS_V01];
-	/*
-	 * List of rule ids returned to the control point.
-	 *	Any further reference to the rule is done using the
-	 *	filter rule id specified in this list.
+	/*  This is a list of handles returned to the control point.
+	 *	Each handle is mapped to the rule identifier that was
+	 *	specified in the request message. Any further reference
+	 *	to the rule is done using the filter handle
 	 */
 };  /* Message */
 
@@ -877,8 +707,8 @@ struct ipa_filter_handle_to_index_map_v01 {
 
 /* Request Message; This is the message that is exchanged between the
  * control point and the service in order to notify the remote driver
- * of the installation of the filter rule supplied earlier by the
- * remote driver.
+ * about the installation of the filter rule supplied earlier by
+ * the remote driver
  */
 struct ipa_fltr_installed_notif_req_msg_v01 {
 	/*	Mandatory	*/
@@ -897,16 +727,15 @@ struct ipa_fltr_installed_notif_req_msg_v01 {
 	 */
 
 	/* Mandatory */
-	/*  List of Filter Indices */
+	/*  List of filter indices */
 	uint32_t filter_index_list_len;
 	/* Must be set to # of elements in filter_index_list */
 	struct ipa_filter_handle_to_index_map_v01
 		filter_index_list[QMI_IPA_MAX_FILTERS_V01];
-	/*
-	 * Provides the list of filter indices and the corresponding
-	 *	filter handle. If the installation_status indicates a
-	 *	failure, the filter indices must be set to a reserve
-	 *	index (255).
+	/*	This field provides the list of filter indices and the
+	 *	corresponding filter handle. If the installation_status
+	 *	indicates failure, then the filter indices shall be set
+	 *	to a reserve index (255)
 	 */
 
 	/* Optional */
@@ -969,26 +798,11 @@ struct ipa_fltr_installed_notif_req_msg_v01 {
 	/* Must be set to true if start_ipv6_filter_idx is being passed */
 	uint32_t start_ipv6_filter_idx;
 	/* Start index of IPv6 rules in filter index list */
-
-	/* Optional */
-	/*  List of Rule Ids */
-	uint8_t rule_id_valid;
-	/* Must be set to true if rule_id is being passed */
-	uint32_t rule_id_len;
-	/* Must be set to # of elements in rule_id */
-	uint32_t rule_id[QMI_IPA_MAX_FILTERS_V01];
-	/*
-	 * Provides the list of Rule Ids of rules added in IPA on the given
-	 *	source pipe index. If the install_status TLV indicates a
-	 *	failure, the Rule Ids in this list must be set to a reserved
-	 *	index (255).
-	 */
 };  /* Message */
 
-/* Response Message; This is the message that is exchanged between the
- * control point and the service in order to notify the remote driver
- * of the installation of the filter rule supplied earlier by the
- * remote driver.
+/* Response Message; This is the message that is exchanged between the control
+ *	point and the service in order to notify the remote driver about the
+ *	installation of the filter rule supplied earlier by the remote driver
  */
 struct ipa_fltr_installed_notif_resp_msg_v01 {
 	/* Mandatory */
@@ -1074,8 +888,6 @@ enum ipa_peripheral_speed_enum_v01 {
 	/*  High-speed USB connection */
 	QMI_IPA_PER_USB_SS_V01 = 3,
 	/*  Super-speed USB connection */
-	QMI_IPA_PER_WLAN_V01 = 4,
-	/*  WLAN connection */
 	IPA_PERIPHERAL_SPEED_ENUM_MAX_ENUM_VAL_V01 = 2147483647
 	/* To force a 32 bit signed enum.  Do not change or use*/
 };
@@ -1161,7 +973,6 @@ struct ipa_config_req_msg_v01 {
 	 *	- QMI_IPA_PER_USB_FS (1) --  Full-speed USB connection
 	 *	- QMI_IPA_PER_USB_HS (2) --  High-speed USB connection
 	 *	- QMI_IPA_PER_USB_SS (3) --  Super-speed USB connection
-	 *  - QMI_IPA_PER_WLAN   (4) --  WLAN connection
 	 */
 
 	/* Optional */
@@ -1257,42 +1068,6 @@ struct ipa_config_req_msg_v01 {
 	 * This threshold is applicable for data that is moved in the
 	 * DL direction - Maximum value: 65535
 	 */
-
-	/* Optional */
-	/*  Uplink Fifo Size */
-	uint8_t ul_fifo_size_valid;
-	/* Must be set to true if ul_fifo_size is being passed */
-	uint32_t ul_fifo_size;
-	/*
-	 * Informs the remote driver about the total Uplink xDCI
-	 *	buffer size that holds the complete aggregated frame
-	 *	or BAM data fifo size of the peripheral channel/pipe(in Bytes).
-	 *	This deprecates the max_aggr_frame_size field. This TLV
-	 *	deprecates max_aggr_frame_size TLV from version 1.9 onwards
-	 *	and the max_aggr_frame_size TLV will be ignored in the presence
-	 *	of this TLV.
-	 */
-
-	/* Optional */
-	/*  Downlink Fifo Size */
-	uint8_t dl_fifo_size_valid;
-	/* Must be set to true if dl_fifo_size is being passed */
-	uint32_t dl_fifo_size;
-	/*
-	 * Informs the remote driver about the total Downlink xDCI buffering
-	 *	capacity or BAM data fifo size of the peripheral channel/pipe.
-	 *	(In Bytes). dl_fifo_size = n * dl_buf_size. This deprecates the
-	 *	max_aggr_frame_size field. If this value is set
-	 *	max_aggr_frame_size is ignored.
-	 */
-
-	/* Optional */
-	/*  Downlink Buffer Size */
-	uint8_t dl_buf_size_valid;
-	/* Must be set to true if dl_buf_size is being passed */
-	uint32_t dl_buf_size;
-	/*  Informs the remote driver about the single xDCI buffer size.
-		This is applicable only in GSI mode(in Bytes).\n */
 };  /* Message */
 
 /* Response Message; Notifies the remote driver of the configuration
@@ -1304,244 +1079,6 @@ struct ipa_config_resp_msg_v01 {
 	struct ipa_qmi_response_type_v01 resp;
 	/**<   Standard response type.*/
 }; /* Message */
-
-enum ipa_stats_type_enum_v01 {
-	IPA_STATS_TYPE_ENUM_MIN_ENUM_VAL_V01 = -2147483647,
-	/* To force a 32 bit signed enum.  Do not change or use */
-	QMI_IPA_STATS_TYPE_INVALID_V01 = 0,
-	/* Invalid stats type identifier */
-	QMI_IPA_STATS_TYPE_PIPE_V01 = 1,
-	/* Pipe stats type */
-	QMI_IPA_STATS_TYPE_FILTER_RULES_V01 = 2,
-	/* Filter rule stats type */
-	IPA_STATS_TYPE_ENUM_MAX_ENUM_VAL_V01 = 2147483647
-	/* To force a 32 bit signed enum.  Do not change or use */
-};
-
-struct ipa_pipe_stats_info_type_v01 {
-	uint32_t pipe_index;
-	/* Pipe index for statistics to be retrieved. */
-
-	uint64_t num_ipv4_packets;
-	/* Accumulated number of IPv4 packets over this pipe. */
-
-	uint64_t num_ipv4_bytes;
-	/* Accumulated number of IPv4 bytes over this pipe. */
-
-	uint64_t num_ipv6_packets;
-	/* Accumulated number of IPv6 packets over this pipe. */
-
-	uint64_t num_ipv6_bytes;
-	/* Accumulated number of IPv6 bytes over this pipe. */
-};
-
-struct ipa_stats_type_filter_rule_v01 {
-	uint32_t filter_rule_index;
-	/* Filter rule index for statistics to be retrieved. */
-
-	uint64_t num_packets;
-	/* Accumulated number of packets over this filter rule. */
-};
-
-/* Request Message; Retrieve the data statistics collected on modem
- * IPA driver.
- */
-struct ipa_get_data_stats_req_msg_v01 {
-	/* Mandatory */
-	/*  Stats Type  */
-	enum ipa_stats_type_enum_v01 ipa_stats_type;
-	/* Indicates the type of statistics to be retrieved. */
-
-	/* Optional */
-	/* Reset Statistics */
-	uint8_t reset_stats_valid;
-	/* Must be set to true if reset_stats is being passed */
-	uint8_t reset_stats;
-	/* Option to reset the specific type of data statistics
-	 * currently collected.
-	 */
-};  /* Message */
-
-/* Response Message; Retrieve the data statistics collected
- * on modem IPA driver.
- */
-struct ipa_get_data_stats_resp_msg_v01 {
-	/* Mandatory */
-	/*  Result Code */
-	struct ipa_qmi_response_type_v01 resp;
-	/* Standard response type. */
-
-	/* Optional */
-	/*  Stats Type  */
-	uint8_t ipa_stats_type_valid;
-	/* Must be set to true if ipa_stats_type is passed */
-	enum ipa_stats_type_enum_v01 ipa_stats_type;
-	/* Indicates the type of statistics that are retrieved. */
-
-	/* Optional */
-	/*  Uplink Source Pipe Statistics List */
-	uint8_t ul_src_pipe_stats_list_valid;
-	/* Must be set to true if ul_src_pipe_stats_list is being passed */
-	uint32_t ul_src_pipe_stats_list_len;
-	/* Must be set to # of elements in ul_src_pipe_stats_list */
-	struct ipa_pipe_stats_info_type_v01
-		ul_src_pipe_stats_list[QMI_IPA_MAX_PIPES_V01];
-	/* List of all Uplink pipe statistics that are retrieved. */
-
-	/* Optional */
-	/*  Downlink Destination Pipe Statistics List */
-	uint8_t dl_dst_pipe_stats_list_valid;
-	/* Must be set to true if dl_dst_pipe_stats_list is being passed */
-	uint32_t dl_dst_pipe_stats_list_len;
-	/* Must be set to # of elements in dl_dst_pipe_stats_list */
-	struct ipa_pipe_stats_info_type_v01
-		dl_dst_pipe_stats_list[QMI_IPA_MAX_PIPES_V01];
-	/* List of all Downlink pipe statistics that are retrieved. */
-
-	/* Optional */
-	/*  Downlink Filter Rule Stats List */
-	uint8_t dl_filter_rule_stats_list_valid;
-	/* Must be set to true if dl_filter_rule_stats_list is being passed */
-	uint32_t dl_filter_rule_stats_list_len;
-	/* Must be set to # of elements in dl_filter_rule_stats_list */
-	struct ipa_stats_type_filter_rule_v01
-		dl_filter_rule_stats_list[QMI_IPA_MAX_FILTERS_V01];
-	/* List of all Downlink filter rule statistics retrieved. */
-};  /* Message */
-
-struct ipa_apn_data_stats_info_type_v01 {
-	uint32_t mux_id;
-	/* Indicates the MUX ID associated with the APN for which the data
-	 * usage statistics is queried
-	 */
-
-	uint64_t num_ul_packets;
-	/* Accumulated number of uplink packets corresponding to
-	 * this Mux ID
-	 */
-
-	uint64_t num_ul_bytes;
-	/* Accumulated number of uplink bytes corresponding to
-	 * this Mux ID
-	 */
-
-	uint64_t num_dl_packets;
-	/* Accumulated number of downlink packets corresponding
-	 * to this Mux ID
-	 */
-
-	uint64_t num_dl_bytes;
-	/* Accumulated number of downlink bytes corresponding to
-	 * this Mux ID
-	 */
-};  /* Type */
-
-/* Request Message; Retrieve the APN data statistics collected from modem */
-struct ipa_get_apn_data_stats_req_msg_v01 {
-	/* Optional */
-	/*  Mux ID List */
-	uint8_t mux_id_list_valid;
-	/* Must be set to true if mux_id_list is being passed */
-	uint32_t mux_id_list_len;
-	/* Must be set to # of elements in mux_id_list */
-	uint32_t mux_id_list[QMI_IPA_MAX_APN_V01];
-	/* The list of MUX IDs associated with APNs for which the data usage
-	 * statistics is being retrieved
-	 */
-};  /* Message */
-
-/* Response Message; Retrieve the APN data statistics collected from modem */
-struct ipa_get_apn_data_stats_resp_msg_v01 {
-	/* Mandatory */
-	/*  Result Code */
-	struct ipa_qmi_response_type_v01 resp;
-	/* Standard response type.*/
-
-	/* Optional */
-	/* APN Data Statistics List */
-	uint8_t apn_data_stats_list_valid;
-	/* Must be set to true if apn_data_stats_list is being passed */
-	uint32_t apn_data_stats_list_len;
-	/* Must be set to # of elements in apn_data_stats_list */
-	struct ipa_apn_data_stats_info_type_v01
-		apn_data_stats_list[QMI_IPA_MAX_APN_V01];
-	/* List of APN data retrieved as per request on mux_id.
-	* For now, only one APN monitoring is supported on modem driver.
-	* Making this as list for expandability to support more APNs in future.
-	*/
-};  /* Message */
-
-struct ipa_data_usage_quota_info_type_v01 {
-	uint32_t mux_id;
-	/* Indicates the MUX ID associated with the APN for which the data usage
-	 * quota needs to be set
-	 */
-
-	uint64_t num_Mbytes;
-	/* Number of Mega-bytes of quota value to be set on this APN associated
-	 * with this Mux ID.
-	 */
-};  /* Type */
-
-/* Request Message; Master driver sets a data usage quota value on
- * modem driver
- */
-struct ipa_set_data_usage_quota_req_msg_v01 {
-	/* Optional */
-	/* APN Quota List */
-	uint8_t apn_quota_list_valid;
-	/* Must be set to true if apn_quota_list is being passed */
-	uint32_t apn_quota_list_len;
-	/* Must be set to # of elements in apn_quota_list */
-	struct ipa_data_usage_quota_info_type_v01
-		apn_quota_list[QMI_IPA_MAX_APN_V01];
-	/* The list of APNs on which a data usage quota to be set on modem
-	 * driver. For now, only one APN monitoring is supported on modem
-	 * driver. Making this as list for expandability to support more
-	 * APNs in future.
-	 */
-};  /* Message */
-
-/* Response Message; Master driver sets a data usage on modem driver. */
-struct ipa_set_data_usage_quota_resp_msg_v01 {
-	/* Mandatory */
-	/* Result Code */
-	struct ipa_qmi_response_type_v01 resp;
-	/* Standard response type.*/
-};  /* Message */
-
-/* Indication Message; Modem driver sends this indication to master
- * driver when the data usage quota is reached
- */
-struct ipa_data_usage_quota_reached_ind_msg_v01 {
-	/* Mandatory */
-	/*  APN Quota List */
-	struct ipa_data_usage_quota_info_type_v01 apn;
-	/* This message indicates which APN has the previously set quota
-	 * reached. For now, only one APN monitoring is supported on modem
-	 * driver.
-	 */
-};  /* Message */
-
-/* Request Message; Master driver request modem driver to terminate
- * the current data usage quota monitoring session.
- */
-struct ipa_stop_data_usage_quota_req_msg_v01 {
-	/* This element is a placeholder to prevent the declaration of
-     *  an empty struct.  DO NOT USE THIS FIELD UNDER ANY CIRCUMSTANCE
-	 */
-	char __placeholder;
-};  /* Message */
-
-/* Response Message; Master driver request modem driver to terminate
- * the current quota monitoring session.
- */
-struct ipa_stop_data_usage_quota_resp_msg_v01 {
-	/* Mandatory */
-	/*  Result Code */
-	struct ipa_qmi_response_type_v01 resp;
-	/**<   Standard response type.*/
-};  /* Message */
 
 /*Service Message Definition*/
 #define QMI_IPA_INDICATION_REGISTER_REQ_V01 0x0020
@@ -1559,34 +1096,17 @@ struct ipa_stop_data_usage_quota_resp_msg_v01 {
 #define QMI_IPA_DISABLE_FORCE_CLEAR_DATAPATH_RESP_V01 0x0026
 #define QMI_IPA_CONFIG_REQ_V01 0x0027
 #define QMI_IPA_CONFIG_RESP_V01 0x0027
-#define QMI_IPA_DISABLE_LINK_LOW_PWR_STATE_REQ_V01 0x0028
-#define QMI_IPA_DISABLE_LINK_LOW_PWR_STATE_RESP_V01 0x0028
-#define QMI_IPA_ENABLE_LINK_LOW_PWR_STATE_REQ_V01 0x0029
-#define QMI_IPA_ENABLE_LINK_LOW_PWR_STATE_RESP_V01 0x0029
-#define QMI_IPA_GET_DATA_STATS_REQ_V01 0x0030
-#define QMI_IPA_GET_DATA_STATS_RESP_V01 0x0030
-#define QMI_IPA_GET_APN_DATA_STATS_REQ_V01 0x0031
-#define QMI_IPA_GET_APN_DATA_STATS_RESP_V01 0x0031
-#define QMI_IPA_SET_DATA_USAGE_QUOTA_REQ_V01 0x0032
-#define QMI_IPA_SET_DATA_USAGE_QUOTA_RESP_V01 0x0032
-#define QMI_IPA_DATA_USAGE_QUOTA_REACHED_IND_V01 0x0033
-#define QMI_IPA_STOP_DATA_USAGE_QUOTA_REQ_V01 0x0034
-#define QMI_IPA_STOP_DATA_USAGE_QUOTA_RESP_V01 0x0034
-#define QMI_IPA_INIT_MODEM_DRIVER_CMPLT_REQ_V01 0x0035
-#define QMI_IPA_INIT_MODEM_DRIVER_CMPLT_RESP_V01 0x0035
 
 /* add for max length*/
-#define QMI_IPA_INIT_MODEM_DRIVER_REQ_MAX_MSG_LEN_V01 134
-#define QMI_IPA_INIT_MODEM_DRIVER_RESP_MAX_MSG_LEN_V01 25
-#define QMI_IPA_INDICATION_REGISTER_REQ_MAX_MSG_LEN_V01 8
+#define QMI_IPA_INIT_MODEM_DRIVER_REQ_MAX_MSG_LEN_V01 98
+#define QMI_IPA_INIT_MODEM_DRIVER_RESP_MAX_MSG_LEN_V01 21
+#define QMI_IPA_INDICATION_REGISTER_REQ_MAX_MSG_LEN_V01 4
 #define QMI_IPA_INDICATION_REGISTER_RESP_MAX_MSG_LEN_V01 7
-#define QMI_IPA_INSTALL_FILTER_RULE_REQ_MAX_MSG_LEN_V01 22369
-#define QMI_IPA_INSTALL_FILTER_RULE_RESP_MAX_MSG_LEN_V01 783
-#define QMI_IPA_FILTER_INSTALLED_NOTIF_REQ_MAX_MSG_LEN_V01 834
+#define QMI_IPA_INSTALL_FILTER_RULE_REQ_MAX_MSG_LEN_V01 11293
+#define QMI_IPA_INSTALL_FILTER_RULE_RESP_MAX_MSG_LEN_V01 523
+#define QMI_IPA_FILTER_INSTALLED_NOTIF_REQ_MAX_MSG_LEN_V01 574
 #define QMI_IPA_FILTER_INSTALLED_NOTIF_RESP_MAX_MSG_LEN_V01 7
 #define QMI_IPA_MASTER_DRIVER_INIT_COMPLETE_IND_MAX_MSG_LEN_V01 7
-#define QMI_IPA_DATA_USAGE_QUOTA_REACHED_IND_MAX_MSG_LEN_V01 15
-
 
 #define QMI_IPA_ENABLE_FORCE_CLEAR_DATAPATH_REQ_MAX_MSG_LEN_V01 18
 #define QMI_IPA_DISABLE_FORCE_CLEAR_DATAPATH_REQ_MAX_MSG_LEN_V01 7
@@ -1594,24 +1114,8 @@ struct ipa_stop_data_usage_quota_resp_msg_v01 {
 #define QMI_IPA_DISABLE_FORCE_CLEAR_DATAPATH_RESP_MAX_MSG_LEN_V01 7
 
 
-#define QMI_IPA_CONFIG_REQ_MAX_MSG_LEN_V01 102
+#define QMI_IPA_CONFIG_REQ_MAX_MSG_LEN_V01 81
 #define QMI_IPA_CONFIG_RESP_MAX_MSG_LEN_V01 7
-#define QMI_IPA_DISABLE_LINK_LOW_PWR_STATE_REQ_MAX_MSG_LEN_V01 18
-#define QMI_IPA_DISABLE_LINK_LOW_PWR_STATE_RESP_MAX_MSG_LEN_V01 7
-#define QMI_IPA_ENABLE_LINK_LOW_PWR_STATE_REQ_MAX_MSG_LEN_V01 7
-#define QMI_IPA_ENABLE_LINK_LOW_PWR_STATE_RESP_MAX_MSG_LEN_V01 7
-#define QMI_IPA_GET_DATA_STATS_REQ_MAX_MSG_LEN_V01 11
-#define QMI_IPA_GET_DATA_STATS_RESP_MAX_MSG_LEN_V01 2234
-#define QMI_IPA_GET_APN_DATA_STATS_REQ_MAX_MSG_LEN_V01 36
-#define QMI_IPA_GET_APN_DATA_STATS_RESP_MAX_MSG_LEN_V01 299
-#define QMI_IPA_SET_DATA_USAGE_QUOTA_REQ_MAX_MSG_LEN_V01 100
-#define QMI_IPA_SET_DATA_USAGE_QUOTA_RESP_MAX_MSG_LEN_V01 7
-#define QMI_IPA_STOP_DATA_USAGE_QUOTA_REQ_MAX_MSG_LEN_V01 0
-#define QMI_IPA_STOP_DATA_USAGE_QUOTA_RESP_MAX_MSG_LEN_V01 7
-
-#define QMI_IPA_INIT_MODEM_DRIVER_CMPLT_REQ_MAX_MSG_LEN_V01 4
-#define QMI_IPA_INIT_MODEM_DRIVER_CMPLT_RESP_MAX_MSG_LEN_V01 7
-
 /* Service Object Accessor */
 
 #endif/* IPA_QMI_SERVICE_V01_H */

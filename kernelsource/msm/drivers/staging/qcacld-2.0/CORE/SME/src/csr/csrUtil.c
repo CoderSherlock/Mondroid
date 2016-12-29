@@ -456,6 +456,7 @@ get_eRoamCmdStatus_str(eRoamCmdStatus val)
 #endif
         CASE_RETURN_STR(eCSR_ROAM_FT_START);
         CASE_RETURN_STR(eCSR_ROAM_REMAIN_CHAN_READY);
+        CASE_RETURN_STR(eCSR_ROAM_SEND_ACTION_CNF);
         CASE_RETURN_STR(eCSR_ROAM_SESSION_OPENED);
         CASE_RETURN_STR(eCSR_ROAM_FT_REASSOC_FAILED);
 #ifdef FEATURE_WLAN_LFR
@@ -3054,17 +3055,24 @@ csrIsPMFCapabilitiesInRSNMatch( tHalHandle hHal,
        /* Extracting MFPCapable bit from RSN Ie */
        apProfileMFPCapable  = (pRSNIe->RSN_Cap[0] >> 7) & 0x1;
        apProfileMFPRequired = (pRSNIe->RSN_Cap[0] >> 6) & 0x1;
-
-       VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
-          FL("pFilterMFPEnabled=%d pFilterMFPRequired=%d pFilterMFPCapable=%d apProfileMFPCapable=%d apProfileMFPRequired=%d"),
-               *pFilterMFPEnabled, *pFilterMFPRequired, *pFilterMFPCapable,
-               apProfileMFPCapable, apProfileMFPRequired);
-
        if (*pFilterMFPEnabled && *pFilterMFPCapable && *pFilterMFPRequired
            && (apProfileMFPCapable == 0))
        {
            VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
                      "AP is not capable to make PMF connection");
+           return VOS_FALSE;
+       }
+       else if (*pFilterMFPEnabled && *pFilterMFPCapable &&
+                !(*pFilterMFPRequired) && (apProfileMFPCapable == 0))
+       {
+           /*
+            * This is tricky, because supplicant asked us to make mandatory
+            * PMF connection even though PMF connection is optional here.
+            * so if AP is not capable of PMF then drop it. Don't try to
+            * connect with it.
+            */
+           VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
+           "we need PMF connection & AP isn't capable to make PMF connection");
            return VOS_FALSE;
        }
        else if (!(*pFilterMFPCapable) &&
@@ -3078,6 +3086,13 @@ csrIsPMFCapabilitiesInRSNMatch( tHalHandle hHal,
             */
            VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
            "AP needs PMF connection and we are not capable of pmf connection");
+           return VOS_FALSE;
+       }
+       else if (!(*pFilterMFPEnabled) && *pFilterMFPCapable &&
+                (apProfileMFPCapable == 1))
+       {
+           VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
+           "we don't need PMF connection even though both parties are capable");
            return VOS_FALSE;
        }
     }
@@ -3243,11 +3258,8 @@ tANI_U8 csrConstructRSNIe( tHalHandle hHal, tANI_U32 sessionId, tCsrRoamProfile 
         }
 
 #ifdef WLAN_FEATURE_11W
-         /* Advertise BIP in group cipher key management only if PMF is enabled
-          * and AP is capable.
-          */
-        if (pProfile->MFPEnabled &&
-                (RSNCapabilities.MFPCapable && pProfile->MFPCapable)){
+        if ( pProfile->MFPEnabled )
+        {
             pGroupMgmtCipherSuite = (tANI_U8 *) pPMK + sizeof ( tANI_U16 ) +
                 ( pPMK->cPMKIDs * CSR_RSN_PMKID_SIZE );
             vos_mem_copy(pGroupMgmtCipherSuite, csrRSNOui[07], CSR_WPA_OUI_SIZE);
@@ -3268,8 +3280,8 @@ tANI_U8 csrConstructRSNIe( tHalHandle hHal, tANI_U32 sessionId, tCsrRoamProfile 
                                         (pPMK->cPMKIDs * CSR_RSN_PMKID_SIZE));
         }
 #ifdef WLAN_FEATURE_11W
-        if (pProfile->MFPEnabled &&
-                (RSNCapabilities.MFPCapable && pProfile->MFPCapable)){
+        if ( pProfile->MFPEnabled )
+        {
             if ( 0 == pPMK->cPMKIDs )
                 pRSNIe->IeHeader.Length += sizeof( tANI_U16 );
             pRSNIe->IeHeader.Length += CSR_WPA_OUI_SIZE;

@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014 - 2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,6 +15,7 @@
 #define MDSS_QPIC_H
 
 #include <linux/list.h>
+#include <mach/scm-io.h>
 #include <linux/msm-sps.h>
 
 #include <linux/pinctrl/consumer.h>
@@ -87,6 +88,8 @@ struct qpic_data_type {
 	struct completion fifo_eof_comp;
 	u32 qpic_is_on;
 	struct clk *qpic_a_clk;
+	bool splash_screen_transition;
+	bool lk_transition_done;
 };
 
 u32 qpic_send_frame(

@@ -403,14 +403,19 @@ static int cond_read_node(struct policydb *p, struct cond_node *node, void *fp)
 	int rc;
 	struct cond_expr *expr = NULL, *last = NULL;
 
-	rc = next_entry(buf, fp, sizeof(u32) * 2);
+	rc = next_entry(buf, fp, sizeof(u32));
 	if (rc)
-		goto err;
+		return rc;
 
 	node->cur_state = le32_to_cpu(buf[0]);
 
+	len = 0;
+	rc = next_entry(buf, fp, sizeof(u32));
+	if (rc)
+		return rc;
+
 	/* expr */
-	len = le32_to_cpu(buf[1]);
+	len = le32_to_cpu(buf[0]);
 
 	for (i = 0; i < len; i++) {
 		rc = next_entry(buf, fp, sizeof(u32) * 2);
@@ -638,7 +643,7 @@ void cond_compute_av(struct avtab *ctab, struct avtab_key *key,
 {
 	struct avtab_node *node;
 
-	if (!ctab || !key || !avd)
+	if (!ctab || !key || !avd || !xperms)
 		return;
 
 	for (node = avtab_search_node(ctab, key); node;
@@ -657,7 +662,7 @@ void cond_compute_av(struct avtab *ctab, struct avtab_key *key,
 		if ((u16)(AVTAB_AUDITALLOW|AVTAB_ENABLED) ==
 		    (node->key.specified & (AVTAB_AUDITALLOW|AVTAB_ENABLED)))
 			avd->auditallow |= node->datum.u.data;
-		if (xperms && (node->key.specified & AVTAB_ENABLED) &&
+		if ((node->key.specified & AVTAB_ENABLED) &&
 				(node->key.specified & AVTAB_XPERMS))
 			services_compute_xperms_drivers(xperms, node);
 	}

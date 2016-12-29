@@ -120,15 +120,16 @@ static int ecryptfs_init_lower_file(struct dentry *dentry,
 				    struct file **lower_file)
 {
 	const struct cred *cred = current_cred();
-	struct path *path = ecryptfs_dentry_to_lower_path(dentry);
+	struct dentry *lower_dentry = ecryptfs_dentry_to_lower(dentry);
+	struct vfsmount *lower_mnt = ecryptfs_dentry_to_lower_mnt(dentry);
 	int rc;
 
-	rc = ecryptfs_privileged_open(lower_file, path->dentry, path->mnt,
+	rc = ecryptfs_privileged_open(lower_file, lower_dentry, lower_mnt,
 				      cred);
 	if (rc) {
 		printk(KERN_ERR "Error opening lower file "
 		       "for lower_dentry [0x%p] and lower_mnt [0x%p]; "
-		       "rc = [%d]\n", path->dentry, path->mnt, rc);
+		       "rc = [%d]\n", lower_dentry, lower_mnt, rc);
 		(*lower_file) = NULL;
 	}
 	return rc;
@@ -156,42 +157,16 @@ int ecryptfs_get_lower_file(struct dentry *dentry, struct inode *inode)
 
 void ecryptfs_put_lower_file(struct inode *inode)
 {
-	int ret = 0;
 	struct ecryptfs_inode_info *inode_info;
-	bool clear_cache_needed = false;
 
 	inode_info = ecryptfs_inode_to_private(inode);
 	if (atomic_dec_and_mutex_lock(&inode_info->lower_file_count,
 				      &inode_info->lower_file_mutex)) {
-
-		if (get_events() && get_events()->is_hw_crypt_cb &&
-				get_events()->is_hw_crypt_cb())
-			clear_cache_needed = true;
-
-		if (clear_cache_needed) {
-			ret = vfs_fsync(inode_info->lower_file, false);
-
-			if (ret)
-				pr_err("failed to sync file ret = %d.\n", ret);
-		}
-
 		filemap_write_and_wait(inode->i_mapping);
 		fput(inode_info->lower_file);
 		inode_info->lower_file = NULL;
 		mutex_unlock(&inode_info->lower_file_mutex);
-
-		if (clear_cache_needed) {
-			truncate_inode_pages_fill_zero(inode->i_mapping, 0);
-			truncate_inode_pages_fill_zero(
-				ecryptfs_inode_to_lower(inode)->i_mapping, 0);
-		}
-
-		if (get_events() && get_events()->release_cb)
-			get_events()->release_cb(
-			ecryptfs_inode_to_lower(inode));
 	}
-
-
 }
 
 enum { ecryptfs_opt_sig, ecryptfs_opt_ecryptfs_sig,
@@ -306,7 +281,6 @@ static int ecryptfs_parse_options(struct ecryptfs_sb_info *sbi, char *options,
 	char *cipher_key_bytes_src;
 	char *fn_cipher_key_bytes_src;
 	u8 cipher_code;
-	unsigned char final[2*ECRYPTFS_MAX_CIPHER_NAME_SIZE+1];
 
 	*check_ruid = 0;
 
@@ -336,14 +310,12 @@ static int ecryptfs_parse_options(struct ecryptfs_sb_info *sbi, char *options,
 		case ecryptfs_opt_ecryptfs_cipher:
 			cipher_name_src = args[0].from;
 			cipher_name_dst =
-				mount_crypt_stat->global_default_cipher_name;
-
-			ecryptfs_parse_full_cipher(cipher_name_src,
-				mount_crypt_stat->global_default_cipher_name,
-				mount_crypt_stat->global_default_cipher_mode);
-
+				mount_crypt_stat->
+				global_default_cipher_name;
+			strncpy(cipher_name_dst, cipher_name_src,
+				ECRYPTFS_MAX_CIPHER_NAME_SIZE);
+			cipher_name_dst[ECRYPTFS_MAX_CIPHER_NAME_SIZE] = '\0';
 			cipher_name_set = 1;
-
 			break;
 		case ecryptfs_opt_ecryptfs_key_bytes:
 			cipher_key_bytes_src = args[0].from;
@@ -440,35 +412,24 @@ static int ecryptfs_parse_options(struct ecryptfs_sb_info *sbi, char *options,
 		strcpy(mount_crypt_stat->global_default_cipher_name,
 		       ECRYPTFS_DEFAULT_CIPHER);
 	}
-
 	if ((mount_crypt_stat->flags & ECRYPTFS_GLOBAL_ENCRYPT_FILENAMES)
 	    && !fn_cipher_name_set)
 		strcpy(mount_crypt_stat->global_default_fn_cipher_name,
 		       mount_crypt_stat->global_default_cipher_name);
-
 	if (!cipher_key_bytes_set)
 		mount_crypt_stat->global_default_cipher_key_size = 0;
-
 	if ((mount_crypt_stat->flags & ECRYPTFS_GLOBAL_ENCRYPT_FILENAMES)
 	    && !fn_cipher_key_bytes_set)
 		mount_crypt_stat->global_default_fn_cipher_key_bytes =
 			mount_crypt_stat->global_default_cipher_key_size;
 
 	cipher_code = ecryptfs_code_for_cipher_string(
-			ecryptfs_get_full_cipher(
-				mount_crypt_stat->global_default_cipher_name,
-				mount_crypt_stat->global_default_cipher_mode,
-				final, sizeof(final)),
+		mount_crypt_stat->global_default_cipher_name,
 		mount_crypt_stat->global_default_cipher_key_size);
 	if (!cipher_code) {
-		ecryptfs_printk(
-			KERN_ERR,
-			"eCryptfs doesn't support cipher: %s and key size %lu",
-			ecryptfs_get_full_cipher(
-				mount_crypt_stat->global_default_cipher_name,
-				mount_crypt_stat->global_default_cipher_mode,
-				final, sizeof(final)),
-			mount_crypt_stat->global_default_cipher_key_size);
+		ecryptfs_printk(KERN_ERR,
+				"eCryptfs doesn't support cipher: %s",
+				mount_crypt_stat->global_default_cipher_name);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -528,7 +489,6 @@ static struct file_system_type ecryptfs_fs_type;
  * @dev_name: The path to mount over
  * @raw_data: The options passed into the kernel
  */
-
 static struct dentry *ecryptfs_mount(struct file_system_type *fs_type, int flags,
 			const char *dev_name, void *raw_data)
 {
@@ -598,11 +558,6 @@ static struct dentry *ecryptfs_mount(struct file_system_type *fs_type, int flags
 
 	ecryptfs_set_superblock_lower(s, path.dentry->d_sb);
 
-
-	if (get_events() && get_events()->is_hw_crypt_cb &&
-			get_events()->is_hw_crypt_cb())
-		drop_pagecache_sb(ecryptfs_superblock_to_lower(s), 0);
-
 	/**
 	 * Set the POSIX ACL flag based on whether they're enabled in the lower
 	 * mount.
@@ -622,13 +577,6 @@ static struct dentry *ecryptfs_mount(struct file_system_type *fs_type, int flags
 	s->s_maxbytes = path.dentry->d_sb->s_maxbytes;
 	s->s_blocksize = path.dentry->d_sb->s_blocksize;
 	s->s_magic = ECRYPTFS_SUPER_MAGIC;
-	s->s_stack_depth = path.dentry->d_sb->s_stack_depth + 1;
-
-	rc = -EINVAL;
-	if (s->s_stack_depth > FILESYSTEM_MAX_STACK_DEPTH) {
-		pr_err("eCryptfs: maximum fs stacking depth exceeded\n");
-		goto out_free;
-	}
 
 	inode = ecryptfs_get_inode(path.dentry->d_inode, s);
 	rc = PTR_ERR(inode);
@@ -648,7 +596,8 @@ static struct dentry *ecryptfs_mount(struct file_system_type *fs_type, int flags
 
 	/* ->kill_sb() will take care of root_info */
 	ecryptfs_set_dentry_private(s->s_root, root_info);
-	root_info->lower_path = path;
+	ecryptfs_set_dentry_lower(s->s_root, path.dentry);
+	ecryptfs_set_dentry_lower_mnt(s->s_root, path.mnt);
 
 	s->s_flags |= MS_ACTIVE;
 	return dget(s->s_root);
@@ -941,7 +890,6 @@ static void __exit ecryptfs_exit(void)
 	do_sysfs_unregistration();
 	unregister_filesystem(&ecryptfs_fs_type);
 	ecryptfs_free_kmem_caches();
-	ecryptfs_free_events();
 }
 
 MODULE_AUTHOR("Michael A. Halcrow <mhalcrow@us.ibm.com>");

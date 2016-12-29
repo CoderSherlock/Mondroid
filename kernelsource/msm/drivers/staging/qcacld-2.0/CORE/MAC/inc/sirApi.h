@@ -100,8 +100,6 @@ typedef tANI_U8 tSirVersionString[SIR_VERSION_STRING_LEN];
 #define WLAN_EXTSCAN_MAX_SIGNIFICANT_CHANGE_APS   64
 #define WLAN_EXTSCAN_MAX_HOTLIST_SSIDS            8
 
-#define NUM_CHAINS_MAX  2
-
 typedef enum
 {
     eSIR_EXTSCAN_INVALID,
@@ -3552,21 +3550,6 @@ struct sir_sme_mgmt_frame_cb_req {
 	sir_mgmt_frame_ind_callback callback;
 };
 
-typedef void (*sir_p2p_ack_ind_callback)(uint32_t session_id,
-					bool tx_completion_status);
-
-/**
- * struct sir_p2p_ack_ind_cb_req - Register a p2p ack ind callback req
- * @message_type: message id
- * @length: msg length
- * @callback: callback for p2p ack indication
- */
-struct sir_sme_p2p_ack_ind_cb_req {
-	uint16_t message_type;
-	uint16_t length;
-	sir_p2p_ack_ind_callback callback;
-};
-
 #ifdef WLAN_FEATURE_11W
 typedef struct sSirSmeUnprotMgmtFrameInd
 {
@@ -3752,66 +3735,6 @@ typedef struct sSirSetRSSIFilterReq
   tANI_U8     rssiThreshold;
 } tSirSetRSSIFilterReq, *tpSirSetRSSIFilterReq;
 
-/*
- * ALLOWED_ACTION_FRAMES_BITMAP
- *
- * Bitmask is based on the below. The frames with 0's
- * set to their corresponding bit can be dropped in FW.
- *
- * -----------------------------+-----+-------+
- *         Type                 | Bit | Allow |
- * -----------------------------+-----+-------+
- * SIR_MAC_ACTION_SPECTRUM_MGMT    0      1
- * SIR_MAC_ACTION_QOS_MGMT         1      1
- * SIR_MAC_ACTION_DLP              2      0
- * SIR_MAC_ACTION_BLKACK           3      0
- * SIR_MAC_ACTION_PUBLIC_USAGE     4      1
- * SIR_MAC_ACTION_RRM              5      1
- * SIR_MAC_ACTION_FAST_BSS_TRNST   6      0
- * SIR_MAC_ACTION_HT               7      0
- * SIR_MAC_ACTION_SA_QUERY         8      1
- * SIR_MAC_ACTION_PROT_DUAL_PUB    9      0
- * SIR_MAC_ACTION_WNM             10      1
- * SIR_MAC_ACTION_UNPROT_WNM      11      0
- * SIR_MAC_ACTION_TDLS            12      0
- * SIR_MAC_ACITON_MESH            13      0
- * SIR_MAC_ACTION_MHF             14      0
- * SIR_MAC_SELF_PROTECTED         15      0
- * SIR_MAC_ACTION_WME             17      1
- * SIR_MAC_ACTION_FST             18      0
- * SIR_MAC_ACTION_VHT             21      1
- * ----------------------------+------+-------+
- */
-#define ALLOWED_ACTION_FRAMES_BITMAP0_STA \
-		((1 << SIR_MAC_ACTION_SPECTRUM_MGMT) | \
-		 (1 << SIR_MAC_ACTION_QOS_MGMT) | \
-		 (1 << SIR_MAC_ACTION_PUBLIC_USAGE) | \
-		 (1 << SIR_MAC_ACTION_RRM) | \
-		 (1 << SIR_MAC_ACTION_SA_QUERY) | \
-		 (1 << SIR_MAC_ACTION_WNM) | \
-		 (1 << SIR_MAC_ACTION_WME) | \
-		 (1 << SIR_MAC_ACTION_VHT))
-
-#define ALLOWED_ACTION_FRAMES_BITMAP0_SAP \
-		((ALLOWED_ACTION_FRAMES_BITMAP0_STA) | \
-		 (1 << SIR_MAC_ACTION_HT))
-#define ALLOWED_ACTION_FRAMES_BITMAP1	0x0
-#define ALLOWED_ACTION_FRAMES_BITMAP2	0x0
-#define ALLOWED_ACTION_FRAMES_BITMAP3	0x0
-#define ALLOWED_ACTION_FRAMES_BITMAP4	0x0
-#define ALLOWED_ACTION_FRAMES_BITMAP5	0x0
-#define ALLOWED_ACTION_FRAMES_BITMAP6	0x0
-#define ALLOWED_ACTION_FRAMES_BITMAP7	0x0
-/**
- * struct sir_allowed_action_frames - Parameters to set Allowed action frames
- * @operation: 0 reset to fw default, 1 set the bits,
- *             2 add the setting bits, 3 delete the setting bits
- * @bitmask: Bits to convey the allowed action frames
- */
-struct sir_allowed_action_frames {
-	uint32_t operation;
-	uint32_t action_category_map[SIR_MAC_ACTION_MAX / 32];
-};
 
 // Update Scan Params
 typedef struct {
@@ -7092,7 +7015,7 @@ enum ndp_response_code {
 struct ndp_cfg {
 	uint32_t tag;
 	uint32_t ndp_cfg_len;
-	uint8_t *ndp_cfg;
+	uint8_t ndp_cfg[];
 };
 
 /**
@@ -7118,7 +7041,7 @@ struct ndp_qos_cfg {
 struct ndp_app_info {
 	uint32_t tag;
 	uint32_t ndp_app_info_len;
-	uint8_t *ndp_app_info;
+	uint8_t ndp_app_info[];
 };
 
 /**
@@ -7193,7 +7116,7 @@ struct ndp_initiator_req {
 };
 
 /**
- * struct ndp_initiator_rsp - response event from FW
+ * struct ndp_initiator_rsp_event - response event from FW
  * @transaction_id: unique identifier
  * @vdev_id: session id of the interface over which ndp is being created
  * @ndp_instance_id: locally created NDP instance ID
@@ -7201,11 +7124,12 @@ struct ndp_initiator_req {
  * @reason: reason for failure if any
  *
  */
-struct ndp_initiator_rsp {
+struct ndp_initiator_rsp_event {
 	uint32_t transaction_id;
 	uint32_t vdev_id;
 	uint32_t ndp_instance_id;
 	uint32_t status;
+	uint32_t reason;
 };
 
 /**
@@ -7213,7 +7137,6 @@ struct ndp_initiator_rsp {
  * @vdev_id: session id of the interface over which ndp is being created
  * @service_instance_id: Service identifier
  * @peer_discovery_mac_addr: Peer's discovery mac address
- * @peer_mac_addr: Peer's NDI mac address
  * @ndp_initiator_mac_addr: NDI mac address of the peer initiating NDP
  * @ndp_instance_id: locally created NDP instance ID
  * @role: self role for NDP
@@ -7226,7 +7149,7 @@ struct ndp_indication_event {
 	uint32_t vdev_id;
 	uint32_t service_instance_id;
 	v_MACADDR_t peer_discovery_mac_addr;
-	v_MACADDR_t peer_mac_addr;
+	v_MACADDR_t ndp_initiator_mac_addr;
 	uint32_t ndp_instance_id;
 	enum ndp_self_role role;
 	enum ndp_accept_policy policy;
@@ -7259,7 +7182,6 @@ struct ndp_responder_req {
  * @vdev_id: session id of the interface over which ndp is being created
  * @status: command status
  * @reason: reason for failure if any
- * @peer_mac_addr: Peer's mac address
  *
  */
 struct ndp_responder_rsp_event {
@@ -7267,7 +7189,6 @@ struct ndp_responder_rsp_event {
 	uint32_t vdev_id;
 	uint32_t status;
 	uint32_t reason;
-	v_MACADDR_t peer_mac_addr;
 };
 
 /**

@@ -80,13 +80,8 @@ static ssize_t edac_device_ctl_panic_on_ce_store(struct edac_device_ctl_info
 						 *ctl_info, const char *data,
 						 size_t count)
 {
-	unsigned long val;
-
 	/* if parameter is zero, turn off flag, if non-zero turn on flag */
-	if (kstrtoul(data, 0, &val) < 0)
-		return -EINVAL;
-
-	ctl_info->panic_on_ce = !!val;
+	ctl_info->panic_on_ce = (simple_strtoul(data, NULL, 0) != 0);
 
 	return count;
 }

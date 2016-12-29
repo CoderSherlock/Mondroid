@@ -80,8 +80,6 @@
  *		  with BSD names.
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -479,7 +477,7 @@ static void unix_sock_destructor(struct sock *sk)
 	WARN_ON(!sk_unhashed(sk));
 	WARN_ON(sk->sk_socket);
 	if (!sock_flag(sk, SOCK_DEAD)) {
-		pr_info("Attempt to release alive unix socket: %p\n", sk);
+		WARN(1, "Attempt to release alive unix socket: %p\n", sk);
 		return;
 	}
 
@@ -491,7 +489,7 @@ static void unix_sock_destructor(struct sock *sk)
 	sock_prot_inuse_add(sock_net(sk), sk->sk_prot, -1);
 	local_bh_enable();
 #ifdef UNIX_REFCNT_DEBUG
-	pr_debug("UNIX %p is destroyed, %ld are still alive.\n", sk,
+	printk(KERN_DEBUG "UNIX %p is destroyed, %ld are still alive.\n", sk,
 		atomic_long_read(&unix_nr_socks));
 #endif
 }
@@ -1336,7 +1334,7 @@ restart:
 	__skb_queue_tail(&other->sk_receive_queue, skb);
 	spin_unlock(&other->sk_receive_queue.lock);
 	unix_state_unlock(other);
-	other->sk_data_ready(other);
+	other->sk_data_ready(other, 0);
 	sock_put(other);
 	return 0;
 
@@ -1488,21 +1486,6 @@ static void unix_destruct_scm(struct sk_buff *skb)
 	sock_wfree(skb);
 }
 
-/*
- * The "user->unix_inflight" variable is protected by the garbage
- * collection lock, and we just read it locklessly here. If you go
- * over the limit, there might be a tiny race in actually noticing
- * it across threads. Tough.
- */
-static inline bool too_many_unix_fds(struct task_struct *p)
-{
-	struct user_struct *user = current_user();
-
-	if (unlikely(user->unix_inflight > task_rlimit(p, RLIMIT_NOFILE)))
-		return !capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN);
-	return false;
-}
-
 #define MAX_RECURSION_LEVEL 4
 
 static int unix_attach_fds(struct scm_cookie *scm, struct sk_buff *skb)
@@ -1510,9 +1493,6 @@ static int unix_attach_fds(struct scm_cookie *scm, struct sk_buff *skb)
 	int i;
 	unsigned char max_level = 0;
 	int unix_sock_count = 0;
-
-	if (too_many_unix_fds(current))
-		return -ETOOMANYREFS;
 
 	for (i = scm->fp->count - 1; i >= 0; i--) {
 		struct sock *sk = unix_get_socket(scm->fp->fp[i]);
@@ -1535,8 +1515,10 @@ static int unix_attach_fds(struct scm_cookie *scm, struct sk_buff *skb)
 	if (!UNIXCB(skb).fp)
 		return -ENOMEM;
 
-	for (i = scm->fp->count - 1; i >= 0; i--)
-		unix_inflight(scm->fp->fp[i]);
+	if (unix_sock_count) {
+		for (i = scm->fp->count - 1; i >= 0; i--)
+			unix_inflight(scm->fp->fp[i]);
+	}
 	return max_level;
 }
 
@@ -1584,7 +1566,7 @@ static int unix_dgram_sendmsg(struct kiocb *kiocb, struct socket *sock,
 	struct sock *sk = sock->sk;
 	struct net *net = sock_net(sk);
 	struct unix_sock *u = unix_sk(sk);
-	DECLARE_SOCKADDR(struct sockaddr_un *, sunaddr, msg->msg_name);
+	struct sockaddr_un *sunaddr = msg->msg_name;
 	struct sock *other = NULL;
 	int namelen = 0; /* fake GCC */
 	int err;
@@ -1628,18 +1610,13 @@ static int unix_dgram_sendmsg(struct kiocb *kiocb, struct socket *sock,
 	if (len > sk->sk_sndbuf - 32)
 		goto out;
 
-	if (len > SKB_MAX_ALLOC) {
+	if (len > SKB_MAX_ALLOC)
 		data_len = min_t(size_t,
 				 len - SKB_MAX_ALLOC,
 				 MAX_SKB_FRAGS * PAGE_SIZE);
-		data_len = PAGE_ALIGN(data_len);
-
-		BUILD_BUG_ON(SKB_MAX_ALLOC < PAGE_SIZE);
-	}
 
 	skb = sock_alloc_send_pskb(sk, len - data_len, data_len,
-				   msg->msg_flags & MSG_DONTWAIT, &err,
-				   PAGE_ALLOC_COSTLY_ORDER);
+				   msg->msg_flags & MSG_DONTWAIT, &err);
 	if (skb == NULL)
 		goto out;
 
@@ -1768,7 +1745,7 @@ restart_locked:
 	if (max_level > unix_sk(other)->recursion_level)
 		unix_sk(other)->recursion_level = max_level;
 	unix_state_unlock(other);
-	other->sk_data_ready(other);
+	other->sk_data_ready(other, len);
 	sock_put(other);
 	scm_destroy(siocb->scm);
 	return len;
@@ -1786,10 +1763,6 @@ out:
 	return err;
 }
 
-/* We use paged skbs for stream sockets, and limit occupancy to 32768
- * bytes, and a minimun of a full page.
- */
-#define UNIX_SKB_FRAGS_SZ (PAGE_SIZE << get_order(32768))
 
 static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
 			       struct msghdr *msg, size_t len)
@@ -1803,7 +1776,6 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
 	struct scm_cookie tmp_scm;
 	bool fds_sent = false;
 	int max_level;
-	int data_len;
 
 	if (NULL == siocb->scm)
 		siocb->scm = &tmp_scm;
@@ -1830,23 +1802,39 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
 		goto pipe_err;
 
 	while (sent < len) {
-		size = len - sent;
+		/*
+		 *	Optimisation for the fact that under 0.01% of X
+		 *	messages typically need breaking up.
+		 */
+
+		size = len-sent;
 
 		/* Keep two messages in the pipe so it schedules better */
-		size = min_t(int, size, (sk->sk_sndbuf >> 1) - 64);
+		if (size > ((sk->sk_sndbuf >> 1) - 64))
+			size = (sk->sk_sndbuf >> 1) - 64;
 
-		/* allow fallback to order-0 allocations */
-		size = min_t(int, size, SKB_MAX_HEAD(0) + UNIX_SKB_FRAGS_SZ);
+		if (size > SKB_MAX_ALLOC)
+			size = SKB_MAX_ALLOC;
 
-		data_len = max_t(int, 0, size - SKB_MAX_HEAD(0));
+		/*
+		 *	Grab a buffer
+		 */
 
-		data_len = min_t(size_t, size, PAGE_ALIGN(data_len));
+		skb = sock_alloc_send_skb(sk, size, msg->msg_flags&MSG_DONTWAIT,
+					  &err);
 
-		skb = sock_alloc_send_pskb(sk, size - data_len, data_len,
-					   msg->msg_flags & MSG_DONTWAIT, &err,
-					   get_order(UNIX_SKB_FRAGS_SZ));
-		if (!skb)
+		if (skb == NULL)
 			goto out_err;
+
+		/*
+		 *	If you pass two values to the sock_alloc_send_skb
+		 *	it tries to grab the large buffer with GFP_NOFS
+		 *	(which can fail easily), and if it fails grab the
+		 *	fallback size buffer which is under a page and will
+		 *	succeed. [Alan]
+		 */
+		size = min_t(int, size, skb_tailroom(skb));
+
 
 		/* Only send the fds in the first buffer */
 		err = unix_scm_to_skb(siocb->scm, skb, !fds_sent);
@@ -1857,11 +1845,7 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
 		max_level = err + 1;
 		fds_sent = true;
 
-		skb_put(skb, size - data_len);
-		skb->data_len = data_len;
-		skb->len = size;
-		err = skb_copy_datagram_from_iovec(skb, 0, msg->msg_iov,
-						   sent, size);
+		err = memcpy_fromiovec(skb_put(skb, size), msg->msg_iov, size);
 		if (err) {
 			kfree_skb(skb);
 			goto out_err;
@@ -1878,7 +1862,7 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
 		if (max_level > unix_sk(other)->recursion_level)
 			unix_sk(other)->recursion_level = max_level;
 		unix_state_unlock(other);
-		other->sk_data_ready(other);
+		other->sk_data_ready(other, size);
 		sent += size;
 	}
 
@@ -2065,21 +2049,12 @@ static long unix_stream_data_wait(struct sock *sk, long timeo,
 		unix_state_unlock(sk);
 		timeo = freezable_schedule_timeout(timeo);
 		unix_state_lock(sk);
-
-		if (sock_flag(sk, SOCK_DEAD))
-			break;
-
 		clear_bit(SOCK_ASYNC_WAITDATA, &sk->sk_socket->flags);
 	}
 
 	finish_wait(sk_sleep(sk), &wait);
 	unix_state_unlock(sk);
 	return timeo;
-}
-
-static unsigned int unix_skb_len(const struct sk_buff *skb)
-{
-	return skb->len - UNIXCB(skb).consumed;
 }
 
 static int unix_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
@@ -2090,7 +2065,7 @@ static int unix_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
 	struct scm_cookie tmp_scm;
 	struct sock *sk = sock->sk;
 	struct unix_sock *u = unix_sk(sk);
-	DECLARE_SOCKADDR(struct sockaddr_un *, sunaddr, msg->msg_name);
+	struct sockaddr_un *sunaddr = msg->msg_name;
 	int copied = 0;
 	int noblock = flags & MSG_DONTWAIT;
 	int check_creds = 0;
@@ -2119,22 +2094,20 @@ static int unix_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
 		memset(&tmp_scm, 0, sizeof(tmp_scm));
 	}
 
-	mutex_lock(&u->readlock);
-
-	if (flags & MSG_PEEK)
-		skip = sk_peek_offset(sk, flags);
-	else
-		skip = 0;
+	err = mutex_lock_interruptible(&u->readlock);
+	if (unlikely(err)) {
+		/* recvmsg() in non blocking mode is supposed to return -EAGAIN
+		 * sk_rcvtimeo is not honored by mutex_lock_interruptible()
+		 */
+		err = noblock ? -EAGAIN : -ERESTARTSYS;
+		goto out;
+	}
 
 	do {
 		int chunk;
 		struct sk_buff *skb, *last;
 
 		unix_state_lock(sk);
-		if (sock_flag(sk, SOCK_DEAD)) {
-			err = -ECONNRESET;
-			goto unlock;
-		}
 		last = skb = skb_peek(&sk->sk_receive_queue);
 again:
 		if (skb == NULL) {
@@ -2160,20 +2133,21 @@ again:
 
 			timeo = unix_stream_data_wait(sk, timeo, last);
 
-			if (signal_pending(current)) {
+			if (signal_pending(current)
+			    ||  mutex_lock_interruptible(&u->readlock)) {
 				err = sock_intr_errno(timeo);
 				goto out;
 			}
 
-			mutex_lock(&u->readlock);
 			continue;
  unlock:
 			unix_state_unlock(sk);
 			break;
 		}
 
-		while (skip >= unix_skb_len(skb)) {
-			skip -= unix_skb_len(skb);
+		skip = sk_peek_offset(sk, flags);
+		while (skip >= skb->len) {
+			skip -= skb->len;
 			last = skb;
 			skb = skb_peek_next(skb, &sk->sk_receive_queue);
 			if (!skb)
@@ -2200,9 +2174,8 @@ again:
 			sunaddr = NULL;
 		}
 
-		chunk = min_t(unsigned int, unix_skb_len(skb) - skip, size);
-		if (skb_copy_datagram_iovec(skb, UNIXCB(skb).consumed + skip,
-					    msg->msg_iov, chunk)) {
+		chunk = min_t(unsigned int, skb->len - skip, size);
+		if (memcpy_toiovec(msg->msg_iov, skb->data + skip, chunk)) {
 			if (copied == 0)
 				copied = -EFAULT;
 			break;
@@ -2212,14 +2185,14 @@ again:
 
 		/* Mark read part of skb as used */
 		if (!(flags & MSG_PEEK)) {
-			UNIXCB(skb).consumed += chunk;
+			skb_pull(skb, chunk);
 
 			sk_peek_offset_bwd(sk, chunk);
 
 			if (UNIXCB(skb).fp)
 				unix_detach_fds(siocb->scm, skb);
 
-			if (unix_skb_len(skb))
+			if (skb->len)
 				break;
 
 			skb_unlink(skb, &sk->sk_receive_queue);
@@ -2235,16 +2208,6 @@ again:
 
 			sk_peek_offset_fwd(sk, chunk);
 
-			if (UNIXCB(skb).fp)
-				break;
-
-			skip = 0;
-			last = skb;
-			unix_state_lock(sk);
-			skb = skb_peek_next(skb, &sk->sk_receive_queue);
-			if (skb)
-				goto again;
-			unix_state_unlock(sk);
 			break;
 		}
 	} while (size);
@@ -2313,7 +2276,7 @@ long unix_inq_len(struct sock *sk)
 	if (sk->sk_type == SOCK_STREAM ||
 	    sk->sk_type == SOCK_SEQPACKET) {
 		skb_queue_walk(&sk->sk_receive_queue, skb)
-			amount += unix_skb_len(skb);
+			amount += skb->len;
 	} else {
 		skb = skb_peek(&sk->sk_receive_queue);
 		if (skb)
@@ -2638,7 +2601,8 @@ static int __init af_unix_init(void)
 
 	rc = proto_register(&unix_proto, 1);
 	if (rc != 0) {
-		pr_crit("%s: Cannot create unix_sock SLAB cache!\n", __func__);
+		printk(KERN_CRIT "%s: Cannot create unix_sock SLAB cache!\n",
+		       __func__);
 		goto out;
 	}
 

@@ -23,8 +23,14 @@ Imgname="testboot.img"
 #	$ ln -s Image-File Linker	
 #	
 
+
+if [ -f $Pack_Image_Dir/Image-test ]; then
+    echo "Remove previews link"
+	eval "rm $Pack_Image_Dir/Image-test"
+fi
+
 cmd="ln -s $Kernel_Image_Dir/Image.gz-dtb $Pack_Image_Dir/Image-test"
-echo $cmd
+#echo $cmd
 eval $cmd
 
 
@@ -36,14 +42,14 @@ eval $cmd
 # cmd="abootimg --create $Imgname -f $Factory_Image_Dir/bootimg.cfg -k $Pack_Image_Dir/Image-test -r $Factory_Image_Dir/initrd.img -c \"bootsize=12500000\"" 
 cmd="abootimg --create $Pack_Image_Dir/$Imgname -f $Rooted_Image_Dir/bootimg.cfg -k $Pack_Image_Dir/Image-test -r $Rooted_Image_Dir/initrd.img -c \"bootsize=12550000\"" 
 
-echo $cmd
+#echo $cmd
 eval $cmd
 
 
 Adb=${Android_Debug_Tools_Dir}/adb
 Fastboot=${Android_Debug_Tools_Dir}/fastboot
 
-echo "Start un-undoable"
+echo "\nStart un-undoable\n"
 sleep 10s
 
 cmd="$Adb reboot bootloader"

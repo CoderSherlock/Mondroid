@@ -8,8 +8,7 @@ for the USR peripheral of the VADC.
 VADC node
 
 Required properties:
-- compatible : should be "qcom,qpnp-vadc" for Voltage ADC driver and
-		"qcom,qpnp-vadc-hc" for VADC_HC voltage ADC driver.
+- compatible : should be "qcom,qpnp-vadc" for Voltage ADC driver.
 - reg : offset and length of the PMIC Aribter register map.
 - address-cells : Must be one.
 - size-cells : Must be zero.
@@ -38,8 +37,7 @@ Optional properties:
 			   to set temperature thresholds and receive notification when the temperature
 			   crosses a set threshold, read temperature and enable/set trip types supported
 			   by the thermal framework.
-- hkadc_ldo-supply : Add this property if VADC needs to perform a Software Vote for the HKADC.
-- hkadc_ok-supply : Add this property if the VADC needs to perform a Software vote for the HKADC VREG_OK.
+
 
 Client required property:
 - qcom,<consumer name>-vadc : The phandle to the corresponding vadc device.

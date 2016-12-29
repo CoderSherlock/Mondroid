@@ -40,6 +40,8 @@
 
 #ifndef __ASSEMBLY__
 
+#include <asm/barrier.h>	/* for smp_rmb() */
+
 /*
  * With 64K pages on hash table, we have a special PTE format that
  * uses a second "half" of the page table to encode sub-page information
@@ -95,8 +97,7 @@ static inline unsigned long __rpte_to_hidx(real_pte_t rpte, unsigned long index)
 	(((pte) & _PAGE_COMBO)? MMU_PAGE_4K: MMU_PAGE_64K)
 
 #define remap_4k_pfn(vma, addr, pfn, prot)				\
-	(WARN_ON(((pfn) >= (1UL << (64 - PTE_RPN_SHIFT)))) ? -EINVAL :	\
-		remap_pfn_range((vma), (addr), (pfn), PAGE_SIZE,	\
-			__pgprot(pgprot_val((prot)) | _PAGE_4K_PFN)))
+	remap_pfn_range((vma), (addr), (pfn), PAGE_SIZE,		\
+			__pgprot(pgprot_val((prot)) | _PAGE_4K_PFN))
 
 #endif	/* __ASSEMBLY__ */

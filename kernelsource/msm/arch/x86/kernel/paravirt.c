@@ -23,7 +23,6 @@
 #include <linux/efi.h>
 #include <linux/bcd.h>
 #include <linux/highmem.h>
-#include <linux/kprobes.h>
 
 #include <asm/bug.h>
 #include <asm/paravirt.h>
@@ -41,18 +40,10 @@
 #include <asm/timer.h>
 #include <asm/special_insns.h>
 
-/*
- * nop stub, which must not clobber anything *including the stack* to
- * avoid confusing the entry prologues.
- */
-extern void _paravirt_nop(void);
-asm (".pushsection .entry.text, \"ax\"\n"
-     ".global _paravirt_nop\n"
-     "_paravirt_nop:\n\t"
-     "ret\n\t"
-     ".size _paravirt_nop, . - _paravirt_nop\n\t"
-     ".type _paravirt_nop, @function\n\t"
-     ".popsection");
+/* nop stub */
+void _paravirt_nop(void)
+{
+}
 
 /* identity function, which can be inlined */
 u32 _paravirt_ident_32(u32 x)
@@ -70,6 +61,11 @@ void __init default_banner(void)
 	printk(KERN_INFO "Booting paravirtualized kernel on %s\n",
 	       pv_info.name);
 }
+
+/* Simple instruction patching code. */
+#define DEF_NATIVE(ops, name, code)					\
+	extern const char start_##ops##_##name[], end_##ops##_##name[];	\
+	asm("start_" #ops "_" #name ": " code "; end_" #ops "_" #name ":")
 
 /* Undefined instruction for dealing with missing ops pointers. */
 static const unsigned char ud2a[] = { 0x0f, 0x0b };
@@ -328,7 +324,7 @@ struct pv_time_ops pv_time_ops = {
 	.steal_clock = native_steal_clock,
 };
 
-__visible struct pv_irq_ops pv_irq_ops = {
+struct pv_irq_ops pv_irq_ops = {
 	.save_fl = __PV_IS_CALLEE_SAVE(native_save_fl),
 	.restore_fl = __PV_IS_CALLEE_SAVE(native_restore_fl),
 	.irq_disable = __PV_IS_CALLEE_SAVE(native_irq_disable),
@@ -340,7 +336,7 @@ __visible struct pv_irq_ops pv_irq_ops = {
 #endif
 };
 
-__visible struct pv_cpu_ops pv_cpu_ops = {
+struct pv_cpu_ops pv_cpu_ops = {
 	.cpuid = native_cpuid,
 	.get_debugreg = native_get_debugreg,
 	.set_debugreg = native_set_debugreg,
@@ -397,11 +393,6 @@ __visible struct pv_cpu_ops pv_cpu_ops = {
 	.start_context_switch = paravirt_nop,
 	.end_context_switch = paravirt_nop,
 };
-
-/* At this point, native_get/set_debugreg has real function entries */
-NOKPROBE_SYMBOL(native_get_debugreg);
-NOKPROBE_SYMBOL(native_set_debugreg);
-NOKPROBE_SYMBOL(native_load_idt);
 
 struct pv_apic_ops pv_apic_ops = {
 #ifdef CONFIG_X86_LOCAL_APIC

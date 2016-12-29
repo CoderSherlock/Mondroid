@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -11,11 +11,6 @@
  */
 
 &soc {
-	msm_bus: qcom,kgsl-busmon {
-		label = "kgsl-busmon";
-		compatible = "qcom,kgsl-busmon";
-	};
-
 	/* To use BIMC based bus governor */
 	gpubw: qcom,gpubw {
 		compatible = "qcom,devbw";
@@ -31,7 +26,7 @@
 	};
 
 	qcom,gpu-bwmon@410000 {
-		compatible = "qcom,bimc-bwmon2";
+		compatible = "qcom,bimc-bwmon";
 		reg = <0x00410000 0x300>, <0x00401000 0x200>;
 		reg-names = "base", "global_base";
 		interrupts = <0 183 4>;
@@ -43,21 +38,18 @@
 		label = "kgsl-3d0";
 		compatible = "qcom,kgsl-3d0", "qcom,kgsl-3d";
 		reg = <0x01c00000 0x10000
-		       0x01c10000 0x10000
-		       0x0005c000 0x204>;
-		reg-names = "kgsl_3d0_reg_memory" , "kgsl_3d0_shader_memory" ,
-			    "qfprom_memory";
+		       0x01c10000 0x10000>;
+		reg-names = "kgsl_3d0_reg_memory" , "kgsl_3d0_shader_memory";
 		interrupts = <0 33 0>;
 		interrupt-names = "kgsl_3d0_irq";
 		qcom,id = <0>;
-
-		qcom,gpu-speed-config = <0>;
 
 		qcom,chipid = <0x03000400>;
 
 		qcom,initial-pwrlevel = <1>;
 
-		qcom,idle-timeout = <80>; //msec
+		/* Idle Timeout = HZ/12 */
+		qcom,idle-timeout = <8>;
 		qcom,strtstp-sleepwake;
 
 		/*
@@ -127,59 +119,6 @@
 			};
 		};
 
-		qcom,gpu-speed-config@0 {
-			compatible = "gpu-speed-config@0";
-			/* Power levels */
-			qcom,gpu-pwrlevels {
-				#address-cells = <1>;
-				#size-cells = <0>;
-
-				compatible = "qcom,gpu-pwrlevels";
-
-				qcom,gpu-pwrlevel@0 {
-					reg = <0>;
-					qcom,gpu-freq = <456000000>;
-					qcom,bus-freq = <3>;
-				};
-
-				qcom,gpu-pwrlevel@1 {
-					reg = <1>;
-					qcom,gpu-freq = <307200000>;
-					qcom,bus-freq = <2>;
-				};
-
-				qcom,gpu-pwrlevel@2 {
-					reg = <2>;
-					qcom,gpu-freq = <200000000>;
-					qcom,bus-freq = <1>;
-				};
-
-				qcom,gpu-pwrlevel@3 {
-					reg = <3>;
-					qcom,gpu-freq = <19200000>;
-					qcom,bus-freq = <0>;
-				};
-			};
-		};
-	 };
-	kgsl_msm_iommu: qcom,kgsl-iommu@1f00000 {
-	compatible = "qcom,kgsl-smmu-v2";
-	reg = <0x1f00000 0x10000>;
-	/*
-	 * The gpu can only program a single context bank
-	 * at this fixed offset.
-	 */
-	qcom,protect = <0xa000 0x1000>;
-	clocks = <&clock_gcc clk_gcc_smmu_cfg_clk>,
-		<&clock_gcc clk_gcc_gfx_tcu_clk>,
-		<&clock_gcc clk_gcc_gtcu_ahb_clk>,
-		<&clock_gcc clk_gcc_gfx_tbu_clk>;
-	clock-names = "scfg_clk", "gtcu_clk", "gtcu_iface_clk",
-			"gtbu_clk";
-	gfx3d_user: gfx3d_user {
-		compatible = "qcom,smmu-kgsl-cb";
-		qcom,gpu-offset = <0xa000>;
 	};
-};
 };
 

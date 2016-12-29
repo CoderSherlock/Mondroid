@@ -177,7 +177,7 @@ static void xrun(struct snd_pcm_substream *substream)
 	if (xrun_debug(substream, XRUN_DEBUG_BASIC)) {
 		char name[16];
 		snd_pcm_debug_name(substream, name, sizeof(name));
-		pcm_warn(substream->pcm, "XRUN: %s\n", name);
+		snd_printd(KERN_DEBUG "XRUN: %s\n", name);
 		dump_stack_on_xrun(substream);
 	}
 }
@@ -187,7 +187,9 @@ static void xrun(struct snd_pcm_substream *substream)
 	do {								\
 		if (xrun_debug(substream, XRUN_DEBUG_BASIC)) {		\
 			xrun_log_show(substream);			\
-			pr_err_ratelimited("ALSA: PCM: " fmt, ##args);	\
+			if (printk_ratelimit()) {			\
+				snd_printd("PCM: " fmt, ##args);	\
+			}						\
 			dump_stack_on_xrun(substream);			\
 		}							\
 	} while (0)
@@ -254,7 +256,7 @@ static void xrun_log_show(struct snd_pcm_substream *substream)
 		entry = &log->entries[idx];
 		if (entry->period_size == 0)
 			break;
-		pr_info("hwptr log: %s: %sj=%lu, pos=%ld/%ld/%ld, "
+		snd_printd("hwptr log: %s: %sj=%lu, pos=%ld/%ld/%ld, "
 			   "hwptr=%ld/%ld\n",
 			   name, entry->in_interrupt ? "[Q] " : "",
 			   entry->jiffies,
@@ -347,10 +349,10 @@ static int snd_pcm_update_hw_ptr0(struct snd_pcm_substream *substream,
 			char name[16];
 			snd_pcm_debug_name(substream, name, sizeof(name));
 			xrun_log_show(substream);
-			pcm_err(substream->pcm,
-				"XRUN: %s, pos = %ld, buffer size = %ld, period size = %ld\n",
-				name, pos, runtime->buffer_size,
-				runtime->period_size);
+			snd_printd(KERN_ERR  "BUG: %s, pos = %ld, "
+				   "buffer size = %ld, period size = %ld\n",
+				   name, pos, runtime->buffer_size,
+				   runtime->period_size);
 		}
 		pos = 0;
 	}
@@ -395,8 +397,8 @@ static int snd_pcm_update_hw_ptr0(struct snd_pcm_substream *substream,
 			XRUN_DEBUG_PERIODUPDATE : XRUN_DEBUG_HWPTRUPDATE)) {
 		char name[16];
 		snd_pcm_debug_name(substream, name, sizeof(name));
-		pcm_dbg(substream->pcm,
-			"%s_update: %s: pos=%u/%u/%u, hwptr=%ld/%ld/%ld/%ld\n",
+		snd_printd("%s_update: %s: pos=%u/%u/%u, "
+			   "hwptr=%ld/%ld/%ld/%ld\n",
 			   in_interrupt ? "period" : "hwptr",
 			   name,
 			   (unsigned int)pos,
@@ -561,11 +563,6 @@ int snd_pcm_update_hw_ptr(struct snd_pcm_substream *substream)
 	return snd_pcm_update_hw_ptr0(substream, 0);
 }
 
-int snd_pcm_update_delay_blk(struct snd_pcm_substream *substream)
-{
-	return substream->ops->delay_blk(substream);
-}
-
 /**
  * snd_pcm_set_ops - set the PCM operators
  * @pcm: the pcm instance
@@ -574,8 +571,7 @@ int snd_pcm_update_delay_blk(struct snd_pcm_substream *substream)
  *
  * Sets the given PCM operators to the pcm instance.
  */
-void snd_pcm_set_ops(struct snd_pcm *pcm, int direction,
-		     const struct snd_pcm_ops *ops)
+void snd_pcm_set_ops(struct snd_pcm *pcm, int direction, struct snd_pcm_ops *ops)
 {
 	struct snd_pcm_str *stream = &pcm->streams[direction];
 	struct snd_pcm_substream *substream;
@@ -1121,20 +1117,18 @@ int snd_interval_list(struct snd_interval *i, unsigned int count,
 
 EXPORT_SYMBOL(snd_interval_list);
 
-static int snd_interval_step(struct snd_interval *i, unsigned int step)
+static int snd_interval_step(struct snd_interval *i, unsigned int min, unsigned int step)
 {
 	unsigned int n;
 	int changed = 0;
-	n = i->min % step;
+	n = (i->min - min) % step;
 	if (n != 0 || i->openmin) {
 		i->min += step - n;
-		i->openmin = 0;
 		changed = 1;
 	}
-	n = i->max % step;
+	n = (i->max - min) % step;
 	if (n != 0 || i->openmax) {
 		i->max -= n;
-		i->openmax = 0;
 		changed = 1;
 	}
 	if (snd_interval_checkempty(i)) {
@@ -1250,7 +1244,6 @@ int snd_pcm_hw_constraint_mask64(struct snd_pcm_runtime *runtime, snd_pcm_hw_par
 		return -EINVAL;
 	return 0;
 }
-EXPORT_SYMBOL(snd_pcm_hw_constraint_mask64);
 
 /**
  * snd_pcm_hw_constraint_integer - apply an integer constraint to an interval
@@ -1437,7 +1430,7 @@ static int snd_pcm_hw_rule_step(struct snd_pcm_hw_params *params,
 				struct snd_pcm_hw_rule *rule)
 {
 	unsigned long step = (unsigned long) rule->private;
-	return snd_interval_step(hw_param_interval(params, rule->var), step);
+	return snd_interval_step(hw_param_interval(params, rule->var), 0, step);
 }
 
 /**
@@ -1963,9 +1956,8 @@ static int wait_for_avail(struct snd_pcm_substream *substream,
 			continue;
 		}
 		if (!tout) {
-			pcm_dbg(substream->pcm,
-				"%s write error (DMA or IRQ trouble?)\n",
-				is_playback ? "playback" : "capture");
+			snd_printd("%s write error (DMA or IRQ trouble?)\n",
+				   is_playback ? "playback" : "capture");
 			err = -EIO;
 			break;
 		}
@@ -2664,6 +2656,7 @@ int snd_pcm_add_volume_ctls(struct snd_pcm *pcm, int stream,
 	};
 	int err;
 	int size;
+	char *buf;
 
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info)
@@ -2674,16 +2667,17 @@ int snd_pcm_add_volume_ctls(struct snd_pcm *pcm, int stream,
 	info->max_length = max_length;
 	size = sizeof("Playback ") + sizeof(" Volume") +
 		STRING_LENGTH_OF_INT*sizeof(char) + 1;
-	knew.name = kzalloc(size, GFP_KERNEL);
-	if (!knew.name) {
+	buf = kzalloc(size, GFP_KERNEL);
+	if (!buf) {
 		kfree(info);
 		return -ENOMEM;
 	}
+	knew.name = buf;
 	if (stream == SNDRV_PCM_STREAM_PLAYBACK)
-		snprintf((char *)knew.name, size, "%s %d %s",
+		snprintf(buf, size, "%s %d %s",
 			"Playback", pcm->device, "Volume");
 	else
-		snprintf((char *)knew.name, size, "%s %d %s",
+		snprintf(buf, size, "%s %d %s",
 			"Capture", pcm->device, "Volume");
 	knew.device = pcm->device;
 	knew.count = pcm->streams[stream].substream_count;

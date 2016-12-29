@@ -74,8 +74,8 @@ struct idletimer_tg {
 	bool work_pending;
 	bool send_nl_msg;
 	bool active;
-	uid_t uid;
 	bool suspend_time_valid;
+	uid_t uid;
 };
 
 static LIST_HEAD(idletimer_tg_list);
@@ -360,8 +360,12 @@ static void reset_timer(const struct idletimer_tg_info *info,
 
 		/* Stores the uid resposible for waking up the radio */
 		if (skb && (skb->sk)) {
-			timer->uid = from_kuid_munged(current_user_ns(),
-						sock_i_uid(skb->sk));
+			struct sock *sk = skb->sk;
+			read_lock_bh(&sk->sk_callback_lock);
+			if ((sk->sk_socket) && (sk->sk_socket->file) &&
+		    (sk->sk_socket->file->f_cred))
+				timer->uid = sk->sk_socket->file->f_cred->uid;
+			read_unlock_bh(&sk->sk_callback_lock);
 		}
 
 		/* checks if there is a pending inactive notification*/

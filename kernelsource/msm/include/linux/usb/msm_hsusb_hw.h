@@ -22,15 +22,11 @@
 #define USB_GENCONFIG2       (MSM_USB_BASE + 0x00A0)
 #define USB_CAPLENGTH        (MSM_USB_BASE + 0x0100) /* 8 bit */
 #define USB_HS_GPTIMER_BASE  (MSM_USB_BASE + 0x80)
-#define USB_HS_APF_CTRL      (MSM_USB_BASE + 0x0380)
 
 #define GENCFG2_SESS_VLD_CTRL_EN		BIT(7)
 #define GENCFG2_LINESTATE_DIFF_WAKEUP_EN	BIT(12)
 #define GENCFG2_SYS_CLK_HOST_DEV_GATE_EN	BIT(13)
 #define GENCFG2_DPSE_DMSE_HV_INTR_EN		BIT(15)
-#define GENCFG2_TX_BUF_PREFETCH_FIX_EN		BIT(26)
-
-#define APF_CTRL_EN				BIT(0)
 
 #define USB_USBCMD           (MSM_USB_BASE + 0x0140)
 #define USB_USBSTS           (MSM_USB_BASE + 0x0144)
@@ -84,7 +80,6 @@
 
 #define GENCONFIG_BAM_DISABLE (1 << 13)
 #define GENCONFIG_TXFIFO_IDLE_FORCE_DISABLE (1 << 4)
-#define GENCONFIG_ULPI_SERIAL_EN (1 << 5)
 
 /* synopsys 28nm phy registers */
 #define ULPI_PWR_CLK_MNG_REG	0x88
@@ -95,6 +90,7 @@
 #define ULPI_MISC_A_VBUSVLDEXT		BIT(0)
 #define ULPI_MISC_A_VBUSVLDEXTSEL	BIT(1)
 
+#define PHY_ALT_INT		(1 << 28) /* PHY alternate interrupt */
 #define ASYNC_INTR_CTRL         (1 << 29) /* Enable async interrupt */
 #define ULPI_STP_CTRL           (1 << 30) /* Block communication with PHY */
 #define PHY_RETEN               (1 << 1) /* PHY retention enable/disable */
@@ -104,6 +100,10 @@
 #define PHY_POR_BIT_MASK	BIT(0)
 #define PHY_POR_ASSERT		(1 << 0) /* USB2 28nm PHY POR ASSERT */
 #define PHY_POR_DEASSERT	(0 << 0) /* USB2 28nm PHY POR DEASSERT */
+
+#define STS_PCI                 (1 << 2) /* R/WC - Port Change Detect */
+#define STS_URI                 (1 << 6) /* R/WC - RESET recv'd */
+#define STS_SLI                 (1 << 8) /* R/WC - suspend state entered */
 
 /* OTG definitions */
 #define OTGSC_INTSTS_MASK	(0x7f << 16)
@@ -116,6 +116,13 @@
 #define OTGSC_BSVIS		(1 << 19)
 #define OTGSC_IDIE		(1 << 24)
 #define OTGSC_BSVIE		(1 << 27)
+#define OTGSC_DPIE		(1 << 30)
+#define OTGSC_DPIS		(1 << 22)
+
+/* OTG interrupt status mask */
+#define OTG_USBSTS_MASK		(STS_PCI | STS_URI | STS_SLI | PHY_ALT_INT)
+#define OTG_OTGSTS_MASK		(OTGSC_IDIS | OTGSC_BSVIS | OTGSC_DPIS)
+
 
 /* USB PHY CSR registers and bit definitions */
 

@@ -8,7 +8,6 @@
  */
 #include <linux/irq.h>
 #include <linux/module.h>
-#include <linux/atomic.h>
 
 #ifndef _IIO_TRIGGER_H_
 #define _IIO_TRIGGER_H_
@@ -62,7 +61,7 @@ struct iio_trigger {
 
 	struct list_head		list;
 	struct list_head		alloc_list;
-	atomic_t			use_count;
+	int use_count;
 
 	struct irq_chip			subirq_chip;
 	int				subirq_base;
@@ -131,11 +130,12 @@ void iio_trigger_unregister(struct iio_trigger *trig_info);
 /**
  * iio_trigger_poll() - called on a trigger occurring
  * @trig:	trigger which occurred
+ * @time:	timestamp when trigger occurred
  *
  * Typically called in relevant hardware interrupt handler.
  **/
-void iio_trigger_poll(struct iio_trigger *trig);
-void iio_trigger_poll_chained(struct iio_trigger *trig);
+void iio_trigger_poll(struct iio_trigger *trig, s64 time);
+void iio_trigger_poll_chained(struct iio_trigger *trig, s64 time);
 
 irqreturn_t iio_trigger_generic_data_rdy_poll(int irq, void *private);
 

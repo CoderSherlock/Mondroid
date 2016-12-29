@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -27,9 +27,6 @@ struct alpha_pll_masks {
 	u32 alpha_en_mask;	/* alpha_en bit */
 	u32 output_mask;	/* pllout_* bits */
 	u32 post_div_mask;
-
-	u32 test_ctl_lo_mask;
-	u32 test_ctl_hi_mask;
 };
 
 struct alpha_pll_vco_tbl {
@@ -55,33 +52,12 @@ struct alpha_pll_clk {
 
 	u32 enable_config;	/* bitmask of outputs to be enabled */
 	u32 post_div_config;	/* masked post divider setting */
-	u32 config_ctl_val;	/* config register init value */
-	u32 test_ctl_lo_val;	/* test control settings */
-	u32 test_ctl_hi_val;
 
 	struct alpha_pll_vco_tbl *vco_tbl;
 	u32 num_vco;
-	u32 current_vco_val;
+
 	bool inited;
-	bool slew;
-	bool no_prepared_reconfig;
 
-	/* some PLLs support dynamically updating their rate
-	 * without disabling the PLL first. Set this flag
-	 * to enable this support.
-	 */
-	bool dynamic_update;
-
-	/*
-	 * Some chipsets need the offline request bit to be
-	 * cleared on a second write to the register, even though
-	 * SW wants the bit to be set. Set this flag to indicate
-	 * that the workaround is required.
-	 */
-	bool offline_bit_workaround;
-	bool no_irq_dis;
-	bool is_fabia;
-	unsigned long min_supported_freq;
 	struct clk c;
 };
 
@@ -89,13 +65,7 @@ static inline struct alpha_pll_clk *to_alpha_pll_clk(struct clk *c)
 {
 	return container_of(c, struct alpha_pll_clk, c);
 }
-
-
 #endif
-extern void __init_alpha_pll(struct clk *c);
+
 extern struct clk_ops clk_ops_alpha_pll;
-extern struct clk_ops clk_ops_alpha_pll_hwfsm;
 extern struct clk_ops clk_ops_fixed_alpha_pll;
-extern struct clk_ops clk_ops_dyna_alpha_pll;
-extern struct clk_ops clk_ops_fixed_fabia_alpha_pll;
-extern struct clk_ops clk_ops_fabia_alpha_pll;

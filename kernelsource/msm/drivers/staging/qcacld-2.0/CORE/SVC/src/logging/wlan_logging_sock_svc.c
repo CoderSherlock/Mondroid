@@ -316,6 +316,14 @@ static int wlan_queue_logmsg_for_app(void)
 		gwlan_logging.pcur_node =
 			(struct log_msg *)(gwlan_logging.filled_list.next);
 		++gwlan_logging.drop_count;
+		/* print every 64th drop count */
+		if (vos_is_multicast_logging() &&
+				(!(gwlan_logging.drop_count % 0x40))) {
+			pr_info("%s: drop_count = %u index = %d filled_length = %d\n",
+				__func__, gwlan_logging.drop_count,
+				gwlan_logging.pcur_node->index,
+				gwlan_logging.pcur_node->filled_length);
+		}
 		list_del_init(gwlan_logging.filled_list.next);
 		ret = 1;
 	}
@@ -399,9 +407,11 @@ int wlan_log_to_user(VOS_TRACE_LEVEL log_level, char *to_be_sent, int length)
 		 * Continue and copy logs to the available length and
 		 * discard the rest.
 		 */
-		if (MAX_LOGMSG_LENGTH < (sizeof(tAniNlHdr) + total_log_len))
+		if (MAX_LOGMSG_LENGTH < (sizeof(tAniNlHdr) + total_log_len)) {
+			VOS_ASSERT(0);
 			total_log_len = MAX_LOGMSG_LENGTH -
 						sizeof(tAniNlHdr) - 2;
+		}
 
 		memcpy(&ptr[*pfilled_length], tbuf, tlen);
 		memcpy(&ptr[*pfilled_length + tlen], to_be_sent,
@@ -741,6 +751,7 @@ static int wlan_logging_thread(void *Arg)
 		}
 
 		if (gwlan_logging.exit) {
+			pr_err("%s: Exiting the thread\n", __func__);
 			break;
 		}
 
@@ -794,6 +805,7 @@ static int wlan_logging_thread(void *Arg)
 		}
 	}
 
+	pr_info("%s: Terminating\n", __func__);
 
 	complete_and_exit(&gwlan_logging.shutdown_comp, 0);
 
@@ -863,6 +875,8 @@ int wlan_logging_sock_activate_svc(int log_fe_to_console, int num_buf)
 	int i, j, pkt_stats_size;
 	unsigned long irq_flag;
 
+	pr_info("%s: Initalizing FEConsoleLog = %d NumBuff = %d\n",
+			__func__, log_fe_to_console, num_buf);
 
 	gapp_pid = INVALID_PID;
 
@@ -950,6 +964,7 @@ int wlan_logging_sock_activate_svc(int log_fe_to_console, int num_buf)
 
 	nl_srv_register(ANI_NL_MSG_LOG, wlan_logging_proc_sock_rx_msg);
 
+	pr_info("%s: Activated wlan_logging svc\n", __func__);
 	return 0;
 
 err3:
@@ -1012,6 +1027,7 @@ int wlan_logging_sock_deactivate_svc(void)
 
 	vfree(gpkt_stats_buffers);
 	gpkt_stats_buffers = NULL;
+	pr_info("%s: Deactivate wlan_logging svc\n", __func__);
 
 	return 0;
 }

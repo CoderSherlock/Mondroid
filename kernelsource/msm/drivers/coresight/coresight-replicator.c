@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2013, 2015 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -126,10 +126,15 @@ static int replicator_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct coresight_desc *desc;
 
-	pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
-	if (IS_ERR(pdata))
-		return PTR_ERR(pdata);
-	pdev->dev.platform_data = pdata;
+	if (coresight_fuse_access_disabled())
+		return -EPERM;
+
+	if (pdev->dev.of_node) {
+		pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
+		if (IS_ERR(pdata))
+			return PTR_ERR(pdata);
+		pdev->dev.platform_data = pdata;
+	}
 
 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
 	if (!drvdata)
@@ -154,15 +159,6 @@ static int replicator_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	ret = clk_prepare_enable(drvdata->clk);
-	if (ret)
-		return ret;
-
-	if (!coresight_authstatus_enabled(drvdata->base))
-		goto err;
-
-	clk_disable_unprepare(drvdata->clk);
-
 	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
 	if (!desc)
 		return -ENOMEM;
@@ -178,9 +174,6 @@ static int replicator_probe(struct platform_device *pdev)
 
 	dev_info(dev, "REPLICATOR initialized\n");
 	return 0;
-err:
-	clk_disable_unprepare(drvdata->clk);
-	return -EPERM;
 }
 
 static int replicator_remove(struct platform_device *pdev)

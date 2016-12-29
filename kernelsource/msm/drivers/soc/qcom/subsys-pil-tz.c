@@ -36,17 +36,9 @@
 
 #define XO_FREQ			19200000
 #define PROXY_TIMEOUT_MS	10000
+#define MAX_SSR_REASON_LEN	81U
 #define STOP_ACK_TIMEOUT_MS	1000
 #define CRASH_STOP_ACK_TO_MS	200
-
-#define COLD_BOOT_DONE	0
-#define GDSC_DONE	1
-#define RAM_WIPE_DONE	2
-#define CPU_BOOT_DONE	3
-#define WDOG_BITE	4
-#define CLR_WDOG_BITE	5
-#define ERR_READY	6
-#define PBL_DONE	7
 
 #define desc_to_data(d) container_of(d, struct pil_tz_data, desc)
 #define subsys_to_data(d) container_of(d, struct pil_tz_data, subsys_desc)
@@ -81,14 +73,10 @@ struct reg_info {
  * @bus_client: bus client id
  * @enable_bus_scaling: set to true if PIL needs to vote for
  *			bus bandwidth
- * @keep_proxy_regs_on: If set, during proxy unvoting, PIL removes the
- *			voltage/current vote for proxy regulators but leaves
- *			them enabled.
  * @stop_ack: state of completion of stop ack
  * @desc: PIL descriptor
  * @subsys: subsystem device pointer
  * @subsys_desc: subsystem descriptor
- * @u32 bits_arr[8]: array of bit positions in SCSR registers
  */
 struct pil_tz_data {
 	struct reg_info *regs;
@@ -104,16 +92,10 @@ struct pil_tz_data {
 	u32 pas_id;
 	u32 bus_client;
 	bool enable_bus_scaling;
-	bool keep_proxy_regs_on;
 	struct completion stop_ack;
 	struct pil_desc desc;
 	struct subsys_device *subsys;
 	struct subsys_desc subsys_desc;
-	void __iomem *irq_status;
-	void __iomem *irq_clear;
-	void __iomem *irq_mask;
-	void __iomem *err_status;
-	u32 bits_arr[8];
 };
 
 enum scm_cmd {
@@ -416,9 +398,8 @@ static int piltz_resc_init(struct platform_device *pdev, struct pil_tz_data *d)
 	return 0;
 }
 
-static int enable_regulators(struct pil_tz_data *d, struct device *dev,
-				struct reg_info *regs, int reg_count,
-				bool reg_no_enable)
+static int enable_regulators(struct device *dev, struct reg_info *regs,
+								int reg_count)
 {
 	int i, rc = 0;
 
@@ -440,9 +421,6 @@ static int enable_regulators(struct pil_tz_data *d, struct device *dev,
 				goto err_mode;
 			}
 		}
-
-		if (d->keep_proxy_regs_on && reg_no_enable)
-			continue;
 
 		rc = regulator_enable(regs[i].reg);
 		if (rc) {
@@ -468,16 +446,13 @@ err_voltage:
 		if (regs[i].uA > 0)
 			regulator_set_optimum_mode(regs[i].reg, 0);
 
-		if (d->keep_proxy_regs_on && reg_no_enable)
-			continue;
 		regulator_disable(regs[i].reg);
 	}
 
 	return rc;
 }
 
-static void disable_regulators(struct pil_tz_data *d, struct reg_info *regs,
-					int reg_count, bool reg_no_disable)
+static void disable_regulators(struct reg_info *regs, int reg_count)
 {
 	int i;
 
@@ -488,8 +463,6 @@ static void disable_regulators(struct pil_tz_data *d, struct reg_info *regs,
 		if (regs[i].uA > 0)
 			regulator_set_optimum_mode(regs[i].reg, 0);
 
-		if (d->keep_proxy_regs_on && reg_no_disable)
-			continue;
 		regulator_disable(regs[i].reg);
 	}
 }
@@ -532,8 +505,7 @@ static int pil_make_proxy_vote(struct pil_desc *pil)
 	if (d->subsys_desc.no_auth)
 		return 0;
 
-	rc = enable_regulators(d, pil->dev, d->proxy_regs,
-					d->proxy_reg_count, false);
+	rc = enable_regulators(pil->dev, d->proxy_regs, d->proxy_reg_count);
 	if (rc)
 		return rc;
 
@@ -556,7 +528,7 @@ static int pil_make_proxy_vote(struct pil_desc *pil)
 err_bw:
 	disable_unprepare_clocks(d->proxy_clks, d->proxy_clk_count);
 err_clks:
-	disable_regulators(d, d->proxy_regs, d->proxy_reg_count, false);
+	disable_regulators(d->proxy_regs, d->proxy_reg_count);
 
 	return rc;
 }
@@ -576,7 +548,7 @@ static void pil_remove_proxy_vote(struct pil_desc *pil)
 
 	disable_unprepare_clocks(d->proxy_clks, d->proxy_clk_count);
 
-	disable_regulators(d, d->proxy_regs, d->proxy_reg_count, true);
+	disable_regulators(d->proxy_regs, d->proxy_reg_count);
 }
 
 static int pil_init_image_trusted(struct pil_desc *pil,
@@ -614,16 +586,14 @@ static int pil_init_image_trusted(struct pil_desc *pil,
 
 	memcpy(mdata_buf, metadata, size);
 
-	request.proc = d->pas_id;
-	request.image_addr = mdata_phys;
+	desc.args[0] = request.proc = d->pas_id;
+	desc.args[1] = request.image_addr = mdata_phys;
+	desc.arginfo = SCM_ARGS(2, SCM_VAL, SCM_RW);
 
 	if (!is_scm_armv8()) {
 		ret = scm_call(SCM_SVC_PIL, PAS_INIT_IMAGE_CMD, &request,
 				sizeof(request), &scm_ret, sizeof(scm_ret));
 	} else {
-		desc.args[0] = d->pas_id;
-		desc.args[1] = mdata_phys;
-		desc.arginfo = SCM_ARGS(2, SCM_VAL, SCM_RW);
 		ret = scm_call2(SCM_SIP_FNID(SCM_SVC_PIL, PAS_INIT_IMAGE_CMD),
 				&desc);
 		scm_ret = desc.ret[0];
@@ -652,18 +622,15 @@ static int pil_mem_setup_trusted(struct pil_desc *pil, phys_addr_t addr,
 	if (d->subsys_desc.no_auth)
 		return 0;
 
-	request.proc = d->pas_id;
-	request.start_addr = addr;
-	request.len = size;
+	desc.args[0] = request.proc = d->pas_id;
+	desc.args[1] = request.start_addr = addr;
+	desc.args[2] = request.len = size;
+	desc.arginfo = SCM_ARGS(3);
 
 	if (!is_scm_armv8()) {
 		ret = scm_call(SCM_SVC_PIL, PAS_MEM_SETUP_CMD, &request,
 				sizeof(request), &scm_ret, sizeof(scm_ret));
 	} else {
-		desc.args[0] = d->pas_id;
-		desc.args[1] = addr;
-		desc.args[2] = size;
-		desc.arginfo = SCM_ARGS(3);
 		ret = scm_call2(SCM_SIP_FNID(SCM_SVC_PIL, PAS_MEM_SETUP_CMD),
 				&desc);
 		scm_ret = desc.ret[0];
@@ -686,7 +653,7 @@ static int pil_auth_and_reset(struct pil_desc *pil)
 	desc.args[0] = proc = d->pas_id;
 	desc.arginfo = SCM_ARGS(1);
 
-	rc = enable_regulators(d, pil->dev, d->regs, d->reg_count, false);
+	rc = enable_regulators(pil->dev, d->regs, d->reg_count);
 	if (rc)
 		return rc;
 
@@ -714,7 +681,7 @@ static int pil_auth_and_reset(struct pil_desc *pil)
 err_reset:
 	disable_unprepare_clocks(d->clks, d->clk_count);
 err_clks:
-	disable_regulators(d, d->regs, d->reg_count, false);
+	disable_regulators(d->regs, d->reg_count);
 
 	return rc;
 }
@@ -732,8 +699,7 @@ static int pil_shutdown_trusted(struct pil_desc *pil)
 	desc.args[0] = proc = d->pas_id;
 	desc.arginfo = SCM_ARGS(1);
 
-	rc = enable_regulators(d, pil->dev, d->proxy_regs,
-					d->proxy_reg_count, true);
+	rc = enable_regulators(pil->dev, d->proxy_regs, d->proxy_reg_count);
 	if (rc)
 		return rc;
 
@@ -752,17 +718,17 @@ static int pil_shutdown_trusted(struct pil_desc *pil)
 	}
 
 	disable_unprepare_clocks(d->proxy_clks, d->proxy_clk_count);
-	disable_regulators(d, d->proxy_regs, d->proxy_reg_count, false);
+	disable_regulators(d->proxy_regs, d->proxy_reg_count);
 
 	if (rc)
 		return rc;
 
 	disable_unprepare_clocks(d->clks, d->clk_count);
-	disable_regulators(d, d->regs, d->reg_count, false);
+	disable_regulators(d->regs, d->reg_count);
 
 	return scm_ret;
 err_clks:
-	disable_regulators(d, d->proxy_regs, d->proxy_reg_count, false);
+	disable_regulators(d->proxy_regs, d->proxy_reg_count);
 	return rc;
 }
 
@@ -775,16 +741,15 @@ static struct pil_reset_ops pil_ops_trusted = {
 	.proxy_unvote = pil_remove_proxy_vote,
 };
 
-static void log_failure_reason(struct pil_tz_data *d)
+static void log_failure_reason(const struct pil_tz_data *d)
 {
 	u32 size;
-	char *smem_reason, *reason;
+	char *smem_reason, reason[MAX_SSR_REASON_LEN];
 	const char *name = d->subsys_desc.name;
 
 	if (d->smem_id == -1)
 		return;
 
-	reason = d->subsys_desc.last_crash_reason;
 	smem_reason = smem_get_entry_no_rlock(d->smem_id, &size, 0,
 							SMEM_ANY_HOST_FLAG);
 	if (!smem_reason || !size) {
@@ -830,7 +795,7 @@ static int subsys_powerup(const struct subsys_desc *subsys)
 	int ret = 0;
 
 	if (subsys->stop_ack_irq)
-		reinit_completion(&d->stop_ack);
+		INIT_COMPLETION(d->stop_ack);
 
 	d->desc.fw_name = subsys->fw_name;
 	ret = pil_boot(&d->desc);
@@ -911,54 +876,9 @@ static irqreturn_t subsys_stop_ack_intr_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t subsys_generic_handler(int irq, void *dev_id)
-{
-	struct pil_tz_data *d = subsys_to_data(dev_id);
-	uint32_t status_val, clear_val, err_value;
-
-	if (subsys_get_crash_status(d->subsys))
-		return IRQ_HANDLED;
-
-	/* Masking interrupts not handled by HLOS */
-	clear_val = __raw_readl(d->irq_mask);
-	__raw_writel(clear_val | BIT(d->bits_arr[COLD_BOOT_DONE]) |
-		BIT(d->bits_arr[GDSC_DONE]) | BIT(d->bits_arr[RAM_WIPE_DONE]) |
-		BIT(d->bits_arr[CPU_BOOT_DONE]), d->irq_mask);
-	status_val = __raw_readl(d->irq_status);
-
-	if (status_val & BIT(d->bits_arr[WDOG_BITE])) {
-		pr_err("wdog bite received from %s!\n", d->subsys_desc.name);
-		clear_val = __raw_readl(d->irq_clear);
-		__raw_writel(clear_val | BIT(d->bits_arr[CLR_WDOG_BITE]),
-							d->irq_clear);
-		subsys_set_crash_status(d->subsys, true);
-		log_failure_reason(d);
-		subsystem_restart_dev(d->subsys);
-	} else if (status_val & BIT(d->bits_arr[ERR_READY])) {
-		pr_debug("Subsystem error services up received from %s!\n",
-							d->subsys_desc.name);
-		clear_val = __raw_readl(d->irq_clear);
-		__raw_writel(clear_val | BIT(d->bits_arr[ERR_READY]),
-							d->irq_clear);
-		complete_err_ready(d->subsys);
-	} else if (status_val & BIT(d->bits_arr[PBL_DONE])) {
-		err_value =  __raw_readl(d->err_status);
-		pr_debug("PBL_DONE received from %s!\n",
-							d->subsys_desc.name);
-		if (!err_value) {
-			clear_val = __raw_readl(d->irq_clear);
-			__raw_writel(clear_val | BIT(d->bits_arr[PBL_DONE]),
-							d->irq_clear);
-		} else
-			pr_err("SP-PBL rmb error status: 0x%08x\n", err_value);
-	}
-	return IRQ_HANDLED;
-}
-
 static int pil_tz_driver_probe(struct platform_device *pdev)
 {
 	struct pil_tz_data *d;
-	struct resource *res;
 	u32 proxy_timeout;
 	int len, rc;
 
@@ -969,9 +889,6 @@ static int pil_tz_driver_probe(struct platform_device *pdev)
 
 	if (of_property_read_bool(pdev->dev.of_node, "qcom,pil-no-auth"))
 		d->subsys_desc.no_auth = true;
-
-	d->keep_proxy_regs_on = of_property_read_bool(pdev->dev.of_node,
-						"qcom,keep-proxy-regs-on");
 
 	rc = of_property_read_string(pdev->dev.of_node, "qcom,firmware-name",
 				      &d->desc.name);
@@ -1029,32 +946,10 @@ static int pil_tz_driver_probe(struct platform_device *pdev)
 	d->subsys_desc.ramdump = subsys_ramdump;
 	d->subsys_desc.free_memory = subsys_free_memory;
 	d->subsys_desc.crash_shutdown = subsys_crash_shutdown;
-	if (of_property_read_bool(pdev->dev.of_node,
-					"qcom,pil-generic-irq-handler")) {
-		d->subsys_desc.generic_handler = subsys_generic_handler;
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-						"sp2soc_irq_status");
-		d->irq_status = devm_ioremap_resource(&pdev->dev, res);
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-						"sp2soc_irq_clr");
-		d->irq_clear = devm_ioremap_resource(&pdev->dev, res);
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-						"sp2soc_irq_mask");
-		d->irq_mask = devm_ioremap_resource(&pdev->dev, res);
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-						"rmb_err");
-		d->err_status = devm_ioremap_resource(&pdev->dev, res);
-		rc = of_property_read_u32_array(pdev->dev.of_node,
-		       "qcom,spss-scsr-bits", d->bits_arr, sizeof(d->bits_arr)/
-							sizeof(d->bits_arr[0]));
-		if (rc)
-			dev_err(&pdev->dev, "Failed to read qcom,spss-scsr-bits");
-	} else {
-		d->subsys_desc.err_fatal_handler =
-						subsys_err_fatal_intr_handler;
-		d->subsys_desc.wdog_bite_handler = subsys_wdog_bite_irq_handler;
-		d->subsys_desc.stop_ack_handler = subsys_stop_ack_intr_handler;
-	}
+	d->subsys_desc.err_fatal_handler = subsys_err_fatal_intr_handler;
+	d->subsys_desc.wdog_bite_handler = subsys_wdog_bite_irq_handler;
+	d->subsys_desc.stop_ack_handler = subsys_stop_ack_intr_handler;
+
 	d->ramdump_dev = create_ramdump_device(d->subsys_desc.name,
 								&pdev->dev);
 	if (!d->ramdump_dev) {

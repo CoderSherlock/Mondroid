@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -87,8 +87,6 @@
 
 #define WCD9XXX_DMIC_SAMPLE_RATE_UNDEFINED 0
 
-#define WCD9XXX_DMIC_CLK_DRIVE_UNDEFINED 0
-
 struct wcd9xxx_amic {
 	/*legacy mode, txfe_enable and txfe_buff take 7 input
 	 * each bit represent the channel / TXFE number
@@ -118,10 +116,6 @@ struct wcd9xxx_micbias_setting {
 	u32 cfilt1_mv; /* in mv */
 	u32 cfilt2_mv; /* in mv */
 	u32 cfilt3_mv; /* in mv */
-	u32 micb1_mv;
-	u32 micb2_mv;
-	u32 micb3_mv;
-	u32 micb4_mv;
 	/* Different WCD9xxx series codecs may not
 	 * have 4 mic biases. If a codec has fewer
 	 * mic biases, some of these properties will
@@ -136,6 +130,11 @@ struct wcd9xxx_micbias_setting {
 	u8 bias3_cap_mode;
 	u8 bias4_cap_mode;
 	bool bias2_is_headset_only;
+};
+
+enum codec_variant {
+	WCD9XXX,
+	WCD9330,
 };
 
 struct wcd9xxx_ocp_setting {
@@ -178,7 +177,6 @@ struct wcd9xxx_pdata {
 	int irq_base;
 	int num_irqs;
 	int reset_gpio;
-	struct device_node *wcd_rst_np;
 	struct wcd9xxx_amic amic_settings;
 	struct slim_device slimbus_slave_device;
 	struct wcd9xxx_micbias_setting micbias;
@@ -187,8 +185,6 @@ struct wcd9xxx_pdata {
 	u32 mclk_rate;
 	u32 dmic_sample_rate;
 	u32 mad_dmic_sample_rate;
-	u32 ecpp_dmic_sample_rate;
-	u32 dmic_clk_drv;
 	enum codec_variant cdc_variant;
 	u16 use_pinctrl;
 };

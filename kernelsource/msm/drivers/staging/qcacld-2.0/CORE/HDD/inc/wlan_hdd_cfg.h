@@ -251,15 +251,6 @@
 #define CFG_ADVERTISE_CONCURRENT_OPERATION_MIN     ( 0 )
 #define CFG_ADVERTISE_CONCURRENT_OPERATION_MAX     ( 1 )
 
-/*
- * Force softap to 11n, when gSapForce11NFor11AC is set to 1 from ini
- * despite of hostapd.conf request for 11ac
- */
-#define CFG_SAP_FORCE_11N_FOR_11AC_NAME    "gSapForce11NFor11AC"
-#define CFG_SAP_FORCE_11N_FOR_11AC_MIN     (0)
-#define CFG_SAP_FORCE_11N_FOR_11AC_MAX     (1)
-#define CFG_SAP_FORCE_11N_FOR_11AC_DEFAULT (0)
-
 typedef enum
 {
     eHDD_DOT11_MODE_AUTO = 0, //covers all things we support
@@ -646,10 +637,6 @@ enum
 //Not to use CFG default because if no registry setting, this is ignored by SME.
 #define CFG_MAX_TX_POWER_DEFAULT                WNI_CFG_CURRENT_TX_POWER_LEVEL_STAMAX
 
-#define CFG_TX_POWER_CTRL_NAME                 "gAllowTPCfromAP"
-#define CFG_TX_POWER_CTRL_DEFAULT              (1)
-#define CFG_TX_POWER_CTRL_MIN                  (0)
-#define CFG_TX_POWER_CTRL_MAX                  (1)
 
 #define CFG_LOW_GAIN_OVERRIDE_NAME             "gLowGainOverride"
 #define CFG_LOW_GAIN_OVERRIDE_MIN              WNI_CFG_LOW_GAIN_OVERRIDE_STAMIN
@@ -1003,13 +990,13 @@ enum
 
 #define CFG_RRM_OPERATING_CHAN_MAX_DURATION_NAME         "gRrmOperChanMax" //section 11.10.3 IEEE std. 802.11k-2008
 #define CFG_RRM_OPERATING_CHAN_MAX_DURATION_MIN          (0)             //Maxduration = 2^(maxDuration - 4) * bcnIntvl.
-#define CFG_RRM_OPERATING_CHAN_MAX_DURATION_MAX          (7)
-#define CFG_RRM_OPERATING_CHAN_MAX_DURATION_DEFAULT      (4)             //max duration = 2^0 * bcnIntvl (100% of bcn intvl)
+#define CFG_RRM_OPERATING_CHAN_MAX_DURATION_MAX          (8)
+#define CFG_RRM_OPERATING_CHAN_MAX_DURATION_DEFAULT      (3)             //max duration = 2^-1 * bcnIntvl (50% of bcn intvl)
 
 #define CFG_RRM_NON_OPERATING_CHAN_MAX_DURATION_NAME     "gRrmNonOperChanMax" //Same as above.
 #define CFG_RRM_NON_OPERATING_CHAN_MAX_DURATION_MIN      (0)
-#define CFG_RRM_NON_OPERATING_CHAN_MAX_DURATION_MAX      (7)
-#define CFG_RRM_NON_OPERATING_CHAN_MAX_DURATION_DEFAULT  (4)
+#define CFG_RRM_NON_OPERATING_CHAN_MAX_DURATION_MAX      (8)
+#define CFG_RRM_NON_OPERATING_CHAN_MAX_DURATION_DEFAULT  (3)
 
 #define CFG_RRM_MEAS_RANDOMIZATION_INTVL_NAME            "gRrmRandnIntvl"
 #define CFG_RRM_MEAS_RANDOMIZATION_INTVL_MIN             (10)
@@ -1026,7 +1013,7 @@ enum
  * Comma is used as a separator for each byte.
  */
 #define CFG_RM_CAPABILITY_NAME            "rm_capability"
-#define CFG_RM_CAPABILITY_DEFAULT         "73,00,91,00,04"
+#define CFG_RM_CAPABILITY_DEFAULT         "73,00,6D,00,04"
 #endif
 
 #define CFG_QOS_IMPLICIT_SETUP_ENABLED_NAME                 "ImplicitQosIsEnabled"
@@ -1363,11 +1350,6 @@ typedef enum
 #define CFG_VHT_ENABLE_2x2_CAP_FEATURE_MIN     ( 0 )
 #define CFG_VHT_ENABLE_2x2_CAP_FEATURE_MAX     ( 1 )
 #define CFG_VHT_ENABLE_2x2_CAP_FEATURE_DEFAULT ( 0 )
-
-#define CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK    "gEnableDynamicSTAChainMask"
-#define CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK_MIN     (0)
-#define CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK_MAX     (1)
-#define CFG_ENABLE_VHT_DYNAMIC_STA_CHAINMASK_DEFAULT (0)
 
 /*
  * Valid chain mask values.
@@ -2368,6 +2350,14 @@ typedef enum
 #define CFG_MAX_MEDIUM_TIME_STADEFAULT           WNI_CFG_MAX_MEDIUM_TIME_STADEF
 
 /*
+ * SCAN Offload
+ */
+#define CFG_SCAN_OFFLOAD_NAME                     "gEnableDirectedScanOffload"
+#define CFG_SCAN_OFFLOAD_DISABLE                  ( 0 )
+#define CFG_SCAN_OFFLOAD_ENABLE                   ( 1 )
+#define CFG_SCAN_OFFLOAD_DEFAULT                  ( CFG_SCAN_OFFLOAD_DISABLE )
+
+/*
  * Enable legacy fast roaming (LFR) on STA link during concurrent sessions
  */
 #ifdef WLAN_FEATURE_ROAM_SCAN_OFFLOAD
@@ -2733,12 +2723,12 @@ This feature requires the dependent cfg.ini "gRoamPrefer5GHz" set to 1 */
 #define CFG_SET_TXPOWER_LIMIT2G_NAME               "TxPower2g"
 #define CFG_SET_TXPOWER_LIMIT2G_MIN                ( 0 )
 #define CFG_SET_TXPOWER_LIMIT2G_MAX                ( 30 )
-#define CFG_SET_TXPOWER_LIMIT2G_DEFAULT            ( 30 )
+#define CFG_SET_TXPOWER_LIMIT2G_DEFAULT            ( 15 )
 
 #define CFG_SET_TXPOWER_LIMIT5G_NAME               "TxPower5g"
 #define CFG_SET_TXPOWER_LIMIT5G_MIN                ( 0 )
 #define CFG_SET_TXPOWER_LIMIT5G_MAX                ( 30 )
-#define CFG_SET_TXPOWER_LIMIT5G_DEFAULT            ( 30 )
+#define CFG_SET_TXPOWER_LIMIT5G_DEFAULT            ( 15 )
 
 #ifdef QCA_LL_TX_FLOW_CT
 /* Default, single interface case flow control parameters */
@@ -2892,11 +2882,6 @@ This feature requires the dependent cfg.ini "gRoamPrefer5GHz" set to 1 */
 #define CFG_TCP_DELACK_THRESHOLD_LOW_DEFAULT       ( 1000 )
 #define CFG_TCP_DELACK_THRESHOLD_LOW_MIN           ( 0 )
 #define CFG_TCP_DELACK_THRESHOLD_LOW_MAX           ( 10000 )
-
-#define CFG_TCP_DELACK_TIMER_COUNT                 "gTcpDelAckTimerCount"
-#define CFG_TCP_DELACK_TIMER_COUNT_DEFAULT         ( 30 )
-#define CFG_TCP_DELACK_TIMER_COUNT_MIN             ( 1 )
-#define CFG_TCP_DELACK_TIMER_COUNT_MAX             ( 1000 )
 
 
 /* TCP_TX_HIGH_TPUT_THRESHOLD specifies the threshold of packets transmitted
@@ -3828,16 +3813,6 @@ enum dot11p_mode {
 #define CFG_EDCA_BE_AIFS_VALUE_MAX        (15)
 #define CFG_EDCA_BE_AIFS_VALUE_DEFAULT    (3)
 
-#define CFG_TGT_GTX_USR_CFG_NAME      "tgt_gtx_usr_cfg"
-#define CFG_TGT_GTX_USR_CFG_MIN       (0)
-#define CFG_TGT_GTX_USR_CFG_MAX       (32)
-#define CFG_TGT_GTX_USR_CFG_DEFAULT   (32)
-
-#define CFG_CH_AVOID_SAP_RESTART_NAME    "sap_ch_avoid_restart"
-#define CFG_CH_AVOID_SAP_RESTART_MIN     (0)
-#define CFG_CH_AVOID_SAP_RESTART_MAX     (1)
-#define CFG_CH_AVOID_SAP_RESTART_DEFAULT (0)
-
 #define CFG_RX_WAKELOCK_TIMEOUT_NAME         "rx_wakelock_timeout"
 #define CFG_RX_WAKELOCK_TIMEOUT_DEFAULT      (50)
 #define CFG_RX_WAKELOCK_TIMEOUT_MIN          (0)
@@ -3846,6 +3821,9 @@ enum dot11p_mode {
  * In static display use case when APPS is in stand alone power save mode enable
  * active offload mode which helps FW to filter out MC/BC data packets to avoid
  * APPS wake up and save more power.
+ *
+ * By default enable active mode offload as it helps to save more power in
+ * static display usecase(APPS stand alone power collapse).
  *
  * If active mode offload(gActiveModeOffload=1) is enabled then all applicable
  * data offload/filtering is enabled immediately in FW once config is available
@@ -3933,7 +3911,6 @@ struct hdd_config {
    v_U32_t       goLinkMonitorPeriod;
    v_U32_t       nBeaconInterval;
    v_U8_t        nTxPowerCap;   //In dBm
-   v_BOOL_t      allow_tpc_from_ap;
    v_BOOL_t      fIsLowGainOverride;
    v_U8_t        disablePacketFilter;
 #if defined WLAN_FEATURE_VOWIFI
@@ -4287,6 +4264,7 @@ struct hdd_config {
    v_BOOL_t                    enableSSR;
    v_U32_t                     cfgMaxMediumTime;
    v_BOOL_t                    enableVhtFor24GHzBand;
+   v_U8_t                      fScanOffload;
 #ifdef WLAN_FEATURE_ROAM_SCAN_OFFLOAD
    /* Flag indicating whether legacy fast roam during concurrency is enabled in cfg.ini or not */
    v_BOOL_t                    bFastRoamInConIniFeatureEnabled;
@@ -4400,7 +4378,6 @@ struct hdd_config {
    v_U32_t                     busBandwidthComputeInterval;
    v_U32_t                     tcpDelackThresholdHigh;
    v_U32_t                     tcpDelackThresholdLow;
-   uint32_t                    tcpDelackTimerCount;
    uint32_t                    tcp_tx_high_tput_thres;
 #endif /* FEATURE_BUS_BANDWIDTH */
 #ifdef QCA_SUPPORT_TXRX_HL_BUNDLE
@@ -4614,13 +4591,6 @@ struct hdd_config {
    uint32_t                    edca_vi_aifs;
    uint32_t                    edca_bk_aifs;
    uint32_t                    edca_be_aifs;
-   bool                        enable_dynamic_sta_chainmask;
-   /* parameter to force sap into 11n */
-   bool                        sap_force_11n_for_11ac;
-
-   /* parameter to control GTX */
-   uint32_t                    tgt_gtx_usr_cfg;
-   bool                        sap_restrt_ch_avoid;
    uint32_t                    rx_wakelock_timeout;
    bool                        active_mode_offload;
 };

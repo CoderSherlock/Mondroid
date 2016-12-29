@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -157,8 +157,8 @@ enum wcd9xxx_mbhc_clk_freq {
 enum wcd9xxx_mbhc_event_state {
 	MBHC_EVENT_PA_HPHL,
 	MBHC_EVENT_PA_HPHR,
-	MBHC_EVENT_PRE_TX_3_ON,
-	MBHC_EVENT_POST_TX_3_OFF,
+	MBHC_EVENT_PRE_TX_1_3_ON,
+	MBHC_EVENT_POST_TX_1_3_OFF,
 };
 
 enum mbhc_hph_type {
@@ -275,7 +275,6 @@ struct wcd9xxx_mbhc_config {
 	bool use_vddio_meas;
 	bool enable_anc_mic_detect;
 	enum hw_jack_type hw_jack_type;
-	int key_code[8];
 };
 
 struct wcd9xxx_cfilt_mode {
@@ -414,6 +413,8 @@ struct wcd9xxx_mbhc {
 #endif
 
 	struct mutex mbhc_lock;
+
+	bool force_linein;
 };
 
 #define WCD9XXX_MBHC_CAL_SIZE(buttons, rload) ( \
@@ -471,7 +472,6 @@ struct wcd9xxx_mbhc {
 	    (cfg_ptr->_n_rload * \
 	     (sizeof(cfg_ptr->_rload[0]) + sizeof(cfg_ptr->_alpha[0]))))
 
-int wcd9xxx_mbhc_set_keycode(struct wcd9xxx_mbhc *mbhc);
 int wcd9xxx_mbhc_start(struct wcd9xxx_mbhc *mbhc,
 		       struct wcd9xxx_mbhc_config *mbhc_cfg);
 void wcd9xxx_mbhc_stop(struct wcd9xxx_mbhc *mbhc);

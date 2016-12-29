@@ -72,7 +72,7 @@ static atomic_t msm_rtb_idx;
 #endif
 
 static struct msm_rtb_state msm_rtb = {
-	.filter = (1 << LOGK_READL)|(1 << LOGK_WRITEL)|(1 << LOGK_LOGBUF)|(1 << LOGK_HOTPLUG)|(1 << LOGK_CTXID)|(1 << LOGK_IRQ)|(1 << LOGK_DIE)|(1 << LOGK_INITCALL)|(1 << LOGK_SOFTIRQ),
+	.filter = 1 << LOGK_LOGBUF,
 	.enabled = 1,
 };
 
@@ -88,7 +88,6 @@ static int msm_rtb_panic_notifier(struct notifier_block *this,
 
 static struct notifier_block msm_rtb_panic_blk = {
 	.notifier_call  = msm_rtb_panic_notifier,
-	.priority = INT_MAX,
 };
 
 int notrace msm_rtb_event_should_log(enum logk_event_type log_type)
@@ -161,10 +160,20 @@ static void uncached_logk_timestamp(int idx)
 }
 
 #if defined(CONFIG_MSM_RTB_SEPARATE_CPUS)
+/*
+ * Since it is not necessarily true that nentries % step_size == 0,
+ * must make appropriate adjustments to the index when a "wraparound"
+ * occurs to ensure that msm_rtb.rtb[x] always belongs to the same cpu.
+ * It is desired to give all cpus the same number of entries; this leaves
+ * (nentries % step_size) dead space at the end of the buffer.
+ */
 static int msm_rtb_get_idx(void)
 {
 	int cpu, i, offset;
 	atomic_t *index;
+	unsigned long flags;
+	u32 unused_buffer_size = msm_rtb.nentries % msm_rtb.step_size;
+	int adjusted_size;
 
 	/*
 	 * ideally we would use get_cpu but this is a close enough
@@ -174,17 +183,24 @@ static int msm_rtb_get_idx(void)
 
 	index = &per_cpu(msm_rtb_idx_cpu, cpu);
 
+	local_irq_save(flags);
 	i = atomic_add_return(msm_rtb.step_size, index);
 	i -= msm_rtb.step_size;
 
-	/* Check if index has wrapped around */
-	offset = (i & (msm_rtb.nentries - 1)) -
-		 ((i - msm_rtb.step_size) & (msm_rtb.nentries - 1));
+	/*
+	 * Check if index has wrapped around or is in the unused region at the
+	 * end of the buffer
+	 */
+	adjusted_size = atomic_read(index) + unused_buffer_size;
+	offset = (adjusted_size & (msm_rtb.nentries - 1)) -
+		 ((adjusted_size - msm_rtb.step_size) & (msm_rtb.nentries - 1));
 	if (offset < 0) {
 		uncached_logk_timestamp(i);
-		i = atomic_add_return(msm_rtb.step_size, index);
+		i = atomic_add_return(msm_rtb.step_size + unused_buffer_size,
+									index);
 		i -= msm_rtb.step_size;
 	}
+	local_irq_restore(flags);
 
 	return i;
 }
@@ -234,59 +250,46 @@ EXPORT_SYMBOL(uncached_logk);
 static int msm_rtb_probe(struct platform_device *pdev)
 {
 	struct msm_rtb_platform_data *d = pdev->dev.platform_data;
-	struct resource *res = NULL;
 #if defined(CONFIG_MSM_RTB_SEPARATE_CPUS)
 	unsigned int cpu;
 #endif
 	int ret;
 
 	if (!pdev->dev.of_node) {
-		if (!d) {
-			return -EINVAL;
-		}
 		msm_rtb.size = d->size;
 	} else {
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "msm_rtb_res");
-		if (res) {
-			msm_rtb.size = resource_size(res);
-		} else {
-			u64 size;
-			struct device_node *pnode;
+		u64 size;
+		struct device_node *pnode;
 
-			pnode = of_parse_phandle(pdev->dev.of_node,
-							"linux,contiguous-region", 0);
-			if (pnode != NULL) {
-				const u32 *addr;
+		pnode = of_parse_phandle(pdev->dev.of_node,
+						"linux,contiguous-region", 0);
+		if (pnode != NULL) {
+			const u32 *addr;
 
-				addr = of_get_address(pnode, 0, &size, NULL);
-				if (!addr) {
-					of_node_put(pnode);
-					return -EINVAL;
-				}
+			addr = of_get_address(pnode, 0, &size, NULL);
+			if (!addr) {
 				of_node_put(pnode);
-			} else {
-				ret = of_property_read_u32(pdev->dev.of_node,
-						"qcom,rtb-size",
-						(u32 *)&size);
-				if (ret < 0)
-					return ret;
+				return -EINVAL;
 			}
-			msm_rtb.size = size;
+			of_node_put(pnode);
+		} else {
+			ret = of_property_read_u32(pdev->dev.of_node,
+					"qcom,rtb-size",
+					(u32 *)&size);
+			if (ret < 0)
+				return ret;
+
 		}
+
+		msm_rtb.size = size;
 	}
-	pr_info("msm_rtb.size: 0x%x\n", msm_rtb.size);
 
 	if (msm_rtb.size <= 0 || msm_rtb.size > SZ_1M)
 		return -EINVAL;
 
-	if (res) {
-		msm_rtb.phys = res->start;
-		msm_rtb.rtb = ioremap(msm_rtb.phys, msm_rtb.size);
-	} else {
-		msm_rtb.rtb = dma_alloc_coherent(&pdev->dev, msm_rtb.size, &msm_rtb.phys, GFP_KERNEL);
-	}
-
-	pr_info("msm_rtb set ok: phys: 0x%llx, size: 0x%x\n", msm_rtb.phys, msm_rtb.size);
+	msm_rtb.rtb = dma_alloc_coherent(&pdev->dev, msm_rtb.size,
+						&msm_rtb.phys,
+						GFP_KERNEL);
 
 	if (!msm_rtb.rtb)
 		return -ENOMEM;
@@ -296,7 +299,7 @@ static int msm_rtb_probe(struct platform_device *pdev)
 	/* Round this down to a power of 2 */
 	msm_rtb.nentries = __rounddown_pow_of_two(msm_rtb.nentries);
 
-	memset_io(msm_rtb.rtb, 0, msm_rtb.size);
+	memset(msm_rtb.rtb, 0, msm_rtb.size);
 
 
 #if defined(CONFIG_MSM_RTB_SEPARATE_CPUS)

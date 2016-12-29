@@ -36,8 +36,8 @@
  * @last_time: Monotonic clock when the wakeup source's was touched last time.
  * @prevent_sleep_time: Total time this source has been preventing autosleep.
  * @event_count: Number of signaled wakeup events.
- * @active_count: Number of times the wakeup source was activated.
- * @relax_count: Number of times the wakeup source was deactivated.
+ * @active_count: Number of times the wakeup sorce was activated.
+ * @relax_count: Number of times the wakeup sorce was deactivated.
  * @expire_count: Number of times the wakeup source's timeout has expired.
  * @wakeup_count: Number of times the wakeup source might abort suspend.
  * @active: Status of the wakeup source.
@@ -100,10 +100,6 @@ extern void __pm_relax(struct wakeup_source *ws);
 extern void pm_relax(struct device *dev);
 extern void __pm_wakeup_event(struct wakeup_source *ws, unsigned int msec);
 extern void pm_wakeup_event(struct device *dev, unsigned int msec);
-
-#ifdef CONFIG_HTC_POWER_DEBUG
-void htc_print_active_wakeup_sources(void);
-#endif
 
 #else /* !CONFIG_PM_SLEEP */
 
@@ -181,10 +177,6 @@ static inline void pm_relax(struct device *dev) {}
 static inline void __pm_wakeup_event(struct wakeup_source *ws, unsigned int msec) {}
 
 static inline void pm_wakeup_event(struct device *dev, unsigned int msec) {}
-
-#ifdef CONFIG_HTC_POWER_DEBUG
-static inline void htc_print_active_wakeup_sources(void) {}
-#endif
 
 #endif /* !CONFIG_PM_SLEEP */
 

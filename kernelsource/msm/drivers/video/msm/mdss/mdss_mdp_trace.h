@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -83,58 +83,6 @@ DEFINE_EVENT(mdp_sspp_template, mdp_sspp_set,
 DEFINE_EVENT(mdp_sspp_template, mdp_sspp_change,
 	TP_PROTO(struct mdss_mdp_pipe *pipe),
 	TP_ARGS(pipe)
-);
-
-TRACE_EVENT(mdp_perf_set_qos_luts,
-	TP_PROTO(u32 pnum, u32 fmt, u32 intf, u32 rot, u32 fl,
-		u32 lut, bool linear),
-	TP_ARGS(pnum, fmt, intf, rot, fl, lut, linear),
-	TP_STRUCT__entry(
-			__field(u32, pnum)
-			__field(u32, fmt)
-			__field(u32, intf)
-			__field(u32, rot)
-			__field(u32, fl)
-			__field(u32, lut)
-			__field(bool, linear)
-	),
-	TP_fast_assign(
-			__entry->pnum = pnum;
-			__entry->fmt = fmt;
-			__entry->intf = intf;
-			__entry->rot = rot;
-			__entry->fl = fl;
-			__entry->lut = lut;
-			__entry->linear = linear;
-	),
-	TP_printk("pnum=%d fmt=%d intf=%d rot=%d fl:%d lut=0x%x lin:%d",
-			__entry->pnum, __entry->fmt,
-			__entry->intf, __entry->rot, __entry->fl,
-			__entry->lut, __entry->linear)
-);
-
-TRACE_EVENT(mdp_perf_set_panic_luts,
-	TP_PROTO(u32 pnum, u32 fmt, u32 mode, u32 panic_lut,
-		u32 robust_lut),
-	TP_ARGS(pnum, fmt, mode, panic_lut, robust_lut),
-	TP_STRUCT__entry(
-			__field(u32, pnum)
-			__field(u32, fmt)
-			__field(u32, mode)
-			__field(u32, panic_lut)
-			__field(u32, robust_lut)
-	),
-	TP_fast_assign(
-			__entry->pnum = pnum;
-			__entry->fmt = fmt;
-			__entry->mode = mode;
-			__entry->panic_lut = panic_lut;
-			__entry->robust_lut = robust_lut;
-	),
-	TP_printk("pnum=%d fmt=%d mode=%d luts[0x%x, 0x%x]",
-			__entry->pnum, __entry->fmt,
-			__entry->mode, __entry->panic_lut,
-			__entry->robust_lut)
 );
 
 TRACE_EVENT(mdp_perf_set_wm_levels,
@@ -295,23 +243,6 @@ TRACE_EVENT(mdp_perf_update_bus,
 			__entry->ib_quota)
 );
 
-TRACE_EVENT(mdp_misr_crc,
-	TP_PROTO(u32 block_id, u32 vsync_cnt, u32 crc),
-	TP_ARGS(block_id, vsync_cnt, crc),
-	TP_STRUCT__entry(
-			__field(u32, block_id)
-			__field(u32, vsync_cnt)
-			__field(u32, crc)
-	),
-	TP_fast_assign(
-			__entry->block_id = block_id;
-			__entry->vsync_cnt = vsync_cnt;
-			__entry->crc = crc;
-	),
-	TP_printk("block_id:%d vsync_cnt:%d crc:0x%08x",
-			__entry->block_id, __entry->vsync_cnt, __entry->crc)
-);
-
 TRACE_EVENT(mdp_cmd_pingpong_done,
 	TP_PROTO(struct mdss_mdp_ctl *ctl, u32 pp_num, int koff_cnt),
 	TP_ARGS(ctl, pp_num, koff_cnt),
@@ -408,20 +339,6 @@ TRACE_EVENT(mdp_trace_counter,
 	),
 	TP_printk("%d|%s|%d", __entry->pid,
 			__get_str(counter_name), __entry->value)
-);
-
-TRACE_EVENT(rotator_bw_ao_as_context,
-	TP_PROTO(u32 state),
-	TP_ARGS(state),
-	TP_STRUCT__entry(
-			__field(u32, state)
-	),
-	TP_fast_assign(
-			__entry->state = state;
-	),
-	TP_printk("Rotator bw context %s",
-			__entry->state ? "Active Only" : "Active+Sleep")
-
 );
 
 #endif /* if !defined(TRACE_MDSS_MDP_H) || defined(TRACE_HEADER_MULTI_READ) */

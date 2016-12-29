@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -18,6 +18,9 @@
 #include "kgsl_pwrscale.h"
 #include "kgsl_device.h"
 #include "kgsl_trace.h"
+
+#define FAST_BUS 1
+#define SLOW_BUS -1
 
 /*
  * "SLEEP" is generic counting both NAP & SLUMBER
@@ -127,7 +130,6 @@ EXPORT_SYMBOL(kgsl_pwrscale_busy);
  */
 void kgsl_pwrscale_update_stats(struct kgsl_device *device)
 {
-	struct kgsl_pwrctrl *pwrctrl = &device->pwrctrl;
 	struct kgsl_pwrscale *psc = &device->pwrscale;
 	BUG_ON(!mutex_is_locked(&device->mutex));
 
@@ -151,8 +153,6 @@ void kgsl_pwrscale_update_stats(struct kgsl_device *device)
 		device->pwrscale.accum_stats.busy_time += stats.busy_time;
 		device->pwrscale.accum_stats.ram_time += stats.ram_time;
 		device->pwrscale.accum_stats.ram_wait += stats.ram_wait;
-		pwrctrl->clock_times[pwrctrl->active_pwrlevel] +=
-				stats.busy_time;
 	}
 }
 EXPORT_SYMBOL(kgsl_pwrscale_update_stats);
@@ -271,7 +271,7 @@ static bool popp_stable(struct kgsl_device *device)
 	if (test_bit(POPP_PUSH, &psc->popp_state))
 		return false;
 	if (!psc->popp_level &&
-			(pwr->active_pwrlevel == pwr->min_pwrlevel))
+			pwr->active_pwrlevel != 0)
 		return false;
 	if (psc->history[KGSL_PWREVENT_STATE].events == NULL)
 		return false;
@@ -420,8 +420,6 @@ static int popp_trans2(struct kgsl_device *device, int level)
 		/* Try a more aggressive mitigation */
 		psc->popp_level--;
 		level++;
-		/* Update the stable timestamp */
-		device->pwrscale.freq_change_time = ktime_to_ms(ktime_get());
 		break;
 	case POPP_MAX:
 	default:
@@ -536,8 +534,6 @@ int kgsl_devfreq_get_dev_status(struct device *dev,
 
 	stat->current_frequency = kgsl_pwrctrl_active_freq(&device->pwrctrl);
 
-	stat->private_data = &device->active_context_count;
-
 	/*
 	 * keep the latest devfreq_dev_status values
 	 * and vbif counters data
@@ -557,8 +553,7 @@ int kgsl_devfreq_get_dev_status(struct device *dev,
 	}
 
 	kgsl_pwrctrl_busy_time(device, stat->total_time, stat->busy_time);
-	trace_kgsl_pwrstats(device, stat->total_time,
-		&pwrscale->accum_stats, device->active_context_count);
+	trace_kgsl_pwrstats(device, stat->total_time, &pwrscale->accum_stats);
 	memset(&pwrscale->accum_stats, 0, sizeof(pwrscale->accum_stats));
 
 	mutex_unlock(&device->mutex);
@@ -678,7 +673,6 @@ int kgsl_busmon_target(struct device *dev, unsigned long *freq, u32 flags)
 	struct kgsl_pwrlevel *pwr_level;
 	int  level, b;
 	u32 bus_flag;
-	unsigned long ab_mbytes;
 
 	if (device == NULL)
 		return -ENODEV;
@@ -697,7 +691,6 @@ int kgsl_busmon_target(struct device *dev, unsigned long *freq, u32 flags)
 	pwr_level = &pwr->pwrlevels[level];
 	bus_flag = device->pwrscale.bus_profile.flag;
 	device->pwrscale.bus_profile.flag = 0;
-	ab_mbytes = device->pwrscale.bus_profile.ab_mbytes;
 
 	/*
 	 * Bus devfreq governor has calculated its recomendations
@@ -718,10 +711,8 @@ int kgsl_busmon_target(struct device *dev, unsigned long *freq, u32 flags)
 		((pwr_level->bus_freq + pwr->bus_mod) > pwr_level->bus_min))
 			pwr->bus_mod--;
 
-	/* Update bus vote if AB or IB is modified */
-	if ((pwr->bus_mod != b) || (pwr->bus_ab_mbytes != ab_mbytes)) {
+	if (pwr->bus_mod != b) {
 		pwr->bus_percent_ab = device->pwrscale.bus_profile.percent_ab;
-		pwr->bus_ab_mbytes = ab_mbytes;
 		kgsl_pwrctrl_buslevel_update(device, true);
 	}
 
@@ -789,31 +780,6 @@ int kgsl_pwrscale_init(struct device *dev, const char *governor)
 
 	/* initialize msm-adreno-tz governor specific data here */
 	data = gpu_profile->private_data;
-
-	data->disable_busy_time_burst = of_property_read_bool(
-		device->pdev->dev.of_node, "qcom,disable-busy-time-burst");
-
-	data->ctxt_aware_enable =
-		of_property_read_bool(device->pdev->dev.of_node,
-			"qcom,enable-ca-jump");
-
-	if (data->ctxt_aware_enable) {
-		if (of_property_read_u32(device->pdev->dev.of_node,
-				"qcom,ca-target-pwrlevel",
-				&data->bin.ctxt_aware_target_pwrlevel))
-			data->bin.ctxt_aware_target_pwrlevel = 1;
-
-		if ((data->bin.ctxt_aware_target_pwrlevel < 0) ||
-			(data->bin.ctxt_aware_target_pwrlevel >
-						pwr->num_pwrlevels))
-			data->bin.ctxt_aware_target_pwrlevel = 1;
-
-		if (of_property_read_u32(device->pdev->dev.of_node,
-				"qcom,ca-busy-penalty",
-				&data->bin.ctxt_aware_busy_penalty))
-			data->bin.ctxt_aware_busy_penalty = 12000;
-	}
-
 	/*
 	 * If there is a separate GX power rail, allow
 	 * independent modification to its voltage through
@@ -821,7 +787,7 @@ int kgsl_pwrscale_init(struct device *dev, const char *governor)
 	 */
 	if (pwr->bus_control) {
 		out = 0;
-		while (pwr->bus_ib[out] && out <= pwr->pwrlevels[0].bus_max) {
+		while (pwr->bus_ib[out]) {
 			pwr->bus_ib[out] =
 				pwr->bus_ib[out] >> 20;
 			out++;
@@ -829,7 +795,6 @@ int kgsl_pwrscale_init(struct device *dev, const char *governor)
 		data->bus.num = out;
 		data->bus.ib = &pwr->bus_ib[0];
 		data->bus.index = &pwr->bus_index[0];
-		data->bus.width = pwr->bus_width;
 	} else
 		data->bus.num = 0;
 

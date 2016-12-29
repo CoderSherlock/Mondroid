@@ -27,8 +27,8 @@ extern const unsigned int a4xx_cp_addr_regs[];
  * @entry: The memory entry in which this range is found
  */
 struct adreno_ib_object {
-	uint64_t gpuaddr;
-	uint64_t size;
+	unsigned int gpuaddr;
+	unsigned int size;
 	int snapshot_obj_type;
 	struct kgsl_mem_entry *entry;
 };
@@ -115,8 +115,8 @@ enum adreno_cp_addr_regs {
  *
  * Returns the object pointer on success else error code in the pointer
  */
-static inline void adreno_ib_init_ib_obj(uint64_t gpuaddr,
-			uint64_t size, int obj_type,
+static inline void adreno_ib_init_ib_obj(unsigned int gpuaddr,
+			unsigned int size, int obj_type,
 			struct kgsl_mem_entry *entry,
 			struct adreno_ib_object *ib_obj)
 {
@@ -178,7 +178,7 @@ static inline int adreno_cp_parser_regindex(struct adreno_device *adreno_dev,
 int adreno_ib_create_object_list(
 		struct kgsl_device *device,
 		struct kgsl_process_private *process,
-		uint64_t gpuaddr, uint64_t dwords,
+		unsigned int gpuaddr, unsigned int dwords,
 		struct adreno_ib_object_list **out_ib_obj_list);
 
 void adreno_ib_destroy_obj_list(struct adreno_ib_object_list *ib_obj_list);

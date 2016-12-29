@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -133,24 +133,11 @@ static struct delayed_work ipc_router_smd_xprt_probe_work;
 static DEFINE_MUTEX(smd_remote_xprt_list_lock_lha1);
 static LIST_HEAD(smd_remote_xprt_list);
 
+static void pil_vote_load_worker(struct work_struct *work);
+static void pil_vote_unload_worker(struct work_struct *work);
+static struct workqueue_struct *pil_vote_wq;
+
 static bool is_pil_loading_disabled(uint32_t edge);
-
-/**
- * ipc_router_smd_set_xprt_version() - Set IPC Router header version
- *                                          in the transport
- * @xprt: Reference to the transport structure.
- * @version: The version to be set in transport.
- */
-static void ipc_router_smd_set_xprt_version(
-	struct msm_ipc_router_xprt *xprt, unsigned version)
-{
-	struct msm_ipc_router_smd_xprt *smd_xprtp;
-
-	if (!xprt)
-		return;
-	smd_xprtp = container_of(xprt, struct msm_ipc_router_smd_xprt, xprt);
-	smd_xprtp->xprt_version = version;
-}
 
 static int msm_ipc_router_smd_get_xprt_version(
 	struct msm_ipc_router_xprt *xprt)
@@ -397,11 +384,6 @@ static void smd_xprt_close_event(struct work_struct *work)
 		container_of(xprt_work->xprt,
 			     struct msm_ipc_router_smd_xprt, xprt);
 
-	if (smd_xprtp->in_pkt) {
-		release_pkt(smd_xprtp->in_pkt);
-		smd_xprtp->in_pkt = NULL;
-	}
-	smd_xprtp->is_partial_in_pkt = 0;
 	init_completion(&smd_xprtp->sft_close_complete);
 	msm_ipc_router_xprt_notify(xprt_work->xprt,
 				IPC_ROUTER_XPRT_EVENT_CLOSE, NULL);
@@ -590,6 +572,112 @@ static int msm_ipc_router_smd_remote_probe(struct platform_device *pdev)
 	return 0;
 }
 
+struct pil_vote_info {
+	void *pil_handle;
+	struct work_struct load_work;
+	struct work_struct unload_work;
+};
+
+/**
+ * pil_vote_load_worker() - Process vote to load the modem
+ *
+ * @work: Work item to process
+ *
+ * This function is called to process votes to load the modem that have been
+ * queued by msm_ipc_load_default_node().
+ */
+static void pil_vote_load_worker(struct work_struct *work)
+{
+	const char *peripheral;
+	struct pil_vote_info *vote_info;
+	bool loading_disabled;
+
+	vote_info = container_of(work, struct pil_vote_info, load_work);
+	peripheral = smd_edge_to_pil_str(SMD_APPS_MODEM);
+	loading_disabled = is_pil_loading_disabled(SMD_APPS_MODEM);
+
+	if (!IS_ERR_OR_NULL(peripheral) && !strcmp(peripheral, "modem") &&
+	    !loading_disabled) {
+		vote_info->pil_handle = subsystem_get(peripheral);
+		if (IS_ERR(vote_info->pil_handle)) {
+			IPC_RTR_ERR("%s: Failed to load %s\n",
+				__func__, peripheral);
+			vote_info->pil_handle = NULL;
+		}
+	} else {
+		vote_info->pil_handle = NULL;
+	}
+}
+
+/**
+ * pil_vote_unload_worker() - Process vote to unload the modem
+ *
+ * @work: Work item to process
+ *
+ * This function is called to process votes to unload the modem that have been
+ * queued by msm_ipc_unload_default_node().
+ */
+static void pil_vote_unload_worker(struct work_struct *work)
+{
+	struct pil_vote_info *vote_info;
+
+	vote_info = container_of(work, struct pil_vote_info, unload_work);
+
+	if (vote_info->pil_handle) {
+		subsystem_put(vote_info->pil_handle);
+		vote_info->pil_handle = NULL;
+	}
+	kfree(vote_info);
+}
+
+/**
+ * msm_ipc_load_default_node() - Queue a vote to load the modem.
+ *
+ * @return: PIL vote info structure on success, NULL on failure.
+ *
+ * This function places a work item that loads the modem on the
+ * single-threaded workqueue used for processing PIL votes to load
+ * or unload the modem.
+ */
+void *msm_ipc_load_default_node(void)
+{
+	struct pil_vote_info *vote_info;
+
+	vote_info = kmalloc(sizeof(struct pil_vote_info), GFP_KERNEL);
+	if (vote_info == NULL) {
+		pr_err("%s: mem alloc for pil_vote_info failed\n", __func__);
+		return NULL;
+	}
+
+	INIT_WORK(&vote_info->load_work, pil_vote_load_worker);
+	queue_work(pil_vote_wq, &vote_info->load_work);
+
+	return vote_info;
+}
+EXPORT_SYMBOL(msm_ipc_load_default_node);
+
+/**
+ * msm_ipc_unload_default_node() - Queue a vote to unload the modem.
+ *
+ * @pil_vote: PIL vote info structure, containing the PIL handle
+ * and work structure.
+ *
+ * This function places a work item that unloads the modem on the
+ * single-threaded workqueue used for processing PIL votes to load
+ * or unload the modem.
+ */
+void msm_ipc_unload_default_node(void *pil_vote)
+{
+	struct pil_vote_info *vote_info;
+
+	if (pil_vote) {
+		vote_info = (struct pil_vote_info *) pil_vote;
+		INIT_WORK(&vote_info->unload_work, pil_vote_unload_worker);
+		queue_work(pil_vote_wq, &vote_info->unload_work);
+	}
+}
+EXPORT_SYMBOL(msm_ipc_unload_default_node);
+
 /**
  * msm_ipc_router_smd_driver_register() - register SMD XPRT drivers
  *
@@ -669,8 +757,6 @@ static int msm_ipc_router_smd_config_init(
 						XPRT_NAME_LEN);
 	smd_xprtp->xprt.name = smd_xprtp->xprt_name;
 
-	smd_xprtp->xprt.set_version =
-		ipc_router_smd_set_xprt_version;
 	smd_xprtp->xprt.get_version =
 		msm_ipc_router_smd_get_xprt_version;
 	smd_xprtp->xprt.get_option =
@@ -850,6 +936,12 @@ static int __init msm_ipc_router_smd_xprt_init(void)
 		"%s: msm_ipc_router_smd_xprt_driver register failed %d\n",
 								__func__, rc);
 		return rc;
+	}
+
+	pil_vote_wq = create_singlethread_workqueue("pil_vote_wq");
+	if (IS_ERR_OR_NULL(pil_vote_wq)) {
+		pr_err("%s: create_singlethread_workqueue failed\n", __func__);
+		return -EFAULT;
 	}
 
 	INIT_DELAYED_WORK(&ipc_router_smd_xprt_probe_work,

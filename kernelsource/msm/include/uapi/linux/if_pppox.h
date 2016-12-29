@@ -48,7 +48,7 @@ struct pppoe_addr {
  * PPTP addressing definition
  */
 struct pptp_addr {
-	__u16		call_id;
+	__be16		call_id;
 	struct in_addr	sin_addr;
 };
 

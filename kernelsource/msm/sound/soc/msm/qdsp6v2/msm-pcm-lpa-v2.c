@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -39,6 +39,7 @@
 
 #include "msm-pcm-q6-v2.h"
 #include "msm-pcm-routing-v2.h"
+#include "audio_ocmem.h"
 #include <sound/pcm.h>
 #include <sound/tlv.h>
 
@@ -47,6 +48,11 @@
 const DECLARE_TLV_DB_LINEAR(lpa_rx_vol_gain, 0,
 			    LPA_LR_VOL_MAX_STEPS);
 static struct audio_locks the_locks;
+
+struct snd_msm {
+	atomic_t audio_ocmem_req;
+};
+static struct snd_msm lpa_audio;
 
 static struct snd_pcm_hardware msm_pcm_hardware = {
 	.info =                 (SNDRV_PCM_INFO_MMAP |
@@ -126,7 +132,7 @@ static void event_handler(uint32_t opcode,
 		pr_debug("%s:writing %d bytes of buffer[%d] to dsp 2\n",
 				__func__, prtd->pcm_count, prtd->out_head);
 		temp = buf[0].phys + (prtd->out_head * prtd->pcm_count);
-		pr_debug("%s:writing buffer[%d] from 0x%pK\n",
+		pr_debug("%s:writing buffer[%d] from 0x%pa\n",
 				__func__, prtd->out_head, &temp);
 		if (prtd->meta_data_mode) {
 			memcpy(&output_meta_data, (char *)(buf->data +
@@ -411,7 +417,14 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 	prtd->dsp_cnt = 0;
 	atomic_set(&prtd->pending_buffer, 1);
 	atomic_set(&prtd->stop, 1);
+	atomic_set(&lpa_audio.audio_ocmem_req, 0);
 	runtime->private_data = prtd;
+	if (!atomic_cmpxchg(&lpa_audio.audio_ocmem_req, 0, 1))
+		audio_ocmem_process_req(AUDIO, true);
+	else
+		atomic_inc(&lpa_audio.audio_ocmem_req);
+	pr_debug("%s: req: %d\n", __func__,
+		atomic_read(&lpa_audio.audio_ocmem_req));
 	return 0;
 }
 
@@ -463,14 +476,13 @@ static int msm_pcm_playback_close(struct snd_pcm_substream *substream)
 		dir = IN;
 		atomic_set(&prtd->pending_buffer, 0);
 
-		if (prtd->session_id) {
-			rc = q6asm_cmd(prtd->audio_client, CMD_CLOSE);
-			if (rc < 0) {
-				pr_err("%s: error: ASM close failed returned %d\n",
-					__func__, rc);
-				goto done;
-			}
-		}
+		if (atomic_read(&lpa_audio.audio_ocmem_req) > 1)
+			atomic_dec(&lpa_audio.audio_ocmem_req);
+		else if (atomic_cmpxchg(&lpa_audio.audio_ocmem_req, 1, 0))
+			audio_ocmem_process_req(AUDIO, false);
+		pr_debug("%s: req: %d\n", __func__,
+			atomic_read(&lpa_audio.audio_ocmem_req));
+		q6asm_cmd(prtd->audio_client, CMD_CLOSE);
 		q6asm_audio_client_buf_free_contiguous(dir,
 				prtd->audio_client);
 
@@ -485,8 +497,8 @@ static int msm_pcm_playback_close(struct snd_pcm_substream *substream)
 
 	pr_debug("%s\n", __func__);
 	kfree(prtd);
-done:
-	return rc;
+
+	return 0;
 }
 
 static int msm_pcm_close(struct snd_pcm_substream *substream)
@@ -550,8 +562,7 @@ static int msm_pcm_hw_params(struct snd_pcm_substream *substream,
 	struct snd_dma_buffer *dma_buf = &substream->dma_buffer;
 	struct audio_buffer *buf;
 	uint16_t bits_per_sample = 16;
-	int dir;
-	int ret = 0;
+	int dir, ret;
 
 	struct asm_softpause_params softpause = {
 		.enable = SOFT_PAUSE_ENABLE,
@@ -581,20 +592,9 @@ static int msm_pcm_hw_params(struct snd_pcm_substream *substream,
 
 	pr_debug("%s: session ID %d\n", __func__, prtd->audio_client->session);
 	prtd->session_id = prtd->audio_client->session;
-	ret = msm_pcm_routing_reg_phy_stream(soc_prtd->dai_link->be_id,
+	msm_pcm_routing_reg_phy_stream(soc_prtd->dai_link->be_id,
 		prtd->audio_client->perf_mode,
 		prtd->session_id, substream->stream);
-	if (ret) {
-		pr_err("%s: stream reg failed ret:%d\n", __func__, ret);
-		ret = q6asm_cmd(prtd->audio_client, CMD_CLOSE);
-		if (ret < 0) {
-			pr_err("%s: error: ASM close failed returned %d\n",
-				__func__, ret);
-			goto done;
-		}
-		prtd->session_id = 0;
-		goto done;
-	}
 
 	ret = q6asm_set_softpause(prtd->audio_client, &softpause);
 	if (ret < 0)
@@ -623,7 +623,7 @@ static int msm_pcm_hw_params(struct snd_pcm_substream *substream,
 	if (buf == NULL || buf[0].data == NULL)
 		return -ENOMEM;
 
-	pr_debug("%s:buf = %pK\n", __func__, buf);
+	pr_debug("%s:buf = %p\n", __func__, buf);
 	dma_buf->dev.type = SNDRV_DMA_TYPE_DEV;
 	dma_buf->dev.dev = substream->pcm->card->dev;
 	dma_buf->private_data = NULL;
@@ -634,8 +634,7 @@ static int msm_pcm_hw_params(struct snd_pcm_substream *substream,
 		return -ENOMEM;
 
 	snd_pcm_set_runtime_buffer(substream, &substream->dma_buffer);
-done:
-	return ret;
+	return 0;
 }
 
 static int msm_pcm_ioctl(struct snd_pcm_substream *substream,
@@ -799,6 +798,7 @@ static int msm_pcm_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "%s: dev name %s\n",
 			__func__, dev_name(&pdev->dev));
+	atomic_set(&lpa_audio.audio_ocmem_req, 0);
 	return snd_soc_register_platform(&pdev->dev,
 				&msm_soc_platform);
 }

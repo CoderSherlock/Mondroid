@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,12 +29,9 @@
 #include <linux/clk.h>
 #include <linux/cpu.h>
 #include <linux/of_coresight.h>
-#include <linux/of_address.h>
 #include <linux/coresight.h>
 #include <linux/pm_wakeup.h>
-#include <linux/cpumask.h>
 #include <asm/sections.h>
-#include <asm/etmv4x.h>
 #include <soc/qcom/socinfo.h>
 #include <soc/qcom/memory_dump.h>
 
@@ -189,7 +186,6 @@ do {									\
 #define ETM_MAX_RES_SEL			(16)
 #define ETM_MAX_SS_CMP			(8)
 
-#define ETM_CPMR_CLKEN			(0x4)
 #define ETM_ARCH_V4			(0x40)
 #define ETM_SYNC_MASK                   (0x1F)
 #define ETM_CYC_THRESHOLD_MASK		(0xFFF)
@@ -320,7 +316,6 @@ struct etm_drvdata {
 	uint8_t				instr_addr_size;
 	uint8_t				trcid;
 	uint8_t				trcid_size;
-	bool				enable_noovrflw;
 	bool				instrp0_support;
 	bool				trc_cond_support;
 	bool				cond_type_support;
@@ -398,29 +393,11 @@ struct etm_drvdata {
 	uint8_t				ns_ex_level;
 	uint32_t			ext_inp;
 	struct msm_dump_data		reg_data;
-	struct etm_cgc_data		*cgc_data;
 };
-
-/* support max 2 clusters now */
-#define MAX_CLUSTER_NUM		2
-#define NTS_CGC_OVERRIDE	BIT(9)
-#define CNT_CGC_OVERRIDE	BIT(8)
-#define APB_CGC_OVERRIDE	BIT(7)
-#define ATB_CGC_OVERRIDE	BIT(6)
-
-struct etm_cgc_data {
-	void __iomem		*base;
-	uint32_t		phy_addr;
-	uint32_t		len;
-	cpumask_t		control_mask;
-};
-
-static struct etm_cgc_data *etm_cgc_data[MAX_CLUSTER_NUM];
 
 static int count;
 static struct etm_drvdata *etmdrvdata[NR_CPUS];
 static struct notifier_block etm_cpu_notifier;
-static struct notifier_block etm_cpu_dying_notifier;
 
 static bool etm_os_lock_present(struct etm_drvdata *drvdata)
 {
@@ -464,9 +441,6 @@ static bool etm_arch_supported(uint8_t arch)
 static int etm_set_mode_exclude(struct etm_drvdata *drvdata, bool exclude)
 {
 	uint8_t idx = drvdata->addr_idx;
-
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP)
-		return -EINVAL;
 
 	if (BMVAL(drvdata->addr_acctype[idx], 0, 1) == ETM_INSTR_ADDR) {
 		if (idx % 2 != 0)
@@ -574,7 +548,7 @@ static void etm_reset_data(struct etm_drvdata *drvdata)
 	 * each trace run.
 	 */
 	drvdata->vinst_ctrl |= BIT(0);
-	if (drvdata->nr_addr_cmp) {
+	if (drvdata->nr_addr_cmp == true) {
 		drvdata->mode |= ETM_MODE_VIEWINST_STARTSTOP;
 		drvdata->vinst_ctrl |= BIT(9);
 	}
@@ -647,40 +621,6 @@ static void etm_reset_data(struct etm_drvdata *drvdata)
 	spin_unlock(&drvdata->spinlock);
 }
 
-static inline void etm_clk_disable(void)
-{
-	uint32_t cpmr;
-
-	isb();
-	cpmr = trc_readl(CPMR_EL1);
-	cpmr  &= ~ETM_CPMR_CLKEN;
-	trc_write(cpmr, CPMR_EL1);
-}
-
-static inline void etm_clk_enable(void)
-{
-	uint32_t cpmr;
-
-	cpmr = trc_readl(CPMR_EL1);
-	cpmr  |= ETM_CPMR_CLKEN;
-	trc_write(cpmr, CPMR_EL1);
-	isb();
-}
-
-static inline void etm_trace_disable(void)
-{
-	etm_clk_enable();
-	trc_write(0x0, ETMPRGCTLR);
-	etm_clk_disable();
-}
-
-static inline void etm_trace_enable(void)
-{
-	etm_clk_enable();
-	trc_write(0x1, ETMPRGCTLR);
-	etm_clk_disable();
-}
-
 static void __etm_enable(void *info)
 {
 	int i;
@@ -689,10 +629,7 @@ static void __etm_enable(void *info)
 	ETM_UNLOCK(drvdata);
 
 	/* Disable the trace unit before programming trace registers */
-	if (drvdata->enable_noovrflw)
-		etm_trace_disable();
-	else
-		etm_writel(drvdata, 0, TRCPRGCTLR);
+	etm_writel(drvdata, 0, TRCPRGCTLR);
 
 	etm_writel(drvdata, drvdata->pe_sel, TRCPROCSELR);
 	etm_writel(drvdata, drvdata->cfg, TRCCONFIGR);
@@ -751,10 +688,7 @@ static void __etm_enable(void *info)
 	etm_writel(drvdata, drvdata->vmid_mask1, TRCVMIDCCTLR1);
 
 	/* Enable the trace unit */
-	if (drvdata->enable_noovrflw)
-		etm_trace_enable();
-	else
-		etm_writel(drvdata, 1, TRCPRGCTLR);
+	etm_writel(drvdata, 1, TRCPRGCTLR);
 
 	ETM_LOCK(drvdata);
 
@@ -806,10 +740,7 @@ static void __etm_disable(void *info)
 
 	mb();
 	isb();
-	if (drvdata->enable_noovrflw)
-		etm_trace_disable();
-	else
-		etm_writel(drvdata, 0, TRCPRGCTLR);
+	etm_writel(drvdata, 0, TRCPRGCTLR);
 
 	ETM_LOCK(drvdata);
 
@@ -1603,12 +1534,6 @@ static ssize_t etm_show_addr_range(struct device *dev,
 		spin_unlock(&drvdata->spinlock);
 		return -EPERM;
 	}
-
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
-	}
-
 	if (!((drvdata->addr_type[idx] == ETM_ADDR_TYPE_NONE &&
 	       drvdata->addr_type[idx + 1] == ETM_ADDR_TYPE_NONE) ||
 	      (drvdata->addr_type[idx] == ETM_ADDR_TYPE_RANGE &&
@@ -1643,12 +1568,6 @@ static ssize_t etm_store_addr_range(struct device *dev,
 		spin_unlock(&drvdata->spinlock);
 		return -EPERM;
 	}
-
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
-	}
-
 	if (!((drvdata->addr_type[idx] == ETM_ADDR_TYPE_NONE &&
 	       drvdata->addr_type[idx + 1] == ETM_ADDR_TYPE_NONE) ||
 	      (drvdata->addr_type[idx] == ETM_ADDR_TYPE_RANGE &&
@@ -1952,12 +1871,6 @@ static ssize_t etm_show_addr_dvalmatch(struct device *dev,
 		spin_unlock(&drvdata->spinlock);
 		return -EINVAL;
 	}
-
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
-	}
-
 	val = BMVAL(drvdata->addr_acctype[idx], 16, 17);
 	len = scnprintf(buf, PAGE_SIZE, "%s\n", val == ETM_DATA_CMP_NONE ?
 			"none" : (val == ETM_DATA_CMP_MATCH ? "match" :
@@ -1990,12 +1903,6 @@ static ssize_t etm_store_addr_dvalmatch(struct device *dev,
 		spin_unlock(&drvdata->spinlock);
 		return -EINVAL;
 	}
-
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
-	}
-
 	if (!strcmp(str, "none")) {
 		drvdata->addr_acctype[idx] &= ~(BIT(16) | BIT(17));
 	} else if (!strcmp(str, "match")) {
@@ -2023,11 +1930,6 @@ static ssize_t etm_show_addr_dvalsize(struct device *dev,
 		spin_unlock(&drvdata->spinlock);
 		return -EINVAL;
 	}
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
-	}
-
 	val = BMVAL(drvdata->addr_acctype[idx], 18, 19);
 	len = scnprintf(buf, PAGE_SIZE, "%s\n", val == ETM_DATA_TYPE_BYTE ?
 			"byte" : (val == ETM_DATA_TYPE_HWORD ? "halfword" :
@@ -2063,12 +1965,6 @@ static ssize_t etm_store_addr_dvalsize(struct device *dev,
 		spin_unlock(&drvdata->spinlock);
 		return -EINVAL;
 	}
-
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
-	}
-
 	if (!strcmp(str, "byte")) {
 		drvdata->addr_acctype[idx] &= ~(BIT(18) | BIT(19));
 	} else if (!strcmp(str, "halfword")) {
@@ -2101,12 +1997,6 @@ static ssize_t etm_show_addr_dvalrange(struct device *dev,
 		spin_unlock(&drvdata->spinlock);
 		return -EINVAL;
 	}
-
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
-	}
-
 	val = BVAL(drvdata->addr_acctype[idx], 20);
 	spin_unlock(&drvdata->spinlock);
 	return scnprintf(buf, PAGE_SIZE, "%#lx\n", val);
@@ -2134,12 +2024,6 @@ static ssize_t etm_store_addr_dvalrange(struct device *dev,
 		spin_unlock(&drvdata->spinlock);
 		return -EINVAL;
 	}
-
-	if (idx >= ETM_MAX_SINGLE_ADDR_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
-	}
-
 	if (val)
 		drvdata->addr_acctype[idx] |= (BIT(20));
 	else
@@ -2167,11 +2051,6 @@ static ssize_t etm_show_data_val(struct device *dev,
 	if (idx >= drvdata->nr_data_cmp) {
 		spin_unlock(&drvdata->spinlock);
 		return -EPERM;
-	}
-
-	if (idx >= ETM_MAX_DATA_VAL_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
 	}
 
 	val = (unsigned long)drvdata->data_val[idx];
@@ -2228,11 +2107,6 @@ static ssize_t etm_show_data_mask(struct device *dev,
 	if (idx >= drvdata->nr_data_cmp) {
 		spin_unlock(&drvdata->spinlock);
 		return -EPERM;
-	}
-
-	if (idx >= ETM_MAX_DATA_VAL_CMP) {
-		spin_unlock(&drvdata->spinlock);
-		return -EINVAL;
 	}
 
 	val = (unsigned long)drvdata->data_mask[idx];
@@ -3063,10 +2937,6 @@ static void etm_init_arch_data(void *info)
 
 	ETM_UNLOCK(drvdata);
 
-	/* check the state of the fuse */
-	if (!coresight_authstatus_enabled(drvdata->base))
-		goto out;
-
 	/* find all capabilities */
 	/* tracing capabilities of trace unit */
 	etmidr0 = etm_readl(drvdata, TRCIDR0);
@@ -3246,7 +3116,7 @@ static void etm_init_arch_data(void *info)
 		drvdata->reduced_cntr_support = true;
 	else
 		drvdata->reduced_cntr_support = false;
-out:
+
 	ETM_LOCK(drvdata);
 }
 
@@ -3263,9 +3133,6 @@ static void etm_init_default_data(struct etm_drvdata *drvdata)
 
 	/* disable stalling */
 	drvdata->stall_ctrl = 0x0;
-	/* Set NOOVERFLOW bit */
-	if (drvdata->no_overflow_support && drvdata->enable_noovrflw)
-		drvdata->stall_ctrl |= BIT(13);
 
 	/* disable timestamp event */
 	drvdata->ts_ctrl = 0x0;
@@ -3282,6 +3149,9 @@ static void etm_init_default_data(struct etm_drvdata *drvdata)
 	/* set initial state of start-stop logic */
 	if (drvdata->nr_addr_cmp)
 		drvdata->vinst_ctrl |= BIT(9);
+
+	/* no address range filtering for ViewInst */
+	drvdata->vinst_incex_ctrl = 0x0;
 
 	/* no start-stop filtering for ViewInst */
 	drvdata->vinst_startstop_ctrl = 0x0;
@@ -3320,9 +3190,6 @@ static void etm_init_default_data(struct etm_drvdata *drvdata)
 		drvdata->addr_val[1] = (unsigned long)_etext;
 		drvdata->addr_type[0] = ETM_ADDR_TYPE_RANGE;
 		drvdata->addr_type[1] = ETM_ADDR_TYPE_RANGE;
-
-		/* address range filtering for ViewInst */
-		drvdata->vinst_incex_ctrl = 0x1;
 	}
 
 	for (i = 0; i < drvdata->nr_data_cmp; i++) {
@@ -3478,14 +3345,19 @@ static int etm_cpu_callback(struct notifier_block *nfb, unsigned long action,
 			clk_disable[cpu] = false;
 		}
 		break;
+
+	case CPU_DYING:
+		spin_lock(&etmdrvdata[cpu]->spinlock);
+		if (etmdrvdata[cpu]->enable)
+			__etm_disable(etmdrvdata[cpu]);
+		spin_unlock(&etmdrvdata[cpu]->spinlock);
+		break;
 	}
 out:
 	return NOTIFY_OK;
 err1:
-	if (--count == 0) {
+	if (--count == 0)
 		unregister_hotcpu_notifier(&etm_cpu_notifier);
-		unregister_hotcpu_notifier(&etm_cpu_dying_notifier);
-	}
 	if (clk_disable[cpu]) {
 		clk_disable_unprepare(etmdrvdata[cpu]->clk);
 		clk_disable[cpu] = false;
@@ -3505,87 +3377,6 @@ static struct notifier_block etm_cpu_notifier = {
 	.notifier_call = etm_cpu_callback,
 };
 
-static int etm_cpu_dying_callback(struct notifier_block *nfb,
-				   unsigned long action, void *hcpu)
-{
-	unsigned int cpu = (unsigned long)hcpu;
-
-	if (!etmdrvdata[cpu])
-		goto out;
-
-	switch (action & (~CPU_TASKS_FROZEN)) {
-	case CPU_DYING:
-		spin_lock(&etmdrvdata[cpu]->spinlock);
-		if (etmdrvdata[cpu]->enable)
-			__etm_disable(etmdrvdata[cpu]);
-		spin_unlock(&etmdrvdata[cpu]->spinlock);
-		break;
-	}
-out:
-	return NOTIFY_OK;
-}
-
-static struct notifier_block etm_cpu_dying_notifier = {
-	.notifier_call = etm_cpu_dying_callback,
-	.priority = 1,
-};
-
-static int etm_parse_cgc_data(struct platform_device *pdev,
-			      struct etm_drvdata *drvdata)
-{
-	struct device_node *cgc_node = NULL;
-	struct etm_cgc_data *cgc_data = NULL;
-	int cluster, val, regs[2], ret, start, len;
-
-	cgc_node = of_parse_phandle(pdev->dev.of_node,
-				    "qcom,cpuss-debug-cgc", 0);
-	if (!cgc_node)
-		return 0;
-
-	ret = of_property_read_u32(cgc_node, "cluster", &cluster);
-	if (ret || cluster >= MAX_CLUSTER_NUM)
-		return -EINVAL;
-
-	ret = of_property_read_u32_array(cgc_node, "reg",
-					 (u32 *)&regs, 2);
-	if (ret)
-		return ret;
-
-	start = regs[0];
-	len = regs[1];
-
-	if (!etm_cgc_data[cluster]) {
-		cgc_data = devm_kzalloc(&pdev->dev, sizeof(*cgc_data),
-					GFP_KERNEL);
-		if (!cgc_data)
-			return -ENOMEM;
-
-		cgc_data->phy_addr = (uint32_t)start;
-		cgc_data->len = (uint32_t)len;
-		cgc_data->base = devm_ioremap(&pdev->dev, start, len);
-		if (!cgc_data->base)
-			return -ENOMEM;
-
-		val = __raw_readl(cgc_data->base);
-		/* disable ATB and NTS clock gating */
-		val |= (ATB_CGC_OVERRIDE | NTS_CGC_OVERRIDE);
-		__raw_writel(val, cgc_data->base);
-		etm_cgc_data[cluster] = cgc_data;
-	} else {
-		if (etm_cgc_data[cluster]->phy_addr != start
-		    || etm_cgc_data[cluster]->len != len) {
-			dev_err(&pdev->dev, "duplicated cluster %d setting\n",
-				cluster);
-			etm_cgc_data[cluster]->base = 0x0;
-			return -EINVAL;
-		}
-	}
-	cpumask_set_cpu(drvdata->cpu, &etm_cgc_data[cluster]->control_mask);
-	drvdata->cgc_data = etm_cgc_data[cluster];
-
-	return 0;
-}
-
 static int etm_probe(struct platform_device *pdev)
 {
 	int ret, cpu;
@@ -3595,10 +3386,16 @@ static int etm_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct device_node *cpu_node;
 
-	pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
-	if (IS_ERR(pdata))
-		return PTR_ERR(pdata);
-	pdev->dev.platform_data = pdata;
+	if (coresight_fuse_access_disabled() ||
+	    coresight_fuse_apps_access_disabled())
+		return -EPERM;
+
+	if (pdev->dev.of_node) {
+		pdata = of_get_coresight_platform_data(dev, pdev->dev.of_node);
+		if (IS_ERR(pdata))
+			return PTR_ERR(pdata);
+		pdev->dev.platform_data = pdata;
+	}
 
 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
 	if (!drvdata)
@@ -3625,9 +3422,6 @@ static int etm_probe(struct platform_device *pdev)
 		goto err0;
 	}
 
-	drvdata->enable_noovrflw = of_property_read_bool(pdev->dev.of_node,
-						"qcom,noovrflw-enable");
-
 	drvdata->cpu = -1;
 	cpu_node = of_parse_phandle(pdev->dev.of_node, "coresight-etm-cpu", 0);
 	if (!cpu_node) {
@@ -3647,6 +3441,9 @@ static int etm_probe(struct platform_device *pdev)
 		goto err0;
 	}
 
+	if (count++ == 0)
+		register_hotcpu_notifier(&etm_cpu_notifier);
+
 	ret = clk_set_rate(drvdata->clk, CORESIGHT_CLK_RATE_TRACE);
 	if (ret)
 		goto err0;
@@ -3654,11 +3451,6 @@ static int etm_probe(struct platform_device *pdev)
 	ret = clk_prepare_enable(drvdata->clk);
 	if (ret)
 		goto err0;
-
-	if (count++ == 0) {
-		register_hotcpu_notifier(&etm_cpu_notifier);
-		register_hotcpu_notifier(&etm_cpu_dying_notifier);
-	}
 
 	get_online_cpus();
 
@@ -3697,15 +3489,10 @@ static int etm_probe(struct platform_device *pdev)
 	}
 	mutex_unlock(&drvdata->mutex);
 
-	/* parse clock gating control DT and disable clock gating */
-	etm_parse_cgc_data(pdev, drvdata);
-
 	return 0;
 err1:
-	if (--count == 0) {
+	if (--count == 0)
 		unregister_hotcpu_notifier(&etm_cpu_notifier);
-		unregister_hotcpu_notifier(&etm_cpu_dying_notifier);
-	}
 err0:
 	wakeup_source_trash(&drvdata->ws);
 	return ret;
@@ -3717,10 +3504,8 @@ static int etm_remove(struct platform_device *pdev)
 
 	if (drvdata) {
 		coresight_unregister(drvdata->csdev);
-		if (--count == 0) {
+		if (--count == 0)
 			unregister_hotcpu_notifier(&etm_cpu_notifier);
-			unregister_hotcpu_notifier(&etm_cpu_dying_notifier);
-		}
 		wakeup_source_trash(&drvdata->ws);
 	}
 	return 0;

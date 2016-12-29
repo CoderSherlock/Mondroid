@@ -248,7 +248,6 @@ enum log_event_host_reason_code {
 	WLAN_LOG_REASON_MGMT_FRAME_TIMEOUT,
 	WLAN_LOG_REASON_SME_OUT_OF_CMD_BUF,
 	WLAN_LOG_REASON_NO_SCAN_RESULTS,
-	WLAN_LOG_REASON_STALE_SESSION_FOUND,
 };
 
 
@@ -1093,7 +1092,6 @@ typedef struct sMacOpenParameters
  */
     tANI_U8 olIniInfo;
     v_BOOL_t ssdp;
-    bool enable_mc_list;
     bool enable_bcst_ptrn;
     /*
      * DFS Phyerror Filtering offload status from ini
@@ -1282,7 +1280,6 @@ typedef struct sAniSirGlobal
     bool first_scan_done;
     int8_t first_scan_bucket_threshold;
     sir_mgmt_frame_ind_callback mgmt_frame_ind_cb;
-    sir_p2p_ack_ind_callback p2p_ack_ind_cb;
 } tAniSirGlobal;
 
 typedef enum

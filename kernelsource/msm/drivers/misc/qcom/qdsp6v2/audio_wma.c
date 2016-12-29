@@ -2,7 +2,7 @@
  *
  * Copyright (C) 2008 Google, Inc.
  * Copyright (C) 2008 HTC Corporation
- * Copyright (c) 2009-2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2009-2014, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -19,9 +19,6 @@
 #include <linux/msm_audio_wma.h>
 #include <linux/compat.h>
 #include "audio_utils_aio.h"
-
-static struct miscdevice audio_wma_misc;
-static struct ws_mgr audio_wma_ws_mgr;
 
 #ifdef CONFIG_DEBUG_FS
 static const struct file_operations audio_wma_debug_fops = {
@@ -63,8 +60,7 @@ static long audio_ioctl_shared(struct file *file, unsigned int cmd,
 		wma_cfg.ch_mask =  wma_config->channelmask;
 		wma_cfg.encode_opt = wma_config->encodeopt;
 		/* Configure Media format block */
-		rc = q6asm_media_format_block_wma(audio->ac, &wma_cfg,
-				audio->ac->stream_id);
+		rc = q6asm_media_format_block_wma(audio->ac, &wma_cfg);
 		if (rc < 0) {
 			pr_err("cmd media format block failed\n");
 			break;
@@ -249,9 +245,6 @@ static int audio_open(struct inode *inode, struct file *file)
 	}
 
 	audio->pcm_cfg.buffer_size = PCM_BUFSZ_MIN;
-	audio->miscdevice = &audio_wma_misc;
-	audio->wakelock_voted = false;
-	audio->audio_ws_mgr = &audio_wma_ws_mgr;
 
 	audio->ac = q6asm_audio_client_alloc((app_cb) q6_audio_cb,
 					     (void *)audio);
@@ -326,7 +319,7 @@ static const struct file_operations audio_wma_fops = {
 	.compat_ioctl = audio_compat_ioctl
 };
 
-static struct miscdevice audio_wma_misc = {
+struct miscdevice audio_wma_misc = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = "msm_wma",
 	.fops = &audio_wma_fops,
@@ -334,14 +327,7 @@ static struct miscdevice audio_wma_misc = {
 
 static int __init audio_wma_init(void)
 {
-	int ret = misc_register(&audio_wma_misc);
-
-	if (ret == 0)
-		device_init_wakeup(audio_wma_misc.this_device, true);
-	audio_wma_ws_mgr.ref_cnt = 0;
-	mutex_init(&audio_wma_ws_mgr.ws_lock);
-
-	return ret;
+	return misc_register(&audio_wma_misc);
 }
 
 device_initcall(audio_wma_init);

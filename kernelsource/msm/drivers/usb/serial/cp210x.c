@@ -127,8 +127,6 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x10C4, 0x88A5) }, /* Planet Innovation Ingeni ZigBee USB Device */
 	{ USB_DEVICE(0x10C4, 0x8946) }, /* Ketra N1 Wireless Interface */
 	{ USB_DEVICE(0x10C4, 0x8977) },	/* CEL MeshWorks DevKit Device */
-	{ USB_DEVICE(0x10C4, 0x8998) }, /* KCF Technologies PRN */
-	{ USB_DEVICE(0x10C4, 0x8A2A) }, /* HubZ dual ZigBee and Z-Wave dongle */
 	{ USB_DEVICE(0x10C4, 0xEA60) }, /* Silicon Labs factory default */
 	{ USB_DEVICE(0x10C4, 0xEA61) }, /* Silicon Labs factory default */
 	{ USB_DEVICE(0x10C4, 0xEA70) }, /* Silicon Labs factory default */
@@ -187,7 +185,6 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x1FB9, 0x0602) }, /* Lake Shore Model 648 Magnet Power Supply */
 	{ USB_DEVICE(0x1FB9, 0x0700) }, /* Lake Shore Model 737 VSM Controller */
 	{ USB_DEVICE(0x1FB9, 0x0701) }, /* Lake Shore Model 776 Hall Matrix */
-	{ USB_DEVICE(0x2626, 0xEA60) }, /* Aruba Networks 7xxx USB Serial Console */
 	{ USB_DEVICE(0x3195, 0xF190) }, /* Link Instruments MSO-19 */
 	{ USB_DEVICE(0x3195, 0xF280) }, /* Link Instruments MSO-28 */
 	{ USB_DEVICE(0x3195, 0xF281) }, /* Link Instruments MSO-28 */
@@ -319,8 +316,10 @@ static int cp210x_get_config(struct usb_serial_port *port, u8 request,
 	length = (((size - 1) | 3) + 1) / 4;
 
 	buf = kcalloc(length, sizeof(__le32), GFP_KERNEL);
-	if (!buf)
+	if (!buf) {
+		dev_err(&port->dev, "%s - out of memory.\n", __func__);
 		return -ENOMEM;
+	}
 
 	/* Issue the request, attempting to read 'size' bytes */
 	result = usb_control_msg(serial->dev, usb_rcvctrlpipe(serial->dev, 0),
@@ -364,8 +363,10 @@ static int cp210x_set_config(struct usb_serial_port *port, u8 request,
 	length = (((size - 1) | 3) + 1) / 4;
 
 	buf = kmalloc(length * sizeof(__le32), GFP_KERNEL);
-	if (!buf)
+	if (!buf) {
+		dev_err(&port->dev, "%s - out of memory.\n", __func__);
 		return -ENOMEM;
+	}
 
 	/* Array of integers into bytes */
 	for (i = 0; i < length; i++)
@@ -680,6 +681,11 @@ static void cp210x_set_termios(struct tty_struct *tty,
 	unsigned int bits;
 	unsigned int modem_ctl[4];
 
+	dev_dbg(dev, "%s - port %d\n", __func__, port->number);
+
+	if (!tty)
+		return;
+
 	cflag = tty->termios.c_cflag;
 	old_cflag = old_termios->c_cflag;
 
@@ -867,6 +873,9 @@ static int cp210x_startup(struct usb_serial *serial)
 {
 	struct usb_host_interface *cur_altsetting;
 	struct cp210x_serial_private *spriv;
+
+	/* cp210x buffers behave strangely unless device is reset */
+	usb_reset_device(serial->dev);
 
 	spriv = kzalloc(sizeof(*spriv), GFP_KERNEL);
 	if (!spriv)

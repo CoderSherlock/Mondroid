@@ -80,7 +80,7 @@ static int read_block(struct inode *inode, void *addr, unsigned int block,
 
 	dlen = le32_to_cpu(dn->ch.len) - UBIFS_DATA_NODE_SZ;
 	out_len = UBIFS_BLOCK_SIZE;
-	err = ubifs_decompress(c, &dn->data, dlen, addr, &out_len,
+	err = ubifs_decompress(c, &(dn->data), dlen, addr, &out_len,
 			       le16_to_cpu(dn->compr_type));
 	if (err || len != out_len)
 		goto dump;
@@ -96,7 +96,7 @@ static int read_block(struct inode *inode, void *addr, unsigned int block,
 	return 0;
 
 dump:
-	ubifs_err(c, "bad data node (block %u, inode %lu)",
+	ubifs_err("bad data node (block %u, inode %lu)", c->vi.ubi_num,
 		  block, inode->i_ino);
 	ubifs_dump_node(c, dn);
 	return -EINVAL;
@@ -161,15 +161,19 @@ static int do_readpage(struct page *page)
 		addr += UBIFS_BLOCK_SIZE;
 	}
 	if (err) {
-		struct ubifs_info *c = inode->i_sb->s_fs_info;
+		int ubi_num = UBIFS_UNKNOWN_DEV_NUM;
+
 		if (err == -ENOENT) {
 			/* Not found, so it must be a hole */
 			SetPageChecked(page);
 			dbg_gen("hole");
 			goto out_free;
 		}
-		ubifs_err(c, "cannot read page %lu of inode %lu, error %d",
-			  page->index, inode->i_ino, err);
+		if ((struct ubifs_info *)(inode->i_sb->s_fs_info))
+			ubi_num = ((struct ubifs_info *)
+					(inode->i_sb->s_fs_info))->vi.ubi_num;
+		ubifs_err("cannot read page %lu of inode %lu, error %d",
+			  ubi_num, page->index, inode->i_ino, err);
 		goto error;
 	}
 
@@ -263,7 +267,6 @@ static int write_begin_slow(struct address_space *mapping,
 			if (err) {
 				unlock_page(page);
 				page_cache_release(page);
-				ubifs_release_budget(c, &req);
 				return err;
 			}
 		}
@@ -651,7 +654,8 @@ static int populate_page(struct ubifs_info *c, struct page *page,
 
 			dlen = le32_to_cpu(dn->ch.len) - UBIFS_DATA_NODE_SZ;
 			out_len = UBIFS_BLOCK_SIZE;
-			err = ubifs_decompress(c, &dn->data, dlen, addr, &out_len,
+			err = ubifs_decompress(c, &dn->data, dlen, addr,
+					       &out_len,
 					       le16_to_cpu(dn->compr_type));
 			if (err || len != out_len)
 				goto out_err;
@@ -699,7 +703,7 @@ out_err:
 	SetPageError(page);
 	flush_dcache_page(page);
 	kunmap(page);
-	ubifs_err(c, "bad data node (block %u, inode %lu)",
+	ubifs_err("bad data node (block %u, inode %lu)", c->vi.ubi_num,
 		  page_block, inode->i_ino);
 	return -EINVAL;
 }
@@ -803,7 +807,8 @@ out_free:
 	return ret;
 
 out_warn:
-	ubifs_warn(c, "ignoring error %d and skipping bulk-read", err);
+	ubifs_warn("ignoring error %d and skipping bulk-read", c->vi.ubi_num,
+			err);
 	goto out_free;
 
 out_bu_off:
@@ -905,9 +910,8 @@ static int do_writepage(struct page *page, int len)
 	struct ubifs_info *c = inode->i_sb->s_fs_info;
 
 #ifdef UBIFS_DEBUG
-	struct ubifs_inode *ui = ubifs_inode(inode);
 	spin_lock(&ui->ui_lock);
-	ubifs_assert(page->index <= ui->synced_i_size >> PAGE_CACHE_SHIFT);
+	ubifs_assert(page->index <= ui->synced_i_size << PAGE_CACHE_SIZE);
 	spin_unlock(&ui->ui_lock);
 #endif
 
@@ -931,8 +935,8 @@ static int do_writepage(struct page *page, int len)
 	}
 	if (err) {
 		SetPageError(page);
-		ubifs_err(c, "cannot write page %lu of inode %lu, error %d",
-			  page->index, inode->i_ino, err);
+		ubifs_err("cannot write page %lu of inode %lu, error %d",
+			  c->vi.ubi_num, page->index, inode->i_ino, err);
 		ubifs_ro_mode(c, err);
 	}
 
@@ -1364,60 +1368,19 @@ static inline int mctime_update_needed(const struct inode *inode,
 	return 0;
 }
 
-#ifdef CONFIG_UBIFS_ATIME_SUPPORT
-/**
- * ubifs_update_time - update time of inode.
- * @inode: inode to update
- *
- * This function updates time of the inode.
- */
-int ubifs_update_time(struct inode *inode, struct timespec *time,
-			     int flags)
-{
-	struct ubifs_inode *ui = ubifs_inode(inode);
-	struct ubifs_info *c = inode->i_sb->s_fs_info;
-	struct ubifs_budget_req req = { .dirtied_ino = 1,
-			.dirtied_ino_d = ALIGN(ui->data_len, 8) };
-	int iflags = I_DIRTY_TIME;
-	int err, release;
-
-	err = ubifs_budget_space(c, &req);
-	if (err)
-		return err;
-
-	mutex_lock(&ui->ui_mutex);
-	if (flags & S_ATIME)
-		inode->i_atime = *time;
-	if (flags & S_CTIME)
-		inode->i_ctime = *time;
-	if (flags & S_MTIME)
-		inode->i_mtime = *time;
-
-	if (!(inode->i_sb->s_flags & MS_LAZYTIME))
-		iflags |= I_DIRTY_SYNC;
-
-	release = ui->dirty;
-	__mark_inode_dirty(inode, iflags);
-	mutex_unlock(&ui->ui_mutex);
-	if (release)
-		ubifs_release_budget(c, &req);
-	return 0;
-}
-#endif
-
 /**
  * update_ctime - update mtime and ctime of an inode.
+ * @c: UBIFS file-system description object
  * @inode: inode to update
  *
  * This function updates mtime and ctime of the inode if it is not equivalent to
  * current time. Returns zero in case of success and a negative error code in
  * case of failure.
  */
-static int update_mctime(struct inode *inode)
+static int update_mctime(struct ubifs_info *c, struct inode *inode)
 {
 	struct timespec now = ubifs_current_time(inode);
 	struct ubifs_inode *ui = ubifs_inode(inode);
-	struct ubifs_info *c = inode->i_sb->s_fs_info;
 
 	if (mctime_update_needed(inode, &now)) {
 		int err, release;
@@ -1440,13 +1403,18 @@ static int update_mctime(struct inode *inode)
 	return 0;
 }
 
-static ssize_t ubifs_write_iter(struct kiocb *iocb, struct iov_iter *from)
+static ssize_t ubifs_aio_write(struct kiocb *iocb, const struct iovec *iov,
+			       unsigned long nr_segs, loff_t pos)
 {
-	int err = update_mctime(file_inode(iocb->ki_filp));
+	int err;
+	struct inode *inode = iocb->ki_filp->f_mapping->host;
+	struct ubifs_info *c = inode->i_sb->s_fs_info;
+
+	err = update_mctime(c, inode);
 	if (err)
 		return err;
 
-	return generic_file_write_iter(iocb, from);
+	return generic_file_aio_write(iocb, iov, nr_segs, pos);
 }
 
 static int ubifs_set_page_dirty(struct page *page)
@@ -1527,8 +1495,8 @@ static int ubifs_vm_page_mkwrite(struct vm_area_struct *vma,
 	err = ubifs_budget_space(c, &req);
 	if (unlikely(err)) {
 		if (err == -ENOSPC)
-			ubifs_warn(c, "out of space for mmapped file (inode number %lu)",
-				   inode->i_ino);
+			ubifs_warn("out of space for mmapped file (inode number %lu)",
+					c->vi.ubi_num, inode->i_ino);
 		return VM_FAULT_SIGBUS;
 	}
 
@@ -1576,7 +1544,6 @@ out_unlock:
 
 static const struct vm_operations_struct ubifs_file_vm_ops = {
 	.fault        = filemap_fault,
-	.map_pages = filemap_map_pages,
 	.page_mkwrite = ubifs_vm_page_mkwrite,
 	.remap_pages = generic_file_remap_pages,
 };
@@ -1589,9 +1556,6 @@ static int ubifs_file_mmap(struct file *file, struct vm_area_struct *vma)
 	if (err)
 		return err;
 	vma->vm_ops = &ubifs_file_vm_ops;
-#ifdef CONFIG_UBIFS_ATIME_SUPPORT
-	file_accessed(file);
-#endif
 	return 0;
 }
 
@@ -1612,9 +1576,6 @@ const struct inode_operations ubifs_file_inode_operations = {
 	.getxattr    = ubifs_getxattr,
 	.listxattr   = ubifs_listxattr,
 	.removexattr = ubifs_removexattr,
-#ifdef CONFIG_UBIFS_ATIME_SUPPORT
-	.update_time = ubifs_update_time,
-#endif
 };
 
 const struct inode_operations ubifs_symlink_inode_operations = {
@@ -1622,26 +1583,19 @@ const struct inode_operations ubifs_symlink_inode_operations = {
 	.follow_link = ubifs_follow_link,
 	.setattr     = ubifs_setattr,
 	.getattr     = ubifs_getattr,
-	.setxattr    = ubifs_setxattr,
-	.getxattr    = ubifs_getxattr,
-	.listxattr   = ubifs_listxattr,
-	.removexattr = ubifs_removexattr,
-#ifdef CONFIG_UBIFS_ATIME_SUPPORT
-	.update_time = ubifs_update_time,
-#endif
 };
 
 const struct file_operations ubifs_file_operations = {
 	.llseek         = generic_file_llseek,
-	.read           = new_sync_read,
-	.write          = new_sync_write,
-	.read_iter      = generic_file_read_iter,
-	.write_iter     = ubifs_write_iter,
+	.read           = do_sync_read,
+	.write          = do_sync_write,
+	.aio_read       = generic_file_aio_read,
+	.aio_write      = ubifs_aio_write,
 	.mmap           = ubifs_file_mmap,
 	.fsync          = ubifs_fsync,
 	.unlocked_ioctl = ubifs_ioctl,
 	.splice_read	= generic_file_splice_read,
-	.splice_write	= iter_file_splice_write,
+	.splice_write	= generic_file_splice_write,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl   = ubifs_compat_ioctl,
 #endif

@@ -193,7 +193,7 @@ typedef enum
  */
 typedef enum
 {
-    eCSR_SCAN_ABORT_DEFAULT = 1,
+    eCSR_SCAN_ABORT_DEFAULT,
     eCSR_SCAN_ABORT_DUE_TO_BAND_CHANGE, //Scan aborted due to band change
 }eCsrAbortReason;
 
@@ -499,6 +499,7 @@ typedef enum
 #endif
     eCSR_ROAM_FT_START,
     eCSR_ROAM_REMAIN_CHAN_READY,
+    eCSR_ROAM_SEND_ACTION_CNF,
     //this mean error happens before association_start or roaming_start is called.
     eCSR_ROAM_SESSION_OPENED,
     eCSR_ROAM_FT_REASSOC_FAILED,
@@ -540,7 +541,6 @@ typedef enum
     eCSR_ROAM_EXT_CHG_CHNL_IND,
 
     eCSR_ROAM_NDP_STATUS_UPDATE,
-    eCSR_ROAM_UPDATE_SCAN_RESULT,
 }eRoamCmdStatus;
 
 
@@ -1017,7 +1017,6 @@ typedef struct tagCsrRoamProfile
     /* addIe params */
     tSirAddIeParams        addIeParams;
     uint8_t sap_dot11mc;
-    bool do_not_roam;
 }tCsrRoamProfile;
 
 
@@ -1212,7 +1211,6 @@ typedef struct tagCsrConfigParam
     //The actual TX power is the lesser of this value and 11d.
     //If 11d is disable, the lesser of this and default setting.
     tANI_U8 nTxPowerCap;
-    tANI_BOOLEAN allow_tpc_from_ap;
     tANI_U32  statsReqPeriodicity;  //stats request frequency from PE while in full power
     tANI_U32  statsReqPeriodicityInPS;//stats request frequency from PE while in power save
 #ifdef WLAN_FEATURE_VOWIFI_11R
@@ -1458,7 +1456,7 @@ typedef struct tagCsrRoamInfo
         struct ndp_confirm_event ndp_confirm_params;
         struct ndp_responder_rsp_event ndp_responder_rsp_params;
         struct ndp_indication_event ndp_indication_params;
-        struct ndp_initiator_rsp ndp_init_rsp_params;
+        struct ndp_initiator_rsp_event ndp_init_rsp_params;
         struct ndi_create_rsp ndi_create_params;
         struct ndi_delete_rsp ndi_delete_params;
     } ndp;
@@ -1594,11 +1592,6 @@ typedef struct tagCsrPerStaStatsInfo
    tANI_U32 tx_mpdu_in_ampdu_cnt;
 } tCsrPerStaStatsInfo;
 
-struct csr_per_chain_rssi_stats_info {
-  int8 rssi[NUM_CHAINS_MAX];
-  tSirMacAddr peer_mac_addr;
-};
-
 typedef struct tagCsrRoamSetKey
 {
     eCsrEncryptionType encType;
@@ -1655,6 +1648,12 @@ typedef void * tScanResultHandle;
 #define CSR_INVALID_SCANRESULT_HANDLE       (NULL)
 
 #ifdef WLAN_FEATURE_ROAM_SCAN_OFFLOAD
+typedef enum
+{
+    REASSOC     = 0,
+    FASTREASSOC = 1
+}handoff_src;
+
 typedef struct tagCsrHandoffRequest
 {
     tCsrBssid bssid;
@@ -1662,13 +1661,6 @@ typedef struct tagCsrHandoffRequest
     tANI_U8 src;     /* To check if its a REASSOC or a FASTREASSOC IOCTL */
 }tCsrHandoffRequest;
 #endif
-
-typedef enum
-{
-    REASSOC     = 0,
-    FASTREASSOC = 1,
-    CONNECT_CMD_USERSPACE = 2,
-}handoff_src;
 
 #if defined(FEATURE_WLAN_ESE) && defined(FEATURE_WLAN_ESE_UPLOAD)
 typedef struct tagCsrEseBeaconReqParams

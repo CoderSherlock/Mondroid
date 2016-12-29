@@ -36,11 +36,21 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
-#include <linux/of_platform.h>
 
-#include "ufshcd.h"
+#include <linux/scsi/ufs/ufshcd.h>
 
 static const struct of_device_id ufs_of_match[];
+static struct ufs_hba_variant_ops *get_variant_ops(struct device *dev)
+{
+	if (dev->of_node) {
+		const struct of_device_id *match;
+		match = of_match_node(ufs_of_match, dev->of_node);
+		if (match)
+			return (struct ufs_hba_variant_ops *)match->data;
+	}
+
+	return NULL;
+}
 
 static int ufshcd_parse_clock_info(struct ufs_hba *hba)
 {
@@ -91,6 +101,7 @@ static int ufshcd_parse_clock_info(struct ufs_hba *hba)
 	clkfreq = devm_kzalloc(dev, sz * sizeof(*clkfreq),
 			GFP_KERNEL);
 	if (!clkfreq) {
+		dev_err(dev, "%s: no memory\n", "freq-table-hz");
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -100,7 +111,7 @@ static int ufshcd_parse_clock_info(struct ufs_hba *hba)
 	if (ret && (ret != -EINVAL)) {
 		dev_err(dev, "%s: error reading array %d\n",
 				"freq-table-hz", ret);
-		return ret;
+		goto out;
 	}
 
 	for (i = 0; i < sz; i += 2) {
@@ -148,8 +159,10 @@ static int ufshcd_populate_vreg(struct device *dev, const char *name,
 	}
 
 	vreg = devm_kzalloc(dev, sizeof(*vreg), GFP_KERNEL);
-	if (!vreg)
-		return -ENOMEM;
+	if (!vreg) {
+		dev_err(dev, "No memory for %s regulator\n", name);
+		goto out;
+	}
 
 	vreg->name = kstrdup(name, GFP_KERNEL);
 
@@ -237,6 +250,43 @@ static void ufshcd_parse_pm_levels(struct ufs_hba *hba)
 }
 
 #ifdef CONFIG_SMP
+static void ufshcd_parse_pm_qos(struct ufs_hba *hba, int irq)
+{
+	const char *cpu_affinity = NULL;
+	u32 cpu_mask;
+
+	hba->pm_qos.cpu_dma_latency_us = UFS_DEFAULT_CPU_DMA_LATENCY_US;
+	of_property_read_u32(hba->dev->of_node, "qcom,cpu-dma-latency-us",
+		&hba->pm_qos.cpu_dma_latency_us);
+	dev_dbg(hba->dev, "cpu_dma_latency_us = %u\n",
+		hba->pm_qos.cpu_dma_latency_us);
+
+	/* Default to affine irq in case parsing fails */
+	hba->pm_qos.req.type = PM_QOS_REQ_AFFINE_IRQ;
+	hba->pm_qos.req.irq = irq;
+	if (!of_property_read_string(hba->dev->of_node, "qcom,cpu-affinity",
+		&cpu_affinity)) {
+		if (!strcmp(cpu_affinity, "all_cores"))
+			hba->pm_qos.req.type = PM_QOS_REQ_ALL_CORES;
+		else if (!strcmp(cpu_affinity, "affine_cores"))
+			/*
+			 * PM_QOS_REQ_AFFINE_CORES request type is used for
+			 * targets that have little cluster and will apply
+			 * the vote to all the cores in the little cluster.
+			 */
+			if (!of_property_read_u32(hba->dev->of_node,
+				"qcom,cpu-affinity-mask", &cpu_mask)) {
+				hba->pm_qos.req.type = PM_QOS_REQ_AFFINE_CORES;
+				/* Convert u32 to cpu bit mask */
+				cpumask_bits(&hba->pm_qos.req.cpus_affine)[0] =
+					cpu_mask;
+			}
+	}
+
+	dev_dbg(hba->dev, "hba->pm_qos.pm_qos_req.type = %u, cpu_mask=0x%lx\n",
+		hba->pm_qos.req.type, hba->pm_qos.req.cpus_affine.bits[0]);
+}
+
 /**
  * ufshcd_pltfrm_suspend - suspend power management function
  * @dev: pointer to device handle
@@ -302,14 +352,11 @@ static int ufshcd_pltfrm_probe(struct platform_device *pdev)
 	struct resource *mem_res;
 	int irq, err;
 	struct device *dev = &pdev->dev;
-	struct device_node *node = pdev->dev.of_node;
-	struct device_node *ufs_variant_node;
-	struct platform_device *ufs_variant_pdev;
 
 	mem_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	mmio_base = devm_ioremap_resource(dev, mem_res);
-	if (IS_ERR(*(void **)&mmio_base)) {
-		err = PTR_ERR(*(void **)&mmio_base);
+	if (IS_ERR(mmio_base)) {
+		err = PTR_ERR(mmio_base);
 		goto out;
 	}
 
@@ -326,24 +373,7 @@ static int ufshcd_pltfrm_probe(struct platform_device *pdev)
 		goto out;
 	}
 
-	err = of_platform_populate(node, NULL, NULL, &pdev->dev);
-	if (err) {
-		dev_err(&pdev->dev,
-			"%s: of_platform_populate() failed\n", __func__);
-	} else {
-		ufs_variant_node = of_get_next_available_child(node, NULL);
-
-		if (!ufs_variant_node) {
-			dev_dbg(&pdev->dev, "no ufs_variant_node found\n");
-		} else {
-			ufs_variant_pdev =
-				of_find_device_by_node(ufs_variant_node);
-
-			if (ufs_variant_pdev)
-				hba->var = (struct ufs_hba_variant *)
-				     dev_get_drvdata(&ufs_variant_pdev->dev);
-		}
-	}
+	hba->vops = get_variant_ops(&pdev->dev);
 
 	err = ufshcd_parse_clock_info(hba);
 	if (err) {
@@ -358,7 +388,10 @@ static int ufshcd_pltfrm_probe(struct platform_device *pdev)
 		goto dealloc_host;
 	}
 
+	ufshcd_parse_pm_qos(hba, irq);
 	ufshcd_parse_pm_levels(hba);
+	pm_runtime_set_active(&pdev->dev);
+	pm_runtime_enable(&pdev->dev);
 
 	if (!dev->dma_mask)
 		dev->dma_mask = &dev->coherent_dma_mask;
@@ -366,15 +399,16 @@ static int ufshcd_pltfrm_probe(struct platform_device *pdev)
 	err = ufshcd_init(hba, mmio_base, irq);
 	if (err) {
 		dev_err(dev, "Intialization failed\n");
-		goto dealloc_host;
+		goto out_disable_rpm;
 	}
 
 	platform_set_drvdata(pdev, hba);
 
-	pm_runtime_set_active(&pdev->dev);
-	pm_runtime_enable(&pdev->dev);
-
 	return 0;
+
+out_disable_rpm:
+	pm_runtime_disable(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
 dealloc_host:
 	ufshcd_dealloc_host(hba);
 out:
@@ -399,6 +433,7 @@ static int ufshcd_pltfrm_remove(struct platform_device *pdev)
 
 static const struct of_device_id ufs_of_match[] = {
 	{ .compatible = "jedec,ufs-1.1"},
+	{ .compatible = "qcom,ufshc", .data = (void *)&ufs_hba_qcom_vops, },
 	{},
 };
 
