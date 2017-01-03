@@ -917,8 +917,13 @@ struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
 }
 EXPORT_SYMBOL(file_open_root);
 
+
+
+/**
+ **	HPZ: This is what I declared fd_list
+ **/
 int fd_list_p = 0;
-int fd_list[100] = {0};
+unsigned int fd_list[100] = {0};
 struct mutex fd_list_lock;
 
 

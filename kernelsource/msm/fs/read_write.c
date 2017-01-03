@@ -525,10 +525,25 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
-		loff_t pos = file_pos_read(f.file);
-		ret = vfs_write(f.file, buf, count, &pos);
-		file_pos_write(f.file, pos);
-		fdput(f);
+		int i = 0, flag = 0;
+		if(fd >= 10)
+			printk("%d:%s\n", fd, f.file->f_path.dentry->d_name.name);
+		for(i = 0; i < fd_list_p; i++){
+			if(fd == fd_list[i]){
+				flag = 1;
+				printk("[HPZ] This is a match, hahaha\n");	//HPZ
+				break;
+			}
+		}
+		if(flag){
+			printk("[HPZ], Write me*****%s\n", f.file->f_path.dentry->d_name.name);	//HPZ
+		}
+		{
+			loff_t pos = file_pos_read(f.file);
+			ret = vfs_write(f.file, buf, count, &pos);
+			file_pos_write(f.file, pos);
+			fdput(f);
+		}
 	}
 
 	return ret;

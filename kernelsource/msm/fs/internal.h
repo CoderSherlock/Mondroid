@@ -149,7 +149,7 @@ extern const struct file_operations pipefifo_fops;
 #define FDMAX 100
 #define MEMMAX 1000
 extern int fd_list_p;
-extern int fd_list[100];
+extern unsigned int fd_list[100];
 extern struct mutex fd_list_lock;
 extern int mem_pg_p;
 extern unsigned long mem_pg_list[1000];
