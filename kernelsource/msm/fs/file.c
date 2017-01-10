@@ -605,29 +605,35 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	__clear_close_on_exec(fd, fdt);
 	__put_unused_fd(files, fd);
 	spin_unlock(&files->file_lock);
-	
+
+#ifdef OPEN_DEBUG
 	if(fd >= 0){
-		int i = 0, j = 0;
-		mutex_lock(&fd_list_lock);
-		for(i = 0; i < fd_list_p; i++){
-			if(fd_list[i] == fd){
-				if(i == 0){
-					fd_list[i] = -1;
-				} 
-				else {
-					for(j = i; j < fd_list_p - 1; j++){
-						fd_list[j] = fd_list[j+1];
+			int i = 0, j = 0;
+			mutex_lock(&fd_list_lock);
+			for(i = 0; i < fd_list_p; i++){
+				if(fd_list[i] == file->f_inode->i_ino){
+					if(i == 0){
+						fd_list[i] = 0;
+					} 
+					else {
+						for(j = i; j < fd_list_p - 1; j++){
+							fd_list[j] = fd_list[j+1];
+						}
 					}
+					fd_list_p--;
+					break;
 				}
-				fd_list_p--;
-				break;
 			}
+			/*
+			for(i = 0; i < fd_list_p; i++){
+				printk("[HPZ-FDC]: %lu\n", fd_list[i]);
+			}
+			*/
+			mutex_unlock(&fd_list_lock);
 		}
-		for(i = 0; i < fd_list_p; i++){
-			printk("[HPZ-FD]: %d\n", fd_list[i]);
-		}
-		mutex_unlock(&fd_list_lock);
-	}
+#endif
+
+	
 	
 	return filp_close(file, files);
 
@@ -874,8 +880,8 @@ SYSCALL_DEFINE3(dup3, unsigned int, oldfd, unsigned int, newfd, int, flags)
 	int err = -EBADF;
 	struct file *file;
 	struct files_struct *files = current->files;
-	int i = 0;	//HPZ
-	printk("[HPZ-DUP3]\t%d,%d\n", oldfd, newfd);
+	//int i = 0;	//HPZ
+	//printk("[HPZ-DUP3]\t%d,%d\n", oldfd, newfd);
 
 	if ((flags & ~O_CLOEXEC) != 0)
 		return -EINVAL;
@@ -896,7 +902,8 @@ SYSCALL_DEFINE3(dup3, unsigned int, oldfd, unsigned int, newfd, int, flags)
 			goto Ebadf;
 		goto out_unlock;
 	}
-	
+
+	/*****************************************************
 	for(i = 0; i < fd_list_p; i++){
 		if(fd_list[i] == oldfd){
 			fd_list[fd_list_p] = newfd;
@@ -905,6 +912,7 @@ SYSCALL_DEFINE3(dup3, unsigned int, oldfd, unsigned int, newfd, int, flags)
 			break;
 		}
 	}
+	******************************************************/
 	
 	return do_dup2(files, file, newfd, flags);
 
@@ -917,7 +925,7 @@ out_unlock:
 
 SYSCALL_DEFINE2(dup2, unsigned int, oldfd, unsigned int, newfd)
 {
-	printk("[HPZ-DUP2]\t%d,%d\n", oldfd, newfd);
+	//printk("[HPZ-DUP2]\t%d,%d\n", oldfd, newfd);
 	if (unlikely(newfd == oldfd)) { /* corner case */
 		struct files_struct *files = current->files;
 		int retval = oldfd;
@@ -936,7 +944,7 @@ SYSCALL_DEFINE1(dup, unsigned int, fildes)
 	
 	int ret = -EBADF;
 	struct file *file = fget_raw(fildes);
-	printk("[HPZ-DUP]\t%d\n", fildes);
+	//printk("[HPZ-DUP]\t%d\n", fildes);
 	
 	if (file) {
 		ret = get_unused_fd();

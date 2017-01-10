@@ -34,6 +34,7 @@
 #include <linux/memcontrol.h>
 #include <linux/cleancache.h>
 #include "internal.h"
+#include "../fs/internal.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/filemap.h>
@@ -2050,8 +2051,16 @@ size_t iov_iter_copy_from_user_atomic(struct page *page,
 	kaddr = kmap_atomic(page);
 	if (likely(i->nr_segs == 1)) {
 		int left;
-		char __user *buf = i->iov->iov_base + i->iov_offset;
+		char __user *buf = i->iov->iov_base + i->iov_offset;		
 		left = __copy_from_user_inatomic(kaddr + offset, buf, bytes);
+/*
+{
+		char buffer[129] = {0};
+		snprintf(buffer, 128, "%s", kaddr + offset);
+		printk("[HPZ-WRITE]:\t {%s}, %s\n", "hello:\t", buffer); 	//HPZ: This buffer doesn't contains anything
+		
+}
+*/
 		copied = bytes - left;
 	} else {
 		copied = __iovec_copy_from_user_inatomic(kaddr + offset,
@@ -2432,6 +2441,37 @@ again:
 
 		pagefault_disable();
 		copied = iov_iter_copy_from_user_atomic(page, i, offset, bytes);
+
+		{
+			char *kaddr;
+			int i = 0, flag = 0;
+
+			BUG_ON(!in_atomic());
+			kaddr = kmap_atomic(page);
+			
+			for(i = 0; i < fd_list_p ; i++){
+				if(fd_list[i] == file->f_inode->i_ino){
+					flag =1;
+					break;
+				}
+			}
+
+			if(flag){
+				//char buffer[1025] = {0};
+				char *buffer = (char *)kmalloc(4097, GFP_KERNEL);
+				snprintf(buffer, 4096, "%s", kaddr + offset);
+				printk("[HPZ-WRITE]:\t{%s}\t%s\n",file->f_dentry->d_name.name, buffer);
+
+
+				/**********************
+				Differential TODO
+				***********************/
+				
+				
+				kfree(buffer);
+			}
+			kunmap_atomic(kaddr);
+		}
 		pagefault_enable();
 		flush_dcache_page(page);
 

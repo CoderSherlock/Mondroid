@@ -923,7 +923,7 @@ EXPORT_SYMBOL(file_open_root);
  **	HPZ: This is what I declared fd_list
  **/
 int fd_list_p = 0;
-unsigned int fd_list[100] = {0};
+unsigned long fd_list[FDMAX] = {0};
 struct mutex fd_list_lock;
 
 
@@ -931,17 +931,17 @@ struct mutex fd_list_lock;
 long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 {
 	struct open_flags op;
+	struct file *f;
 	int lookup = build_open_flags(flags, mode, &op);
 	struct filename *tmp = getname(filename);
 	int fd = PTR_ERR(tmp);
-#define OPEN_DEBUG
+
 #ifdef OPEN_DEBUG
 	
 	
 	char basename[13] = "/data/media/0";
 	int length = strlen(filename);
 	int record = 0;
-	mem_pg_list[100]=1L;
 	mutex_init(&fd_list_lock);
 	if((memcmp(filename, basename, 13) == 0) && \
 			(filename[length-4] == '.' || filename[length-5] == '.')){
@@ -952,7 +952,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 	if (!IS_ERR(tmp)) {
 		fd = get_unused_fd_flags(flags);
 		if (fd >= 0) {
-			struct file *f = do_filp_open(dfd, tmp, &op, lookup);
+			f = do_filp_open(dfd, tmp, &op, lookup);
 			if (IS_ERR(f)) {
 				put_unused_fd(fd);
 				fd = PTR_ERR(f);
@@ -968,13 +968,13 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 		int i = 0;
 		mutex_lock(&fd_list_lock);
 		if(fd_list_p != FDMAX){
-			fd_list[fd_list_p] = fd;
+			fd_list[fd_list_p] = f->f_inode->i_ino;
 			fd_list_p ++;
 		}else{
 			printk("FD is full");
 		}
 		for(i = 0; i < fd_list_p; i++){
-			printk("[HPZ-FD]: %d\n", fd_list[i]);
+			printk("[HPZ-FDO]: %lu\n", fd_list[i]);
 		}
 		mutex_unlock(&fd_list_lock);
 	}

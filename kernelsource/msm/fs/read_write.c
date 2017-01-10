@@ -525,6 +525,7 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
+		/***********************************************
 		int i = 0, flag = 0;
 		if(fd >= 10)
 			printk("%d:%s\n", fd, f.file->f_path.dentry->d_name.name);
@@ -538,6 +539,7 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 		if(flag){
 			printk("[HPZ], Write me*****%s\n", f.file->f_path.dentry->d_name.name);	//HPZ
 		}
+		************************************************/
 		{
 			loff_t pos = file_pos_read(f.file);
 			ret = vfs_write(f.file, buf, count, &pos);
