@@ -1292,10 +1292,6 @@ readpage:
 		 */
 		ClearPageError(page);
 		
-		//for(fd_p_tmp = 0; fd_p_tmp < fd_list_p ; fd_p_tmp++ ){
-			//if (fd_list[fd_p_tmp] == page->mapping->
-			printk("[HPZ]\tPAGE:%lu----------HPZ\n", page->index);
-		//}
 		/* Start the actual read. The read will unlock the page. */
 		error = mapping->a_ops->readpage(filp, page);
 		
@@ -2458,8 +2454,10 @@ again:
 
 			if(flag){
 				//char buffer[1025] = {0};
-				char *buffer = (char *)kmalloc(4097, GFP_KERNEL);
-				snprintf(buffer, 4096, "%s", kaddr + offset);
+				char *buffer = (char *)kmalloc(bytes+1, GFP_KERNEL);
+				buffer[bytes] = '\0';
+				snprintf(buffer, bytes, "%s", kaddr + offset);
+				//printk("[HPZ_WRITE]:\t%lu\n", bytes);
 				printk("[HPZ-WRITE]:\t{%s}\t%s\n",file->f_dentry->d_name.name, buffer);
 
 
