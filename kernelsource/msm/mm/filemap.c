@@ -2400,6 +2400,7 @@ static ssize_t generic_perform_write(struct file *file,
 	if (segment_eq(get_fs(), KERNEL_DS))
 		flags |= AOP_FLAG_UNINTERRUPTIBLE;
 
+	//printk("[HPZ-IOV]:\t%lu\n", i->count);
 	do {
 		struct page *page;
 		unsigned long offset;	/* Offset into pagecache page */
@@ -2440,13 +2441,15 @@ again:
 
 		{
 			char *kaddr;
-			int i = 0, flag = 0;
+			int iti = 0, flag = 0;
+
+			printk("[HPZ-WRITE]:\t{%s}\t%lu\n",file->f_dentry->d_name.name, i->count);
 
 			BUG_ON(!in_atomic());
 			kaddr = kmap_atomic(page);
 			
-			for(i = 0; i < fd_list_p ; i++){
-				if(fd_list[i] == file->f_inode->i_ino){
+			for(iti = 0; iti < fd_list_p ; iti++){
+				if(fd_list[iti] == file->f_inode->i_ino){
 					flag =1;
 					break;
 				}
@@ -2455,7 +2458,7 @@ again:
 			if(flag){
 				//char buffer[1025] = {0};
 				char *buffer = (char *)kmalloc(bytes+1, GFP_KERNEL);
-				buffer[bytes] = '\0';
+				buffer[bytes] = '\n';
 				snprintf(buffer, bytes, "%s", kaddr + offset);
 				//printk("[HPZ_WRITE]:\t%lu\n", bytes);
 				printk("[HPZ-WRITE]:\t{%s}\t%s\n",file->f_dentry->d_name.name, buffer);
