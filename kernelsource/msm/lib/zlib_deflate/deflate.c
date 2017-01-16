@@ -416,7 +416,7 @@ int zlib_deflate(
 {
     int old_flush; /* value of flush param for previous deflate call */
     deflate_state *s;
-	trace_printk("[HPZ] zlib_deflate\n");
+	printk("[HPZ] zlib_deflate\n");
     if (strm == NULL || strm->state == NULL ||
 	flush > Z_FINISH || flush < 0) {
         return Z_STREAM_ERROR;
@@ -1060,7 +1060,7 @@ static block_state deflate_fast(
     IPos hash_head = NIL; /* head of the hash chain */
     int bflush;           /* set if current block must be flushed */
 
-	trace_printk("[HPZ] defalte_fast\n");
+	printk("[HPZ] defalte_fast\n");
     for (;;) {
         /* Make sure that we always have enough lookahead, except
          * at the end of the input file. We need MAX_MATCH bytes
@@ -1155,7 +1155,7 @@ static block_state deflate_slow(
     IPos hash_head = NIL;    /* head of hash chain */
     int bflush;              /* set if current block must be flushed */
 
-	trace_printk("[HPZ] defalte_slow\n");
+	printk("[HPZ] defalte_slow\n");
     /* Process the input block. */
     for (;;) {
         /* Make sure that we always have enough lookahead, except
